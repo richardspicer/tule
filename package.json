@@ -18,7 +18,7 @@
     "build": "corepack pnpm --filter @tule/desktop build",
     "check": "powershell -NoProfile -ExecutionPolicy Bypass -File .\\scripts\\check.ps1",
     "check:frontend": "corepack pnpm --filter @tule/desktop check",
-    "desktop:build": "corepack pnpm --filter @tule/desktop tauri build",
+    "desktop:build": "corepack pnpm --filter @tule/desktop tauri build -- --locked",
     "desktop:dev": "corepack pnpm --filter @tule/desktop tauri dev"
   },
   "devDependencies": {}

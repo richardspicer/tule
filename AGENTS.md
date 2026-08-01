@@ -14,6 +14,8 @@ These instructions apply to the entire repository.
 
 ## Development Contract
 
+- Follow `CONTRIBUTING.md` and preserve the boundaries in
+  `docs/architecture.md`.
 - Respect `rust-toolchain.toml` and `.node-version`.
 - Use the package-manager version declared in `package.json` through Corepack.
 - Commit `Cargo.lock` and `pnpm-lock.yaml` for reproducible application builds.

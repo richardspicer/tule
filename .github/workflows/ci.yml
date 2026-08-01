@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    name: Validate and build Windows desktop
+    runs-on: windows-2025
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .node-version
+          check-latest: false
+          package-manager-cache: false
+
+      - name: Enable Corepack
+        shell: pwsh
+        run: corepack enable
+
+      - name: Verify pinned toolchains
+        shell: pwsh
+        run: |
+          node --version
+          corepack pnpm --version
+          rustc --version
+          cargo --version
+
+      - name: Install frontend dependencies
+        shell: pwsh
+        run: corepack pnpm install --frozen-lockfile
+
+      - name: Run repository checks
+        shell: pwsh
+        run: corepack pnpm check
+
+      - name: Build native desktop application
+        shell: pwsh
+        run: corepack pnpm desktop:build

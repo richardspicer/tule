@@ -70,8 +70,10 @@ corepack pnpm check
 corepack pnpm build
 ```
 
-The aggregate check runs the frontend type check plus Rust formatting, Clippy
-with warnings denied, and all Rust tests against the locked dependency graph.
+The aggregate check runs frontend formatting, type-aware linting, type checks,
+and tests plus Rust formatting, Clippy with warnings denied, and all Rust tests
+against the locked dependency graph. GitHub CI runs the same check on Windows
+and also builds the configured native installer.
 The equivalent individual Rust commands are:
 
 ```powershell
@@ -83,7 +85,7 @@ cargo test --workspace --locked
 To validate a release-mode desktop executable without creating an installer:
 
 ```powershell
-corepack pnpm --filter @tule/desktop tauri build --no-bundle
+corepack pnpm --filter @tule/desktop tauri build --no-bundle -- --locked
 ```
 
 ## Detection notes

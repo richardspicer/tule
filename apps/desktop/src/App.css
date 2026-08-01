@@ -1,7 +1,12 @@
 :root {
   color-scheme: light dark;
   font-family:
-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+    Inter,
+    ui-sans-serif,
+    system-ui,
+    -apple-system,
+    BlinkMacSystemFont,
+    "Segoe UI",
     sans-serif;
   color: #252820;
   background: #edece4;
@@ -51,9 +56,10 @@ body {
   color: var(--ink);
   background:
     radial-gradient(circle at 8% 8%, rgba(116, 145, 101, 0.18), transparent 32rem),
-    radial-gradient(circle at 92% 80%, rgba(171, 150, 104, 0.14), transparent 28rem),
-    var(--page);
-  transition: color 180ms ease, background-color 180ms ease;
+    radial-gradient(circle at 92% 80%, rgba(171, 150, 104, 0.14), transparent 28rem), var(--page);
+  transition:
+    color 180ms ease,
+    background-color 180ms ease;
 }
 
 button {

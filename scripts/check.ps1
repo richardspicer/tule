@@ -70,10 +70,16 @@ $previousLocation = Get-Location
 try {
     Set-Location -LiteralPath $repoRoot
 
+    Invoke-CheckedCommand -Label 'Frontend formatting' -Command $corepack `
+        -Arguments @('pnpm', '--filter', '@tule/desktop', 'format:check')
     Invoke-CheckedCommand -Label 'Rust formatting' -Command $cargo `
         -Arguments @('fmt', '--all', '--', '--check')
+    Invoke-CheckedCommand -Label 'Frontend lint' -Command $corepack `
+        -Arguments @('pnpm', '--filter', '@tule/desktop', 'lint')
     Invoke-CheckedCommand -Label 'Frontend type check' -Command $corepack `
-        -Arguments @('pnpm', '--filter', '@tule/desktop', 'check')
+        -Arguments @('pnpm', '--filter', '@tule/desktop', 'typecheck')
+    Invoke-CheckedCommand -Label 'Frontend tests' -Command $corepack `
+        -Arguments @('pnpm', '--filter', '@tule/desktop', 'test')
     Invoke-CheckedCommand -Label 'Rust Clippy' -Command $cargo `
         -Arguments @('clippy', '--workspace', '--all-targets', '--locked', '--', '-D', 'warnings')
     Invoke-CheckedCommand -Label 'Rust tests' -Command $cargo `

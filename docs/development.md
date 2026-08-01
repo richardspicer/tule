@@ -2,11 +2,12 @@
 
 Tule's Windows desktop environment is pinned so the same commit can be built on the laptop and a separate workstation.
 The guided setup supports x64 and ARM64 Windows workstations.
+Windows is the supported development and release platform for the MVP. macOS and Linux support are deferred until after the MVP.
 
 | Tool | Required version or feature |
 | --- | --- |
 | Rust | 1.97.1 with the native Windows MSVC target, `rustfmt`, and `clippy` |
-| Project Node.js | Exactly 24.18.0, installed on the host or provisioned in the repository |
+| Project Node.js | Exactly 24.18.1, installed on the host or provisioned in the repository |
 | Bootstrap Node.js | Node.js 22.13 or newer within 22.x, or Node.js 24.x, with Corepack |
 | pnpm | Exactly 11.4.0 through Corepack and the committed `packageManager` field |
 | Visual Studio | Desktop development with C++, the compiler for the host architecture, and a Windows SDK |
@@ -15,7 +16,7 @@ The guided setup supports x64 and ARM64 Windows workstations.
 
 The source-of-truth pins are `rust-toolchain.toml`, `.node-version`, and the root `package.json`. Lockfiles are committed for application builds.
 
-Node.js 24.18.0 may be installed system-wide. Alternatively, Node.js 22.13 or newer within the 22.x release line, or Node.js 24.x, can bootstrap Corepack and pnpm 11. During the first online locked install, pnpm follows the committed `devEngines.runtime` policy and provisions Node.js 24.18.0 under `node_modules\.bin`. Subsequent repository commands use that exact managed runtime. If the managed runtime is absent, the doctor requires the host Node.js runtime to be exactly 24.18.0. Node.js 25 and newer do not bundle Corepack and are outside this bootstrap path.
+Node.js 24.18.1 may be installed system-wide. Alternatively, Node.js 22.13 or newer within the 22.x release line, or Node.js 24.x, can bootstrap Corepack and pnpm 11. During the first online locked install, pnpm follows the committed `devEngines.runtime` policy and provisions Node.js 24.18.1 under `node_modules\.bin`. Subsequent repository commands use that exact managed runtime. If the managed runtime is absent, the doctor requires the host Node.js runtime to be exactly 24.18.1. Node.js 25 and newer do not bundle Corepack and are outside this bootstrap path.
 
 Repository scripts invoke `corepack pnpm`. Corepack selects pnpm 11.4.0 and verifies it against the integrity-pinned `packageManager` field. The doctor deliberately does not execute an arbitrary direct `pnpm` command found on `PATH`; it reports that command as a warning because it does not control the package-manager version used by the repository scripts.
 
@@ -45,7 +46,7 @@ Follow only the remediation for failed checks, restart the terminal when a tool 
 
 ## Prepare a new workstation
 
-1. Install [Git for Windows](https://git-scm.com/download/win). Install Node.js 24.18.0 from the [Node.js downloads](https://nodejs.org/en/download), or use Node.js 22.13+ within 22.x or Node.js 24.x only to bootstrap the managed runtime during the first online install.
+1. Install [Git for Windows](https://git-scm.com/download/win). Install Node.js 24.18.1 from the [Node.js downloads](https://nodejs.org/en/download), or use Node.js 22.13+ within 22.x or Node.js 24.x only to bootstrap the managed runtime during the first online install.
 2. Install [rustup](https://rustup.rs/) with the native MSVC host. The committed toolchain file selects Rust 1.97.1. If the doctor reports it missing, use its exact `rustup` remediation command.
 3. Install [Visual Studio Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/). In Visual Studio Installer, select **Desktop development with C++**, the MSVC compiler for the workstation architecture, and a current Windows SDK.
 4. Install or repair the [Microsoft Evergreen WebView2 Runtime](https://developer.microsoft.com/en-us/microsoft-edge/webview2/consumer/) if the doctor cannot find a registered runtime.
@@ -62,6 +63,10 @@ Follow only the remediation for failed checks, restart the terminal when a tool 
 The direct pnpm shim does not need to be enabled. Provider credentials are not part of the repository; configure them separately through the operating-system credential store when provider support is introduced.
 
 ## Validate the foundation
+
+Run repository checks only from a trusted checkout. The checks execute project
+and dependency code, may download locked dependencies when the local caches are
+empty, and create normal build, test, and cache artifacts.
 
 From the repository root, run the aggregate check and production web build:
 

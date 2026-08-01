@@ -5,7 +5,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $ExpectedRustVersion = '1.97.1'
-$ExpectedNodeVersion = '24.18.0'
+$ExpectedNodeVersion = '24.18.1'
 $ExpectedPnpmVersion = '11.4.0'
 $BootstrapNodeRequirement = 'Node.js 22.13+ (22.x) or Node.js 24.x with Corepack'
 $WebView2ClientId = '{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}'

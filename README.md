@@ -11,7 +11,9 @@ automation.
 
 ## Development
 
-The supported Windows toolchain and fresh-clone setup are documented in
+Windows is the supported development and release platform for the MVP. macOS
+and Linux support are deferred until after the MVP. The supported Windows
+toolchain and fresh-clone setup are documented in
 [`docs/development.md`](docs/development.md). Once prerequisites are installed:
 
 ```powershell

@@ -925,10 +925,17 @@ try {
     $registeredInstances = @()
     $allInstanceRoots = [System.Collections.Generic.List[string]]::new()
     if ($null -ne $vsWhere) {
-        $registeredInstances = @(Get-VsWhereInstances -VsWhere $vsWhere -RequiredComponents @(
-                'Microsoft.VisualStudio.Workload.VCTools',
-                $platform.VcComponent
-            ))
+        $registeredInstances = @(
+            foreach ($workloadComponent in @(
+                    'Microsoft.VisualStudio.Workload.VCTools',
+                    'Microsoft.VisualStudio.Workload.NativeDesktop'
+                )) {
+                Get-VsWhereInstances -VsWhere $vsWhere -RequiredComponents @(
+                    $workloadComponent,
+                    $platform.VcComponent
+                )
+            }
+        )
         foreach ($instance in @(Get-VsWhereInstances -VsWhere $vsWhere)) {
             $installationPath = [string](Get-JsonProperty -InputObject $instance -Name 'installationPath')
             if (-not [string]::IsNullOrWhiteSpace($installationPath)) {
@@ -978,7 +985,7 @@ try {
         else {
             Add-Result -Status 'FAIL' -Name 'Visual Studio C++ tools' -Found 'not found or incomplete' `
                 -Required 'Desktop development with C++ and the matching MSVC compiler' `
-                -Remediation 'Install or modify Visual Studio Build Tools with Desktop development with C++ and the matching MSVC compiler component.'
+                -Remediation 'Install or modify Visual Studio Community or Build Tools with Desktop development with C++ and the matching MSVC compiler component.'
         }
     }
 

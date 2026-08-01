@@ -48,7 +48,7 @@ Follow only the remediation for failed checks, restart the terminal when a tool 
 
 1. Install [Git for Windows](https://git-scm.com/download/win). Install Node.js 24.18.1 from the [Node.js downloads](https://nodejs.org/en/download), or use Node.js 22.13+ within 22.x or Node.js 24.x only to bootstrap the managed runtime during the first online install.
 2. Install [rustup](https://rustup.rs/) with the native MSVC host. The committed toolchain file selects Rust 1.97.1. If the doctor reports it missing, use its exact `rustup` remediation command.
-3. Install [Visual Studio Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/). In Visual Studio Installer, select **Desktop development with C++**, the MSVC compiler for the workstation architecture, and a current Windows SDK.
+3. Install [Visual Studio Community or Build Tools](https://visualstudio.microsoft.com/downloads/). In Visual Studio Installer, select **Desktop development with C++**, the MSVC compiler for the workstation architecture, and a current Windows SDK.
 4. Install or repair the [Microsoft Evergreen WebView2 Runtime](https://developer.microsoft.com/en-us/microsoft-edge/webview2/consumer/) if the doctor cannot find a registered runtime.
 5. From the repository root, hydrate the pinned package manager, locked dependencies, and managed Node.js runtime while online:
 

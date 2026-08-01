@@ -24,3 +24,12 @@ Run the read-only environment check at any time:
 ```powershell
 pwsh -File .\scripts\doctor.ps1
 ```
+
+## Engineering Standards
+
+Contribution, commenting, testing, and review expectations are documented in
+[`CONTRIBUTING.md`](CONTRIBUTING.md). The current application boundaries are
+described in [`docs/architecture.md`](docs/architecture.md).
+
+Report suspected vulnerabilities privately by following
+[`SECURITY.md`](SECURITY.md), not through a public issue.

@@ -1,9 +1,12 @@
 //! Tauri-independent domain and application behavior for Tule.
+#![warn(missing_docs)]
 
 /// Stable application identity exposed to Tule hosts.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApplicationInfo {
+    /// Human-readable product name.
     pub name: String,
+    /// Product version supplied by the core crate package metadata.
     pub version: String,
 }
 

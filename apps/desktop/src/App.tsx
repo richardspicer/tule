@@ -1,21 +1,14 @@
-import { invoke } from "@tauri-apps/api/core";
 import { useEffect, useState } from "react";
 import "./App.css";
-
-type ApplicationInfo = {
-  name: string;
-  version: string;
-};
+import { getApplicationInfo, type ApplicationInfo } from "./platform/application";
+import {
+  applyThemePreference,
+  getNextThemePreference,
+  loadThemePreference,
+  type ThemePreference,
+} from "./theme";
 
 type ConnectionState = "checking" | "connected" | "unavailable";
-type ThemePreference = "system" | "light" | "dark";
-
-const themeOrder: ThemePreference[] = ["system", "light", "dark"];
-
-function loadThemePreference(): ThemePreference {
-  const savedTheme = window.localStorage.getItem("tule-theme");
-  return savedTheme === "light" || savedTheme === "dark" ? savedTheme : "system";
-}
 
 function App() {
   const [applicationInfo, setApplicationInfo] = useState<ApplicationInfo | null>(null);
@@ -25,7 +18,7 @@ function App() {
   useEffect(() => {
     let active = true;
 
-    invoke<ApplicationInfo>("get_application_info")
+    getApplicationInfo()
       .then((info) => {
         if (active) {
           setApplicationInfo(info);
@@ -44,30 +37,26 @@ function App() {
   }, []);
 
   useEffect(() => {
-    if (theme === "system") {
-      delete document.documentElement.dataset.theme;
-      window.localStorage.removeItem("tule-theme");
-      return;
-    }
-
-    document.documentElement.dataset.theme = theme;
-    window.localStorage.setItem("tule-theme", theme);
+    applyThemePreference(theme);
   }, [theme]);
 
   function cycleTheme() {
-    const nextTheme = themeOrder[(themeOrder.indexOf(theme) + 1) % themeOrder.length];
-    setTheme(nextTheme);
+    setTheme(getNextThemePreference(theme));
   }
 
   return (
     <main className="app-shell">
       <nav className="topbar" aria-label="Application">
         <div className="wordmark">
-          <span className="wordmark-mark" aria-hidden="true">t</span>
+          <span className="wordmark-mark" aria-hidden="true">
+            t
+          </span>
           <span>Tule</span>
         </div>
         <button className="theme-control" type="button" onClick={cycleTheme}>
-          <span aria-hidden="true">{theme === "dark" ? "Moon" : theme === "light" ? "Sun" : "Auto"}</span>
+          <span aria-hidden="true">
+            {theme === "dark" ? "Moon" : theme === "light" ? "Sun" : "Auto"}
+          </span>
           <span className="sr-only">Appearance: {theme}. Change appearance.</span>
         </button>
       </nav>
@@ -76,8 +65,7 @@ function App() {
         <p className="eyebrow">FOUNDATION 01</p>
         <h1 id="page-title">Make room for the work that matters now.</h1>
         <p className="lede">
-          Tule is taking shape as a calm, local workspace for thinking,
-          deciding, and building.
+          Tule is taking shape as a calm, local workspace for thinking, deciding, and building.
         </p>
       </section>
 
@@ -98,8 +86,8 @@ function App() {
         </div>
 
         <p className="card-copy">
-          This build establishes the native desktop shell, its browser-quality
-          interface, and an isolated Rust core. Product workflows come next.
+          This build establishes the native desktop shell, its browser-quality interface, and an
+          isolated Rust core. Product workflows come next.
         </p>
 
         <dl className="foundation-details">

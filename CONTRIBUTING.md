@@ -45,9 +45,18 @@ purpose and avoid adding infrastructure before the product needs it.
 
   Native host or packaging changes also require an appropriate Tauri build.
 
+## Git Conventions
+
+- Name branches `<type>/<short-kebab-case-summary>` using an appropriate type
+  such as `feature`, `fix`, `chore`, `docs`, `refactor`, or `test`.
+- Do not use an author, coding tool, or agent identity such as `codex` or
+  `agent` as the branch prefix.
+- Keep commits focused. Use a concise imperative subject that states the change.
+
 ## Pull Requests
 
-Describe the purpose, important design choices, and verification performed. Call
-out new dependencies, Tauri permissions, persistence changes, credential
-handling, or changes to a trust boundary. Never commit credentials or
+Keep titles factual and descriptions brief. State what changed, why it was
+needed, and the essential verification. Call out new dependencies, Tauri
+permissions, persistence changes, credential handling, or changes to a trust
+boundary. Avoid promotional language. Never commit credentials or
 machine-specific paths.

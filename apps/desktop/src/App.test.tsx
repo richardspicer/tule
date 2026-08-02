@@ -4,18 +4,34 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
 import { ProjectStorageError, type Project } from "./platform/projects";
 
+interface NativeCloseRequestedEvent {
+  preventDefault: () => void;
+}
+
+type NativeCloseRequestedHandler = (event: NativeCloseRequestedEvent) => void;
+
 const {
   createProjectMock,
   getApplicationInfoMock,
   listProjectsMock,
+  onCloseRequestedMock,
   openProjectMock,
+  unlistenCloseRequestedMock,
   updateProjectInstructionsMock,
 } = vi.hoisted(() => ({
   createProjectMock: vi.fn(),
   getApplicationInfoMock: vi.fn(),
   listProjectsMock: vi.fn(),
+  onCloseRequestedMock: vi.fn<(handler: NativeCloseRequestedHandler) => Promise<() => void>>(),
   openProjectMock: vi.fn(),
+  unlistenCloseRequestedMock: vi.fn(),
   updateProjectInstructionsMock: vi.fn(),
+}));
+
+vi.mock("@tauri-apps/api/window", () => ({
+  getCurrentWindow: () => ({
+    onCloseRequested: onCloseRequestedMock,
+  }),
 }));
 
 vi.mock("./platform/application", () => ({
@@ -45,6 +61,16 @@ function createDeferred<T>() {
   return { promise, reject, resolve };
 }
 
+function getCloseRequestedHandler(): NativeCloseRequestedHandler {
+  const handler = onCloseRequestedMock.mock.calls[0]?.[0];
+
+  if (handler === undefined) {
+    throw new Error("Expected the native close-request listener to be registered");
+  }
+
+  return handler;
+}
+
 describe("App", () => {
   afterEach(() => {
     vi.restoreAllMocks();
@@ -54,11 +80,14 @@ describe("App", () => {
     createProjectMock.mockReset();
     getApplicationInfoMock.mockReset();
     listProjectsMock.mockReset();
+    onCloseRequestedMock.mockReset();
     openProjectMock.mockReset();
+    unlistenCloseRequestedMock.mockReset();
     updateProjectInstructionsMock.mockReset();
 
     getApplicationInfoMock.mockResolvedValue({ name: "Tule", version: "0.1.0" });
     listProjectsMock.mockResolvedValue([]);
+    onCloseRequestedMock.mockResolvedValue(unlistenCloseRequestedMock);
   });
 
   it("shows application information after the Rust boundary connects", async () => {
@@ -235,6 +264,135 @@ describe("App", () => {
     expect(screen.getByRole("button", { name: /persisted project.*selected/i })).toBeVisible();
     expect(screen.getByLabelText("Project instructions")).toHaveValue(savedProject.instructions);
     expect(screen.getByRole("status")).toHaveTextContent("Saved");
+  });
+
+  it("prevents reload and a cancelled native close while instructions are dirty", async () => {
+    const user = userEvent.setup();
+    const confirmClose = vi.spyOn(window, "confirm").mockReturnValue(false);
+    const project: Project = {
+      id: "project-1",
+      displayName: "First project",
+      instructions: "Before",
+    };
+    listProjectsMock.mockResolvedValue([project]);
+    openProjectMock.mockResolvedValue(project);
+
+    const { unmount } = render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: /first project/i }));
+    await user.type(screen.getByLabelText("Project instructions"), " changed");
+    expect(screen.getByRole("status")).toHaveTextContent("Unsaved changes");
+
+    await waitFor(() => {
+      const dirtyUnload = new Event("beforeunload", { cancelable: true });
+      expect(window.dispatchEvent(dirtyUnload)).toBe(false);
+      expect(dirtyUnload.defaultPrevented).toBe(true);
+    });
+
+    expect(onCloseRequestedMock).toHaveBeenCalledOnce();
+    const preventNativeClose = vi.fn();
+    const closeRequestedHandler = getCloseRequestedHandler();
+    closeRequestedHandler({ preventDefault: preventNativeClose });
+
+    expect(confirmClose).toHaveBeenCalledWith(
+      "Discard unsaved project instructions and close Tule?",
+    );
+    expect(preventNativeClose).toHaveBeenCalledOnce();
+
+    unmount();
+
+    await waitFor(() => expect(unlistenCloseRequestedMock).toHaveBeenCalledOnce());
+    const unmountedUnload = new Event("beforeunload", { cancelable: true });
+    expect(window.dispatchEvent(unmountedUnload)).toBe(true);
+    expect(unmountedUnload.defaultPrevented).toBe(false);
+  });
+
+  it("allows reload and native close when instructions are clean or have been saved", async () => {
+    const user = userEvent.setup();
+    const confirmClose = vi.spyOn(window, "confirm");
+    const project: Project = {
+      id: "project-1",
+      displayName: "First project",
+      instructions: "Before",
+    };
+    const savedProject: Project = {
+      ...project,
+      instructions: "After",
+    };
+    listProjectsMock.mockResolvedValue([project]);
+    openProjectMock.mockResolvedValue(project);
+    updateProjectInstructionsMock.mockResolvedValue(savedProject);
+
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: /first project/i }));
+    expect(onCloseRequestedMock).toHaveBeenCalledOnce();
+    const closeRequestedHandler = getCloseRequestedHandler();
+    const preventCleanClose = vi.fn();
+    closeRequestedHandler({ preventDefault: preventCleanClose });
+
+    const cleanUnload = new Event("beforeunload", { cancelable: true });
+    expect(window.dispatchEvent(cleanUnload)).toBe(true);
+    expect(cleanUnload.defaultPrevented).toBe(false);
+    expect(confirmClose).not.toHaveBeenCalled();
+    expect(preventCleanClose).not.toHaveBeenCalled();
+
+    const editor = screen.getByLabelText("Project instructions");
+    await user.clear(editor);
+    await user.type(editor, savedProject.instructions);
+    await user.click(screen.getByRole("button", { name: "Save instructions" }));
+    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Saved"));
+
+    await waitFor(() => {
+      const savedUnload = new Event("beforeunload", { cancelable: true });
+      expect(window.dispatchEvent(savedUnload)).toBe(true);
+      expect(savedUnload.defaultPrevented).toBe(false);
+    });
+
+    const preventSavedClose = vi.fn();
+    closeRequestedHandler({ preventDefault: preventSavedClose });
+    expect(confirmClose).not.toHaveBeenCalled();
+    expect(preventSavedClose).not.toHaveBeenCalled();
+  });
+
+  it("allows an explicitly confirmed native close with dirty instructions", async () => {
+    const user = userEvent.setup();
+    const confirmClose = vi.spyOn(window, "confirm").mockReturnValue(true);
+    const project: Project = {
+      id: "project-1",
+      displayName: "First project",
+      instructions: "Before",
+    };
+    listProjectsMock.mockResolvedValue([project]);
+    openProjectMock.mockResolvedValue(project);
+
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: /first project/i }));
+    await user.type(screen.getByLabelText("Project instructions"), " changed");
+    expect(screen.getByRole("status")).toHaveTextContent("Unsaved changes");
+
+    const preventNativeClose = vi.fn();
+    const closeRequestedHandler = getCloseRequestedHandler();
+    closeRequestedHandler({ preventDefault: preventNativeClose });
+
+    expect(confirmClose).toHaveBeenCalledWith(
+      "Discard unsaved project instructions and close Tule?",
+    );
+    expect(preventNativeClose).not.toHaveBeenCalled();
+  });
+
+  it("cleans up a close listener that resolves after unmount", async () => {
+    const deferredListener = createDeferred<() => void>();
+    onCloseRequestedMock.mockReturnValue(deferredListener.promise);
+
+    const { unmount } = render(<App />);
+    expect(onCloseRequestedMock).toHaveBeenCalledOnce();
+
+    unmount();
+    deferredListener.resolve(unlistenCloseRequestedMock);
+
+    await waitFor(() => expect(unlistenCloseRequestedMock).toHaveBeenCalledOnce());
   });
 
   it("keeps an unsaved draft visible when saving fails safely", async () => {

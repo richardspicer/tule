@@ -41,6 +41,124 @@ describe("ProjectInstructionsEditor", () => {
     expect(onSave).not.toHaveBeenCalled();
   });
 
+  it.each([
+    {
+      label: "uniform CRLF separators",
+      persisted: "First line\r\nSecond line",
+      expected: "First line\r\nSecond line!",
+    },
+    {
+      label: "uniform lone-CR separators",
+      persisted: "First line\rSecond line",
+      expected: "First line\rSecond line!",
+    },
+    {
+      label: "mixed existing separators",
+      persisted: "First line\r\nSecond line\rThird line\nFourth line",
+      expected: "First line\r\nSecond line\rThird line\nFourth line!",
+    },
+  ])("preserves $label through an ordinary text edit", async ({ persisted, expected }) => {
+    const user = userEvent.setup();
+    const project = { ...firstProject, instructions: persisted };
+    const onSave = vi
+      .fn<(projectId: string, instructions: string) => Promise<Project>>()
+      .mockImplementation((_, instructions) => Promise.resolve({ ...project, instructions }));
+    render(<ProjectInstructionsEditor project={project} onDirtyChange={vi.fn()} onSave={onSave} />);
+
+    const editor = screen.getByLabelText<HTMLTextAreaElement>("Project instructions");
+    expect(editor).toHaveValue(persisted.replace(/\r\n|\r/g, "\n"));
+
+    await user.type(editor, "!");
+    await user.click(screen.getByRole("button", { name: "Save instructions" }));
+
+    expect(onSave).toHaveBeenCalledWith("project-1", expected);
+    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Saved"));
+  });
+
+  it("uses the persisted line-ending style for a newly added line", async () => {
+    const user = userEvent.setup();
+    const project = { ...firstProject, instructions: "First line\r\nSecond line" };
+    const onSave = vi
+      .fn<(projectId: string, instructions: string) => Promise<Project>>()
+      .mockImplementation((_, instructions) => Promise.resolve({ ...project, instructions }));
+    render(<ProjectInstructionsEditor project={project} onDirtyChange={vi.fn()} onSave={onSave} />);
+
+    const editor = screen.getByLabelText<HTMLTextAreaElement>("Project instructions");
+    await user.type(editor, "\nThird line");
+    await user.click(screen.getByRole("button", { name: "Save instructions" }));
+
+    expect(onSave).toHaveBeenCalledWith("project-1", "First line\r\nSecond line\r\nThird line");
+    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Saved"));
+  });
+
+  it("preserves the second raw separator when the first adjacent mixed break is deleted", async () => {
+    const user = userEvent.setup();
+    const project = { ...firstProject, instructions: "A\r\n\rB" };
+    const onSave = vi
+      .fn<(projectId: string, instructions: string) => Promise<Project>>()
+      .mockImplementation((_, instructions) => Promise.resolve({ ...project, instructions }));
+    render(<ProjectInstructionsEditor project={project} onDirtyChange={vi.fn()} onSave={onSave} />);
+
+    const editor = screen.getByLabelText<HTMLTextAreaElement>("Project instructions");
+    editor.focus();
+    editor.setSelectionRange(1, 1);
+    await user.keyboard("{Delete}");
+    await user.click(screen.getByRole("button", { name: "Save instructions" }));
+
+    expect(onSave).toHaveBeenCalledWith("project-1", "A\rB");
+  });
+
+  it("preserves the first raw separator when the second adjacent mixed break is deleted", async () => {
+    const user = userEvent.setup();
+    const project = { ...firstProject, instructions: "A\r\n\rB" };
+    const onSave = vi
+      .fn<(projectId: string, instructions: string) => Promise<Project>>()
+      .mockImplementation((_, instructions) => Promise.resolve({ ...project, instructions }));
+    render(<ProjectInstructionsEditor project={project} onDirtyChange={vi.fn()} onSave={onSave} />);
+
+    const editor = screen.getByLabelText<HTMLTextAreaElement>("Project instructions");
+    editor.focus();
+    editor.setSelectionRange(3, 3);
+    await user.keyboard("{Backspace}");
+    await user.click(screen.getByRole("button", { name: "Save instructions" }));
+
+    expect(onSave).toHaveBeenCalledWith("project-1", "A\r\nB");
+  });
+
+  it("uses the preferred style for an inserted break without changing the adjacent raw break", async () => {
+    const user = userEvent.setup();
+    const project = { ...firstProject, instructions: "A\rB\r\nC\rD" };
+    const onSave = vi
+      .fn<(projectId: string, instructions: string) => Promise<Project>>()
+      .mockImplementation((_, instructions) => Promise.resolve({ ...project, instructions }));
+    render(<ProjectInstructionsEditor project={project} onDirtyChange={vi.fn()} onSave={onSave} />);
+
+    const editor = screen.getByLabelText<HTMLTextAreaElement>("Project instructions");
+    editor.focus();
+    editor.setSelectionRange(3, 3);
+    await user.keyboard("{Enter}");
+    await user.click(screen.getByRole("button", { name: "Save instructions" }));
+
+    expect(onSave).toHaveBeenCalledWith("project-1", "A\rB\r\r\nC\rD");
+  });
+
+  it("replaces only the selected adjacent raw separator", async () => {
+    const user = userEvent.setup();
+    const project = { ...firstProject, instructions: "A\r\n\rB" };
+    const onSave = vi
+      .fn<(projectId: string, instructions: string) => Promise<Project>>()
+      .mockImplementation((_, instructions) => Promise.resolve({ ...project, instructions }));
+    render(<ProjectInstructionsEditor project={project} onDirtyChange={vi.fn()} onSave={onSave} />);
+
+    const editor = screen.getByLabelText<HTMLTextAreaElement>("Project instructions");
+    editor.focus();
+    editor.setSelectionRange(1, 2);
+    await user.keyboard("X");
+    await user.click(screen.getByRole("button", { name: "Save instructions" }));
+
+    expect(onSave).toHaveBeenCalledWith("project-1", "AX\rB");
+  });
+
   it("shows saving progress and adopts the returned persisted value after success", async () => {
     const user = userEvent.setup();
     let resolveSave!: (project: Project) => void;

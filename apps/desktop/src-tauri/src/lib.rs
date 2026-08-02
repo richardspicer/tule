@@ -3,7 +3,9 @@ mod sqlite;
 
 use std::fs;
 
-use projects::{ProjectStorageState, create_project, list_projects, open_project};
+use projects::{
+    ProjectStorageState, create_project, list_projects, open_project, update_project_instructions,
+};
 use sqlite::{DATABASE_FILENAME, SqliteProjectRepository};
 use tauri::Manager;
 
@@ -52,7 +54,8 @@ pub fn run() {
             get_application_info,
             create_project,
             list_projects,
-            open_project
+            open_project,
+            update_project_instructions
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

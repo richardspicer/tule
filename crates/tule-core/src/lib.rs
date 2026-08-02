@@ -11,7 +11,8 @@ pub use project::{
 };
 pub use repository::ProjectRepository;
 pub use use_cases::{
-    CreateProjectError, OpenProjectError, create_project, list_projects, open_project,
+    CreateProjectError, OpenProjectError, UpdateProjectInstructionsError, create_project,
+    list_projects, open_project, update_project_instructions,
 };
 
 /// Stable application identity exposed to Tule hosts.

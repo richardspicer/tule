@@ -172,6 +172,7 @@ impl Error for InvalidProjectName {}
 pub struct Project {
     id: ProjectId,
     name: ProjectName,
+    instructions: String,
     created_at_unix_ms: i64,
 }
 
@@ -181,6 +182,7 @@ impl Project {
         Ok(Self {
             id: ProjectId::generate(),
             name,
+            instructions: String::new(),
             created_at_unix_ms: current_unix_milliseconds()?,
         })
     }
@@ -193,6 +195,7 @@ impl Project {
     pub fn from_stored_parts(
         id: &str,
         name: &str,
+        instructions: &str,
         created_at_unix_ms: i64,
     ) -> Result<Self, ProjectReconstructionError> {
         let id = ProjectId::parse(id).map_err(ProjectReconstructionError::InvalidId)?;
@@ -201,6 +204,7 @@ impl Project {
         Ok(Self {
             id,
             name,
+            instructions: instructions.to_owned(),
             created_at_unix_ms,
         })
     }
@@ -215,6 +219,15 @@ impl Project {
     #[must_use]
     pub fn name(&self) -> &ProjectName {
         &self.name
+    }
+
+    /// Returns the project's instructions exactly as supplied.
+    ///
+    /// Instructions are plain Unicode text. The core does not trim, normalize,
+    /// validate, or interpret their contents.
+    #[must_use]
+    pub fn instructions(&self) -> &str {
+        &self.instructions
     }
 
     /// Returns creation time as milliseconds since the Unix epoch.
@@ -324,6 +337,14 @@ mod tests {
             self.lookup_count.fetch_add(1, Ordering::Relaxed);
             Ok(None)
         }
+
+        fn update_instructions(
+            &self,
+            _id: &ProjectId,
+            _instructions: &str,
+        ) -> Result<Option<Project>, Self::Error> {
+            Ok(None)
+        }
     }
 
     #[test]
@@ -399,17 +420,27 @@ mod tests {
     #[test]
     fn stored_projects_are_reconstructed_without_storage_types() {
         let id = ProjectId::generate();
-        let project = Project::from_stored_parts(&id.to_string(), "  Saved  ", 1_234).unwrap();
+        let instructions = "  Keep exact spacing\r\nCafe\u{301} 🙂  ";
+        let project =
+            Project::from_stored_parts(&id.to_string(), "  Saved  ", instructions, 1_234).unwrap();
 
         assert_eq!(project.id(), id);
         assert_eq!(project.name().as_str(), "Saved");
+        assert_eq!(project.instructions(), instructions);
         assert_eq!(project.created_at_unix_ms(), 1_234);
+    }
+
+    #[test]
+    fn newly_created_projects_have_empty_instructions() {
+        let project = Project::create(ProjectName::new("New project").unwrap()).unwrap();
+
+        assert_eq!(project.instructions(), "");
     }
 
     #[test]
     fn reconstruction_reports_invalid_identifiers_and_names() {
         assert_eq!(
-            Project::from_stored_parts("bad", "Valid", 0),
+            Project::from_stored_parts("bad", "Valid", "", 0),
             Err(ProjectReconstructionError::InvalidId(
                 InvalidProjectId::Malformed
             ))
@@ -417,7 +448,7 @@ mod tests {
 
         let id = ProjectId::generate();
         assert_eq!(
-            Project::from_stored_parts(&id.to_string(), "", 0),
+            Project::from_stored_parts(&id.to_string(), "", "", 0),
             Err(ProjectReconstructionError::InvalidName(
                 InvalidProjectName::Empty
             ))

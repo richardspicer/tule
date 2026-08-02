@@ -1,6 +1,7 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import "./App.css";
 import { CreateProjectForm } from "./components/CreateProjectForm";
+import { ProjectInstructionsEditor } from "./components/ProjectInstructionsEditor";
 import { ProjectList, type ProjectListState } from "./components/ProjectList";
 import { getApplicationInfo, type ApplicationInfo } from "./platform/application";
 import {
@@ -9,6 +10,7 @@ import {
   listProjects,
   openProject,
   type Project,
+  updateProjectInstructions,
 } from "./platform/projects";
 import {
   applyThemePreference,
@@ -19,7 +21,10 @@ import {
 
 type ConnectionState = "checking" | "connected" | "unavailable";
 type ProjectOperation =
-  { kind: "idle" } | { kind: "creating" } | { kind: "opening"; projectId: string };
+  | { kind: "idle" }
+  | { kind: "creating" }
+  | { kind: "opening"; projectId: string }
+  | { kind: "saving-instructions"; projectId: string };
 
 const genericProjectErrorMessage = "Project storage is unavailable. Try again.";
 const startupProjectErrorMessage = "Project storage is unavailable. Restart Tule to try again.";
@@ -55,6 +60,7 @@ function App() {
   const [projectLoadState, setProjectLoadState] = useState<ProjectListState>("loading");
   const [selectedProject, setSelectedProject] = useState<Project | null>(null);
   const [projectOperation, setProjectOperation] = useState<ProjectOperation>({ kind: "idle" });
+  const [dirtyProjectInstructionsId, setDirtyProjectInstructionsId] = useState<string | null>(null);
   const [projectName, setProjectName] = useState("");
   const [projectNameError, setProjectNameError] = useState<string | null>(null);
   const [projectError, setProjectError] = useState<string | null>(null);
@@ -115,6 +121,26 @@ function App() {
     setProjectNameError(null);
   }
 
+  const handleProjectInstructionsDirtyChange = useCallback(
+    (projectId: string, hasUnsavedChanges: boolean) => {
+      setDirtyProjectInstructionsId((currentProjectId) => {
+        if (hasUnsavedChanges) {
+          return projectId;
+        }
+
+        return currentProjectId === projectId ? null : currentProjectId;
+      });
+    },
+    [],
+  );
+
+  function canDiscardUnsavedProjectInstructions(): boolean {
+    return (
+      dirtyProjectInstructionsId === null ||
+      window.confirm("Discard unsaved project instructions and continue?")
+    );
+  }
+
   async function handleCreateProject() {
     if (projectOperation.kind !== "idle" || projectLoadState !== "ready") {
       return;
@@ -127,6 +153,10 @@ function App() {
       return;
     }
 
+    if (!canDiscardUnsavedProjectInstructions()) {
+      return;
+    }
+
     setProjectError(null);
     setProjectNameError(null);
     setProjectOperation({ kind: "creating" });
@@ -135,6 +165,7 @@ function App() {
       const project = await createProject(displayName);
       setProjects((currentProjects) => mergeProject(currentProjects, project));
       setSelectedProject(project);
+      setDirtyProjectInstructionsId(null);
       setProjectLoadState("ready");
       setProjectName("");
     } catch (error: unknown) {
@@ -153,6 +184,14 @@ function App() {
       return;
     }
 
+    if (selectedProject?.id === projectId) {
+      return;
+    }
+
+    if (!canDiscardUnsavedProjectInstructions()) {
+      return;
+    }
+
     setProjectError(null);
     setProjectOperation({ kind: "opening", projectId });
 
@@ -160,8 +199,36 @@ function App() {
       const project = await openProject(projectId);
       setProjects((currentProjects) => mergeProject(currentProjects, project));
       setSelectedProject(project);
+      setDirtyProjectInstructionsId(null);
     } catch (error: unknown) {
       setProjectError(getSafeProjectErrorMessage(error));
+    } finally {
+      setProjectOperation({ kind: "idle" });
+    }
+  }
+
+  async function handleUpdateProjectInstructions(
+    projectId: string,
+    instructions: string,
+  ): Promise<Project> {
+    if (projectOperation.kind !== "idle") {
+      throw new Error("A project operation is already in progress.");
+    }
+
+    setProjectOperation({ kind: "saving-instructions", projectId });
+
+    try {
+      const project = await updateProjectInstructions(projectId, instructions);
+
+      setProjects((currentProjects) => mergeProject(currentProjects, project));
+      setSelectedProject((currentProject) =>
+        currentProject?.id === projectId ? project : currentProject,
+      );
+      setDirtyProjectInstructionsId((currentProjectId) =>
+        currentProjectId === projectId ? null : currentProjectId,
+      );
+
+      return project;
     } finally {
       setProjectOperation({ kind: "idle" });
     }
@@ -242,11 +309,18 @@ function App() {
               <p className="panel-copy">
                 {selectedProject === null
                   ? "Choose a project from the list when you are ready to continue."
-                  : "This project is selected and ready for the next workflow."}
+                  : "This project is selected. Keep its durable guidance close to the work."}
               </p>
               <span className="selection-state">
                 {selectedProject === null ? "No project selected" : "Selected"}
               </span>
+              {selectedProject === null ? null : (
+                <ProjectInstructionsEditor
+                  project={selectedProject}
+                  onDirtyChange={handleProjectInstructionsDirtyChange}
+                  onSave={handleUpdateProjectInstructions}
+                />
+              )}
             </section>
 
             <CreateProjectForm

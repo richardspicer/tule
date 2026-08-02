@@ -48,6 +48,26 @@ where
         .ok_or(OpenProjectError::NotFound(id))
 }
 
+/// Replaces a project's instructions exactly as supplied.
+///
+/// The identifier is validated before repository access. Instructions are
+/// passed through without trimming, normalization, validation, or
+/// interpretation.
+pub fn update_project_instructions<R>(
+    repository: &R,
+    id: &str,
+    instructions: &str,
+) -> Result<Project, UpdateProjectInstructionsError<R::Error>>
+where
+    R: ProjectRepository + ?Sized,
+{
+    let id = ProjectId::parse(id).map_err(UpdateProjectInstructionsError::InvalidId)?;
+    repository
+        .update_instructions(&id, instructions)
+        .map_err(UpdateProjectInstructionsError::Repository)?
+        .ok_or(UpdateProjectInstructionsError::NotFound(id))
+}
+
 /// A failure to create a project.
 #[derive(Debug)]
 pub enum CreateProjectError<E> {
@@ -124,6 +144,45 @@ where
     }
 }
 
+/// A failure to update a project's instructions.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UpdateProjectInstructionsError<E> {
+    /// The supplied project identifier is malformed or not UUID version 7.
+    InvalidId(InvalidProjectId),
+    /// No stored project has the validated identifier.
+    NotFound(ProjectId),
+    /// The repository failed while updating the project.
+    Repository(E),
+}
+
+impl<E> fmt::Display for UpdateProjectInstructionsError<E>
+where
+    E: fmt::Display,
+{
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidId(error) => write!(formatter, "invalid project ID: {error}"),
+            Self::NotFound(id) => write!(formatter, "project {id} was not found"),
+            Self::Repository(error) => {
+                write!(formatter, "could not update project instructions: {error}")
+            }
+        }
+    }
+}
+
+impl<E> Error for UpdateProjectInstructionsError<E>
+where
+    E: Error + 'static,
+{
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::InvalidId(error) => Some(error),
+            Self::NotFound(_) => None,
+            Self::Repository(error) => Some(error),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -157,9 +216,11 @@ mod tests {
         create_calls: usize,
         list_calls: usize,
         find_calls: usize,
+        update_instructions_calls: usize,
         fail_create: bool,
         fail_list: bool,
         fail_find: bool,
+        fail_update_instructions: bool,
     }
 
     impl FakeRepository {
@@ -179,6 +240,10 @@ mod tests {
             self.state.lock().unwrap().find_calls
         }
 
+        fn update_instructions_calls(&self) -> usize {
+            self.state.lock().unwrap().update_instructions_calls
+        }
+
         fn seed(&self, project: Project) {
             self.state.lock().unwrap().projects.push(project);
         }
@@ -193,6 +258,10 @@ mod tests {
 
         fn force_find_failure(&self) {
             self.state.lock().unwrap().fail_find = true;
+        }
+
+        fn force_update_instructions_failure(&self) {
+            self.state.lock().unwrap().fail_update_instructions = true;
         }
     }
 
@@ -230,11 +299,55 @@ mod tests {
                 .find(|project| project.id() == *id)
                 .cloned())
         }
+
+        fn update_instructions(
+            &self,
+            id: &ProjectId,
+            instructions: &str,
+        ) -> Result<Option<Project>, Self::Error> {
+            let mut state = self.state.lock().unwrap();
+            state.update_instructions_calls += 1;
+            if state.fail_update_instructions {
+                return Err(FakeRepositoryError::Forced);
+            }
+
+            let Some(index) = state
+                .projects
+                .iter()
+                .position(|project| project.id() == *id)
+            else {
+                return Ok(None);
+            };
+
+            let stored = &state.projects[index];
+            let updated = Project::from_stored_parts(
+                &stored.id().to_string(),
+                stored.name().as_str(),
+                instructions,
+                stored.created_at_unix_ms(),
+            )
+            .expect("a previously valid fake project remains valid");
+            state.projects[index] = updated.clone();
+            Ok(Some(updated))
+        }
     }
 
     fn stored_project(name: &str, created_at_unix_ms: i64) -> Project {
-        Project::from_stored_parts(&ProjectId::generate().to_string(), name, created_at_unix_ms)
-            .unwrap()
+        stored_project_with_instructions(name, "", created_at_unix_ms)
+    }
+
+    fn stored_project_with_instructions(
+        name: &str,
+        instructions: &str,
+        created_at_unix_ms: i64,
+    ) -> Project {
+        Project::from_stored_parts(
+            &ProjectId::generate().to_string(),
+            name,
+            instructions,
+            created_at_unix_ms,
+        )
+        .unwrap()
     }
 
     fn current_unix_milliseconds() -> i64 {
@@ -414,5 +527,88 @@ mod tests {
             Err(OpenProjectError::Repository(FakeRepositoryError::Forced))
         );
         assert_eq!(repository.find_calls(), 1);
+    }
+
+    #[test]
+    fn update_instructions_rejects_invalid_ids_before_repository_access() {
+        let repository = FakeRepository::default();
+
+        let malformed = update_project_instructions(&repository, "not-a-uuid", "unchanged");
+        let wrong_version = update_project_instructions(
+            &repository,
+            "550e8400-e29b-41d4-a716-446655440000",
+            "unchanged",
+        );
+
+        assert_eq!(
+            malformed,
+            Err(UpdateProjectInstructionsError::InvalidId(
+                InvalidProjectId::Malformed
+            ))
+        );
+        assert_eq!(
+            wrong_version,
+            Err(UpdateProjectInstructionsError::InvalidId(
+                InvalidProjectId::NotVersionSeven
+            ))
+        );
+        assert_eq!(repository.update_instructions_calls(), 0);
+    }
+
+    #[test]
+    fn update_instructions_preserves_exact_unicode_text() {
+        let repository = FakeRepository::default();
+        let project = stored_project("Stored", 42);
+        let id = project.id();
+        repository.seed(project);
+        let instructions = "  First line\r\nCafe\u{301}\n🙂\tlast line  ";
+
+        let updated =
+            update_project_instructions(&repository, &id.to_string(), instructions).unwrap();
+
+        assert_eq!(updated.instructions(), instructions);
+        assert_eq!(repository.projects()[0].instructions(), instructions);
+        assert_eq!(repository.update_instructions_calls(), 1);
+    }
+
+    #[test]
+    fn update_instructions_accepts_empty_text() {
+        let repository = FakeRepository::default();
+        let project = stored_project_with_instructions("Stored", "existing", 42);
+        let id = project.id();
+        repository.seed(project);
+
+        let updated = update_project_instructions(&repository, &id.to_string(), "").unwrap();
+
+        assert_eq!(updated.instructions(), "");
+        assert_eq!(repository.projects()[0].instructions(), "");
+        assert_eq!(repository.update_instructions_calls(), 1);
+    }
+
+    #[test]
+    fn update_instructions_distinguishes_a_missing_project() {
+        let repository = FakeRepository::default();
+        let id = ProjectId::generate();
+
+        assert_eq!(
+            update_project_instructions(&repository, &id.to_string(), "instructions"),
+            Err(UpdateProjectInstructionsError::NotFound(id))
+        );
+        assert_eq!(repository.update_instructions_calls(), 1);
+    }
+
+    #[test]
+    fn update_instructions_reports_the_repository_specific_error() {
+        let repository = FakeRepository::default();
+        repository.force_update_instructions_failure();
+        let id = ProjectId::generate();
+
+        assert_eq!(
+            update_project_instructions(&repository, &id.to_string(), "instructions"),
+            Err(UpdateProjectInstructionsError::Repository(
+                FakeRepositoryError::Forced
+            ))
+        );
+        assert_eq!(repository.update_instructions_calls(), 1);
     }
 }

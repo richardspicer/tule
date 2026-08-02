@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 export interface Project {
   id: string;
   displayName: string;
+  instructions: string;
 }
 
 export type ProjectErrorCode =
@@ -52,13 +53,16 @@ function isProject(value: unknown): value is Project {
   const keys = Object.keys(value);
 
   return (
-    keys.length === 2 &&
+    keys.length === 3 &&
     keys.includes("id") &&
     keys.includes("displayName") &&
+    keys.includes("instructions") &&
     "id" in value &&
     typeof value.id === "string" &&
     "displayName" in value &&
-    typeof value.displayName === "string"
+    typeof value.displayName === "string" &&
+    "instructions" in value &&
+    typeof value.instructions === "string"
   );
 }
 
@@ -86,7 +90,7 @@ function validateProjectList(value: unknown): Project[] {
 
 async function invokeProjectCommand(
   command: string,
-  args?: Record<string, string>,
+  args?: Record<string, unknown>,
 ): Promise<unknown> {
   try {
     return args === undefined ? await invoke(command) : await invoke(command, args);
@@ -105,6 +109,21 @@ export async function createProject(displayName: string): Promise<Project> {
 
 export async function openProject(projectId: string): Promise<Project> {
   const project = validateProject(await invokeProjectCommand("open_project", { projectId }));
+
+  if (project.id !== projectId) {
+    throw new ProjectStorageError(genericProjectErrorCode);
+  }
+
+  return project;
+}
+
+export async function updateProjectInstructions(
+  projectId: string,
+  instructions: string,
+): Promise<Project> {
+  const project = validateProject(
+    await invokeProjectCommand("update_project_instructions", { projectId, instructions }),
+  );
 
   if (project.id !== projectId) {
     throw new ProjectStorageError(genericProjectErrorCode);

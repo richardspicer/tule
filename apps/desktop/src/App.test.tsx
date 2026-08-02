@@ -1,17 +1,22 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
-import { ProjectStorageError } from "./platform/projects";
+import { ProjectStorageError, type Project } from "./platform/projects";
 
-const { createProjectMock, getApplicationInfoMock, listProjectsMock, openProjectMock } = vi.hoisted(
-  () => ({
-    createProjectMock: vi.fn(),
-    getApplicationInfoMock: vi.fn(),
-    listProjectsMock: vi.fn(),
-    openProjectMock: vi.fn(),
-  }),
-);
+const {
+  createProjectMock,
+  getApplicationInfoMock,
+  listProjectsMock,
+  openProjectMock,
+  updateProjectInstructionsMock,
+} = vi.hoisted(() => ({
+  createProjectMock: vi.fn(),
+  getApplicationInfoMock: vi.fn(),
+  listProjectsMock: vi.fn(),
+  openProjectMock: vi.fn(),
+  updateProjectInstructionsMock: vi.fn(),
+}));
 
 vi.mock("./platform/application", () => ({
   getApplicationInfo: getApplicationInfoMock,
@@ -25,6 +30,7 @@ vi.mock("./platform/projects", async (importOriginal) => {
     createProject: createProjectMock,
     listProjects: listProjectsMock,
     openProject: openProjectMock,
+    updateProjectInstructions: updateProjectInstructionsMock,
   };
 });
 
@@ -40,11 +46,16 @@ function createDeferred<T>() {
 }
 
 describe("App", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
   beforeEach(() => {
     createProjectMock.mockReset();
     getApplicationInfoMock.mockReset();
     listProjectsMock.mockReset();
     openProjectMock.mockReset();
+    updateProjectInstructionsMock.mockReset();
 
     getApplicationInfoMock.mockResolvedValue({ name: "Tule", version: "0.1.0" });
     listProjectsMock.mockResolvedValue([]);
@@ -104,8 +115,8 @@ describe("App", () => {
 
   it("renders a populated project list without selecting a project", async () => {
     listProjectsMock.mockResolvedValue([
-      { id: "project-1", displayName: "First project" },
-      { id: "project-2", displayName: "Second project" },
+      { id: "project-1", displayName: "First project", instructions: "" },
+      { id: "project-2", displayName: "Second project", instructions: "" },
     ]);
 
     render(<App />);
@@ -121,7 +132,7 @@ describe("App", () => {
 
   it("submits a trimmed name, shows creation progress, and selects the returned project", async () => {
     const user = userEvent.setup();
-    const pendingProject = createDeferred<{ id: string; displayName: string }>();
+    const pendingProject = createDeferred<Project>();
     createProjectMock.mockReturnValue(pendingProject.promise);
 
     render(<App />);
@@ -134,7 +145,7 @@ describe("App", () => {
     expect(screen.getByRole("button", { name: "Creating…" })).toBeDisabled();
     expect(screen.getByLabelText("Project name")).toBeDisabled();
 
-    pendingProject.resolve({ id: "project-new", displayName: "New plan" });
+    pendingProject.resolve({ id: "project-new", displayName: "New plan", instructions: "" });
 
     const projectButton = await screen.findByRole("button", { name: /new plan/i });
     await waitFor(() => expect(projectButton).toHaveAttribute("aria-pressed", "true"));
@@ -159,8 +170,10 @@ describe("App", () => {
 
   it("shows opening progress and selects only the returned project", async () => {
     const user = userEvent.setup();
-    const pendingProject = createDeferred<{ id: string; displayName: string }>();
-    listProjectsMock.mockResolvedValue([{ id: "project-1", displayName: "First project" }]);
+    const pendingProject = createDeferred<Project>();
+    listProjectsMock.mockResolvedValue([
+      { id: "project-1", displayName: "First project", instructions: "" },
+    ]);
     openProjectMock.mockReturnValue(pendingProject.promise);
 
     render(<App />);
@@ -176,17 +189,239 @@ describe("App", () => {
     expect(screen.getByRole("button", { name: /first project.*opening/i })).toBe(projectButton);
     expect(screen.getByText("No project selected")).toBeVisible();
 
-    pendingProject.resolve({ id: "project-1", displayName: "First project" });
+    pendingProject.resolve({
+      id: "project-1",
+      displayName: "First project",
+      instructions: "Existing guidance",
+    });
 
     await waitFor(() => expect(projectButton).toHaveAttribute("aria-pressed", "true"));
     expect(projectButton).not.toHaveAttribute("aria-busy");
     expect(screen.getByRole("heading", { level: 2, name: "First project" })).toBeVisible();
+    expect(screen.getByLabelText("Project instructions")).toHaveValue("Existing guidance");
+  });
+
+  it("saves exact instructions and replaces the selected and listed project", async () => {
+    const user = userEvent.setup();
+    const project: Project = {
+      id: "project-1",
+      displayName: "First project",
+      instructions: "Before",
+    };
+    const savedProject: Project = {
+      id: "project-1",
+      displayName: "Persisted project",
+      instructions: "  Exact replacement\n第二行  ",
+    };
+    listProjectsMock.mockResolvedValue([project]);
+    openProjectMock.mockResolvedValue(project);
+    updateProjectInstructionsMock.mockResolvedValue(savedProject);
+
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: /first project/i }));
+    const editor = await screen.findByLabelText("Project instructions");
+    await user.clear(editor);
+    await user.type(editor, savedProject.instructions);
+    await user.click(screen.getByRole("button", { name: "Save instructions" }));
+
+    expect(updateProjectInstructionsMock).toHaveBeenCalledWith(
+      "project-1",
+      savedProject.instructions,
+    );
+    expect(
+      await screen.findByRole("heading", { level: 2, name: "Persisted project" }),
+    ).toBeVisible();
+    expect(screen.getByRole("button", { name: /persisted project.*selected/i })).toBeVisible();
+    expect(screen.getByLabelText("Project instructions")).toHaveValue(savedProject.instructions);
+    expect(screen.getByRole("status")).toHaveTextContent("Saved");
+  });
+
+  it("keeps an unsaved draft visible when saving fails safely", async () => {
+    const user = userEvent.setup();
+    const project: Project = {
+      id: "project-1",
+      displayName: "First project",
+      instructions: "Before",
+    };
+    listProjectsMock.mockResolvedValue([project]);
+    openProjectMock.mockResolvedValue(project);
+    updateProjectInstructionsMock.mockRejectedValue(
+      new Error("SQLITE_BUSY C:\\private\\projects.db"),
+    );
+
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: /first project/i }));
+    const editor = await screen.findByLabelText("Project instructions");
+    await user.clear(editor);
+    await user.type(editor, "Keep this draft");
+    await user.click(screen.getByRole("button", { name: "Save instructions" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Save failed. Your changes are still here.",
+    );
+    expect(editor).toHaveValue("Keep this draft");
+    expect(screen.queryByText(/SQLITE_BUSY|projects\.db/i)).not.toBeInTheDocument();
+  });
+
+  it("blocks selection-changing actions until a pending instruction save settles", async () => {
+    const user = userEvent.setup();
+    const firstProject: Project = {
+      id: "project-1",
+      displayName: "First project",
+      instructions: "Before",
+    };
+    const secondProject: Project = {
+      id: "project-2",
+      displayName: "Second project",
+      instructions: "Second guidance",
+    };
+    const pendingSave = createDeferred<Project>();
+    listProjectsMock.mockResolvedValue([firstProject, secondProject]);
+    openProjectMock.mockImplementation((projectId: string) =>
+      Promise.resolve(projectId === firstProject.id ? firstProject : secondProject),
+    );
+    updateProjectInstructionsMock.mockReturnValue(pendingSave.promise);
+
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: /first project/i }));
+    const editor = await screen.findByLabelText("Project instructions");
+    await user.clear(editor);
+    await user.type(editor, "Keep this pending draft");
+    await user.click(screen.getByRole("button", { name: "Save instructions" }));
+
+    const secondProjectButton = screen.getByRole("button", { name: /second project/i });
+    expect(secondProjectButton).toBeDisabled();
+    expect(screen.getByLabelText("Project name")).toBeDisabled();
+    fireEvent.click(secondProjectButton);
+    expect(openProjectMock).toHaveBeenCalledTimes(1);
+
+    pendingSave.reject(new Error("C:\\private\\projects.db failed"));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Save failed. Your changes are still here.",
+    );
+    expect(editor).toHaveValue("Keep this pending draft");
+    expect(secondProjectButton).toBeEnabled();
+    expect(screen.getByLabelText("Project name")).toBeEnabled();
+  });
+
+  it("keeps an unsaved draft when the user cancels a project change", async () => {
+    const user = userEvent.setup();
+    const firstProject: Project = {
+      id: "project-1",
+      displayName: "First project",
+      instructions: "First persisted guidance",
+    };
+    const secondProject: Project = {
+      id: "project-2",
+      displayName: "Second project",
+      instructions: "Second persisted guidance",
+    };
+    const confirmDiscard = vi.spyOn(window, "confirm").mockReturnValue(false);
+    listProjectsMock.mockResolvedValue([firstProject, secondProject]);
+    openProjectMock.mockImplementation((projectId: string) =>
+      Promise.resolve(projectId === firstProject.id ? firstProject : secondProject),
+    );
+
+    render(<App />);
+
+    const firstProjectButton = await screen.findByRole("button", { name: /first project/i });
+    const secondProjectButton = screen.getByRole("button", { name: /second project/i });
+    await user.click(firstProjectButton);
+    const editor = await screen.findByLabelText("Project instructions");
+    await user.clear(editor);
+    await user.type(editor, "Unsaved first draft");
+
+    await user.click(firstProjectButton);
+
+    expect(confirmDiscard).not.toHaveBeenCalled();
+    expect(openProjectMock).toHaveBeenCalledTimes(1);
+    expect(editor).toHaveValue("Unsaved first draft");
+
+    await user.click(secondProjectButton);
+
+    expect(confirmDiscard).toHaveBeenCalledWith(
+      "Discard unsaved project instructions and continue?",
+    );
+    expect(openProjectMock).toHaveBeenCalledTimes(1);
+    expect(firstProjectButton).toHaveAttribute("aria-pressed", "true");
+    expect(editor).toHaveValue("Unsaved first draft");
+    expect(screen.getByRole("status")).toHaveTextContent("Unsaved changes");
+  });
+
+  it("changes projects only after the user confirms discarding an unsaved draft", async () => {
+    const user = userEvent.setup();
+    const firstProject: Project = {
+      id: "project-1",
+      displayName: "First project",
+      instructions: "First persisted guidance",
+    };
+    const secondProject: Project = {
+      id: "project-2",
+      displayName: "Second project",
+      instructions: "Second persisted guidance",
+    };
+    const confirmDiscard = vi.spyOn(window, "confirm").mockReturnValue(true);
+    listProjectsMock.mockResolvedValue([firstProject, secondProject]);
+    openProjectMock.mockImplementation((projectId: string) =>
+      Promise.resolve(projectId === firstProject.id ? firstProject : secondProject),
+    );
+
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: /first project/i }));
+    const editor = await screen.findByLabelText("Project instructions");
+    await user.clear(editor);
+    await user.type(editor, "Unsaved first draft");
+    expect(screen.getByRole("status")).toHaveTextContent("Unsaved changes");
+
+    await user.click(screen.getByRole("button", { name: /second project/i }));
+
+    expect(confirmDiscard).toHaveBeenCalledWith(
+      "Discard unsaved project instructions and continue?",
+    );
+    expect(await screen.findByLabelText("Project instructions")).toHaveValue(
+      "Second persisted guidance",
+    );
+    expect(screen.getByRole("status")).toHaveTextContent("Saved");
+    expect(updateProjectInstructionsMock).not.toHaveBeenCalled();
+  });
+
+  it("does not create a project when the user keeps an unsaved draft", async () => {
+    const user = userEvent.setup();
+    const project: Project = {
+      id: "project-1",
+      displayName: "First project",
+      instructions: "Before",
+    };
+    const confirmDiscard = vi.spyOn(window, "confirm").mockReturnValue(false);
+    listProjectsMock.mockResolvedValue([project]);
+    openProjectMock.mockResolvedValue(project);
+
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: /first project/i }));
+    const editor = await screen.findByLabelText("Project instructions");
+    await user.clear(editor);
+    await user.type(editor, "Keep this draft");
+    await user.type(screen.getByLabelText("Project name"), "Another project");
+    await user.click(screen.getByRole("button", { name: "Create project" }));
+
+    expect(confirmDiscard).toHaveBeenCalledWith(
+      "Discard unsaved project instructions and continue?",
+    );
+    expect(createProjectMock).not.toHaveBeenCalled();
+    expect(editor).toHaveValue("Keep this draft");
+    expect(screen.getByLabelText("Project name")).toHaveValue("Another project");
   });
 
   it("keeps the prior selection when a later open fails safely", async () => {
     const user = userEvent.setup();
-    const firstProject = { id: "project-1", displayName: "First project" };
-    const secondProject = { id: "project-2", displayName: "Second project" };
+    const firstProject = { id: "project-1", displayName: "First project", instructions: "" };
+    const secondProject = { id: "project-2", displayName: "Second project", instructions: "" };
     listProjectsMock.mockResolvedValue([firstProject, secondProject]);
     openProjectMock
       .mockResolvedValueOnce(firstProject)

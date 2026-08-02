@@ -345,9 +345,11 @@ p {
 
 .project-list-copy {
   min-width: 0;
+  display: grid;
 }
 
 .project-list-copy strong {
+  display: block;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -361,6 +363,7 @@ p {
 }
 
 .project-side-panel {
+  min-width: 0;
   display: grid;
   align-content: start;
   gap: 14px;
@@ -368,7 +371,14 @@ p {
 
 .selected-project,
 .create-project {
+  min-width: 0;
   padding: 16px;
+}
+
+.selected-project h2 {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .panel-copy {

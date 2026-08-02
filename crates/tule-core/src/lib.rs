@@ -1,6 +1,19 @@
 //! Tauri-independent domain and application behavior for Tule.
 #![warn(missing_docs)]
 
+mod project;
+mod repository;
+mod use_cases;
+
+pub use project::{
+    InvalidProjectId, InvalidProjectName, Project, ProjectId, ProjectName,
+    ProjectReconstructionError, ProjectTimeError,
+};
+pub use repository::ProjectRepository;
+pub use use_cases::{
+    CreateProjectError, OpenProjectError, create_project, list_projects, open_project,
+};
+
 /// Stable application identity exposed to Tule hosts.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApplicationInfo {

@@ -35,3 +35,7 @@ described in [`docs/architecture.md`](docs/architecture.md).
 
 Report suspected vulnerabilities privately by following
 [`SECURITY.md`](SECURITY.md), not through a public issue.
+
+## License
+
+TULE is licensed under the [Apache License 2.0](LICENSE).

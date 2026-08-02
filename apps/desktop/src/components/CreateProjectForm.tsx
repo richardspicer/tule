@@ -24,9 +24,7 @@ export function CreateProjectForm({
 
   return (
     <section className="create-project" aria-labelledby="create-project-title">
-      <p className="section-label">NEW PROJECT</p>
-      <h2 id="create-project-title">Create a project</h2>
-      <p className="panel-copy">Give the work a clear name. Tule will keep it local.</p>
+      <h2 id="create-project-title">New project</h2>
 
       <form onSubmit={handleSubmit} noValidate>
         <label htmlFor="project-display-name">Project name</label>

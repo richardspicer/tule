@@ -16,9 +16,19 @@ describe("ProjectInstructionsEditor", () => {
       <ProjectInstructionsEditor project={firstProject} onDirtyChange={vi.fn()} onSave={vi.fn()} />,
     );
 
-    expect(screen.getByLabelText("Project instructions")).toHaveValue(firstProject.instructions);
-    expect(screen.getByRole("status")).toHaveTextContent("Saved");
+    const editor = screen.getByLabelText("Project instructions");
+    const status = screen.getByRole("status");
+
+    expect(screen.getByRole("heading", { level: 3, name: "Instructions" })).toBeVisible();
+    expect(editor).toHaveValue(firstProject.instructions);
+    expect(editor).toHaveAttribute("aria-describedby", "project-instructions-status");
+    expect(status).toHaveAttribute("id", "project-instructions-status");
+    expect(status).toHaveTextContent("Saved");
     expect(screen.getByRole("button", { name: "Save instructions" })).toBeDisabled();
+    expect(
+      screen.queryByText("Keep the durable guidance for this project in plain text."),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText("PROJECT GUIDANCE")).not.toBeInTheDocument();
   });
 
   it("marks edited content as unsaved until the explicit save action", async () => {

@@ -13,12 +13,7 @@ import {
   type Project,
   updateProjectInstructions,
 } from "./platform/projects";
-import {
-  applyThemePreference,
-  getNextThemePreference,
-  loadThemePreference,
-  type ThemePreference,
-} from "./theme";
+import { applyThemePreference, loadThemePreference, type ThemePreference } from "./theme";
 
 type ConnectionState = "checking" | "connected" | "unavailable";
 type ProjectOperation =
@@ -27,9 +22,16 @@ type ProjectOperation =
   | { kind: "opening"; projectId: string }
   | { kind: "saving-instructions"; projectId: string };
 
+const tuleWordmark = [
+  "▀▀▀▀█▀▀▀ ██    ██ ██      ██▀▀▀▀▀▀",
+  "   ██    ██    ██ ██      ██▄▄▄▄▄ ",
+  "   ██    ██    ██ ██      ██      ",
+  "   ██    ██▄▄▄▄▄█ ██▄▄▄▄▄ ██▄▄▄▄▄▄",
+].join("\n");
+
 const genericProjectErrorMessage = "Project storage is unavailable. Try again.";
-const startupProjectErrorMessage = "Project storage is unavailable. Restart Tule to try again.";
-const closeWithUnsavedInstructionsMessage = "Discard unsaved project instructions and close Tule?";
+const startupProjectErrorMessage = "Project storage is unavailable. Restart TULE to try again.";
+const closeWithUnsavedInstructionsMessage = "Discard unsaved project instructions and close TULE?";
 
 function getSafeProjectErrorMessage(error: unknown): string {
   switch (getProjectErrorCode(error)) {
@@ -52,6 +54,17 @@ function mergeProject(projects: readonly Project[], project: Project): Project[]
   }
 
   return projects.map((candidate, index) => (index === existingIndex ? project : candidate));
+}
+
+function connectionLabel(connection: ConnectionState): string {
+  switch (connection) {
+    case "checking":
+      return "Desktop starting";
+    case "connected":
+      return "Desktop ready";
+    case "unavailable":
+      return "Desktop unavailable";
+  }
 }
 
 function App() {
@@ -164,8 +177,8 @@ function App() {
     };
   }, [dirtyProjectInstructionsId]);
 
-  function cycleTheme() {
-    setTheme(getNextThemePreference(theme));
+  function updateThemePreference(nextTheme: ThemePreference) {
+    setTheme(nextTheme);
   }
 
   function updateProjectName(displayName: string) {
@@ -291,49 +304,36 @@ function App() {
 
   return (
     <main className="app-shell">
-      <nav className="topbar" aria-label="Application">
-        <div className="wordmark">
-          <span className="wordmark-mark" aria-hidden="true">
-            t
-          </span>
-          <span>Tule</span>
+      <header className="topbar">
+        <div className="wordmark" role="img" aria-label="TULE">
+          <pre className="wordmark-art" aria-hidden="true">
+            {tuleWordmark}
+          </pre>
         </div>
-        <button className="theme-control" type="button" onClick={cycleTheme}>
-          <span aria-hidden="true">
-            {theme === "dark" ? "Moon" : theme === "light" ? "Sun" : "Auto"}
-          </span>
-          <span className="sr-only">Appearance: {theme}. Change appearance.</span>
-        </button>
-      </nav>
+        <div className="appearance-control">
+          <label htmlFor="appearance-preference">Appearance</label>
+          <select
+            id="appearance-preference"
+            value={theme}
+            onChange={(event) =>
+              updateThemePreference(event.currentTarget.value as ThemePreference)
+            }
+          >
+            <option value="system">System</option>
+            <option value="light">Light</option>
+            <option value="dark">Dark</option>
+          </select>
+        </div>
+      </header>
 
-      <section className="hero" aria-labelledby="page-title">
-        <p className="eyebrow">PROJECTS</p>
-        <h1 id="page-title">Make room for the work that matters now.</h1>
-        <p className="lede">
-          Create a local project or open one already in motion. Tule keeps the boundary quiet and
-          the next decision close.
-        </p>
-      </section>
-
-      <section className="workspace-card" aria-labelledby="workspace-title">
-        <div className="card-heading">
-          <div>
-            <p className="section-label">DESKTOP WORKSPACE</p>
-            <h2 id="workspace-title">Your local workspace</h2>
-          </div>
+      <section className="workspace" aria-labelledby="page-title">
+        <div className="workspace-heading">
+          <h1 id="page-title">Projects</h1>
           <span className={`status-pill status-${connection}`} aria-live="polite">
             <span className="status-dot" aria-hidden="true" />
-            {connection === "connected"
-              ? "Core connected"
-              : connection === "checking"
-                ? "Checking core"
-                : "Desktop required"}
+            {connectionLabel(connection)}
           </span>
         </div>
-
-        <p className="card-copy">
-          Projects are owned by Tule and opened through a narrow native boundary.
-        </p>
 
         {projectError === null ? null : (
           <div className="project-error" role="alert">
@@ -354,19 +354,13 @@ function App() {
 
           <div className="project-side-panel">
             <section className="selected-project" aria-labelledby="selected-project-title">
-              <p className="section-label">SELECTED PROJECT</p>
+              <p className="panel-label">Current project</p>
               <h2 id="selected-project-title">
-                {selectedProject?.displayName ?? "Nothing open yet"}
+                {selectedProject?.displayName ?? "No project selected"}
               </h2>
-              <p className="panel-copy">
-                {selectedProject === null
-                  ? "Choose a project from the list when you are ready to continue."
-                  : "This project is selected. Keep its durable guidance close to the work."}
-              </p>
-              <span className="selection-state">
-                {selectedProject === null ? "No project selected" : "Selected"}
-              </span>
-              {selectedProject === null ? null : (
+              {selectedProject === null ? (
+                <p className="panel-copy">Select a project to view its instructions.</p>
+              ) : (
                 <ProjectInstructionsEditor
                   project={selectedProject}
                   onDirtyChange={handleProjectInstructionsDirtyChange}
@@ -385,28 +379,13 @@ function App() {
             />
           </div>
         </div>
-
-        <dl className="foundation-details">
-          <div>
-            <dt>Application</dt>
-            <dd>{applicationInfo?.name ?? "Tule"}</dd>
-          </div>
-          <div>
-            <dt>Build</dt>
-            <dd>{applicationInfo?.version ?? "0.1.0"}</dd>
-          </div>
-          <div>
-            <dt>Appearance</dt>
-            <dd>{theme[0].toUpperCase() + theme.slice(1)}</dd>
-          </div>
-        </dl>
       </section>
 
-      <footer>
-        <span>Local first.</span>
-        <span aria-hidden="true">&#183;</span>
-        <span>Projects stay yours.</span>
-      </footer>
+      {applicationInfo === null ? null : (
+        <footer>
+          <span>Version {applicationInfo.version}</span>
+        </footer>
+      )}
     </main>
   );
 }

@@ -267,10 +267,7 @@ function ProjectInstructionsEditorSession({
   return (
     <form className="project-instructions-editor" onSubmit={(event) => void handleSubmit(event)}>
       <div className="instructions-heading">
-        <div>
-          <p className="section-label">PROJECT GUIDANCE</p>
-          <h3 id="project-instructions-title">Instructions</h3>
-        </div>
+        <h3 id="project-instructions-title">Instructions</h3>
         <span
           className={statusClassName}
           id="project-instructions-status"
@@ -280,9 +277,6 @@ function ProjectInstructionsEditorSession({
         </span>
       </div>
 
-      <p className="instructions-copy" id="project-instructions-description">
-        Keep the durable guidance for this project in plain text.
-      </p>
       <label className="sr-only" htmlFor="project-instructions">
         Project instructions
       </label>
@@ -291,7 +285,7 @@ function ProjectInstructionsEditorSession({
         name="instructions"
         value={toTextareaValue(draft)}
         disabled={savePhase === "saving"}
-        aria-describedby="project-instructions-description project-instructions-status"
+        aria-describedby="project-instructions-status"
         onBeforeInput={(event) => captureEditSelection(event.currentTarget)}
         onChange={(event) => updateDraft(event.currentTarget)}
         onKeyDown={(event) => captureEditSelection(event.currentTarget)}

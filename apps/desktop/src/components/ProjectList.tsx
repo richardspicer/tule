@@ -56,7 +56,6 @@ export function ProjectList({
               >
                 <span className="project-list-copy">
                   <strong>{project.displayName}</strong>
-                  <span>{isSelected ? "Selected project" : "Local project"}</span>
                 </span>
                 <span className="project-list-action" aria-live="polite">
                   {isOpening ? "Opening…" : isSelected ? "Selected" : "Open"}
@@ -72,10 +71,7 @@ export function ProjectList({
   return (
     <section className="project-list-panel" aria-labelledby="project-list-title">
       <div className="panel-heading">
-        <div>
-          <p className="section-label">LOCAL WORK</p>
-          <h2 id="project-list-title">Projects</h2>
-        </div>
+        <h2 id="project-list-title">Project list</h2>
         {loadState === "ready" ? (
           <span className="project-count">
             {projects.length} {projects.length === 1 ? "project" : "projects"}

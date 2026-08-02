@@ -28,7 +28,7 @@ pub struct ApplicationInfo {
 #[must_use]
 pub fn get_application_info() -> ApplicationInfo {
     ApplicationInfo {
-        name: "Tule".to_owned(),
+        name: "TULE".to_owned(),
         version: env!("CARGO_PKG_VERSION").to_owned(),
     }
 }
@@ -44,7 +44,7 @@ mod tests {
         assert_eq!(
             info,
             ApplicationInfo {
-                name: "Tule".to_owned(),
+                name: "TULE".to_owned(),
                 version: env!("CARGO_PKG_VERSION").to_owned(),
             }
         );

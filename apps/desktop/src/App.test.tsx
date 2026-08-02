@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
@@ -9,6 +9,13 @@ interface NativeCloseRequestedEvent {
 }
 
 type NativeCloseRequestedHandler = (event: NativeCloseRequestedEvent) => void;
+
+const tuleWordmarkLines = [
+  "▀▀▀▀█▀▀▀ ██    ██ ██      ██▀▀▀▀▀▀",
+  "   ██    ██    ██ ██      ██▄▄▄▄▄ ",
+  "   ██    ██    ██ ██      ██      ",
+  "   ██    ██▄▄▄▄▄█ ██▄▄▄▄▄ ██▄▄▄▄▄▄",
+] as const;
 
 const {
   createProjectMock,
@@ -84,20 +91,71 @@ describe("App", () => {
     openProjectMock.mockReset();
     unlistenCloseRequestedMock.mockReset();
     updateProjectInstructionsMock.mockReset();
+    window.localStorage.clear();
 
-    getApplicationInfoMock.mockResolvedValue({ name: "Tule", version: "0.1.0" });
+    getApplicationInfoMock.mockResolvedValue({ name: "TULE", version: "0.1.0" });
     listProjectsMock.mockResolvedValue([]);
     onCloseRequestedMock.mockResolvedValue(unlistenCloseRequestedMock);
   });
 
-  it("shows application information after the Rust boundary connects", async () => {
-    getApplicationInfoMock.mockResolvedValue({ name: "Tule Test", version: "9.8.7" });
+  it("presents the TULE wordmark once as an accessible graphic", async () => {
+    render(<App />);
+
+    await screen.findByText("Desktop ready");
+
+    const wordmark = screen.getByRole("img", { name: "TULE" });
+    expect(wordmark).toBeVisible();
+    expect(screen.getAllByRole("img", { name: "TULE" })).toHaveLength(1);
+
+    const artwork = within(wordmark).getByText((_, element) => {
+      return element?.classList.contains("wordmark-art") ?? false;
+    });
+    expect(artwork).toHaveAttribute("aria-hidden", "true");
+    expect(artwork.textContent?.split("\n")).toEqual([...tuleWordmarkLines]);
+  });
+
+  it("uses the settled Projects headings and connection states", async () => {
+    render(<App />);
+
+    expect(screen.getByRole("heading", { level: 1, name: "Projects" })).toBeVisible();
+    expect(screen.getByRole("heading", { level: 2, name: "Project list" })).toBeVisible();
+    expect(screen.getByRole("heading", { level: 2, name: "No project selected" })).toBeVisible();
+    expect(screen.getByRole("heading", { level: 2, name: "New project" })).toBeVisible();
+    expect(screen.getByText("Current project")).toBeVisible();
+    expect(screen.getByText("Select a project to view its instructions.")).toBeVisible();
+    expect(screen.getByText("Desktop starting")).toBeVisible();
+    expect(await screen.findByText("Desktop ready")).toBeVisible();
+    expect(await screen.findByText("Version 0.1.0")).toBeVisible();
+  });
+
+  it("does not render removed promotional or implementation-oriented copy", async () => {
+    render(<App />);
+
+    await screen.findByText("Desktop ready");
+
+    expect(screen.queryByText("Make room for the work that matters now.")).not.toBeInTheDocument();
+    expect(screen.queryByText(/keeps the boundary quiet/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/narrow native boundary/i)).not.toBeInTheDocument();
+    expect(screen.queryByText("Local first.")).not.toBeInTheDocument();
+    expect(screen.queryByText("Projects stay yours.")).not.toBeInTheDocument();
+    expect(screen.queryByText("DESKTOP WORKSPACE")).not.toBeInTheDocument();
+    expect(screen.queryByText("Your local workspace")).not.toBeInTheDocument();
+    expect(screen.queryByText("LOCAL WORK")).not.toBeInTheDocument();
+    expect(screen.queryByText("Local project")).not.toBeInTheDocument();
+    expect(screen.queryByText("Selected project")).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("Keep the durable guidance for this project in plain text."),
+    ).not.toBeInTheDocument();
+  });
+
+  it("shows the version footer after the Rust boundary connects", async () => {
+    getApplicationInfoMock.mockResolvedValue({ name: "TULE", version: "9.8.7" });
 
     render(<App />);
 
-    expect(await screen.findByText("Core connected")).toBeVisible();
-    expect(screen.getByText("Tule Test")).toBeVisible();
-    expect(screen.getByText("9.8.7")).toBeVisible();
+    expect(await screen.findByText("Desktop ready")).toBeVisible();
+    expect(screen.getByText("Version 9.8.7")).toBeVisible();
+    expect(screen.queryByText("TULE", { selector: "dd" })).not.toBeInTheDocument();
   });
 
   it("reports when the desktop boundary is unavailable", async () => {
@@ -105,25 +163,37 @@ describe("App", () => {
 
     render(<App />);
 
-    expect(await screen.findByText("Desktop required")).toBeVisible();
+    expect(await screen.findByText("Desktop unavailable")).toBeVisible();
+    expect(screen.queryByText(/^Version /)).not.toBeInTheDocument();
   });
 
-  it("loads a saved theme and cycles back to the system preference", async () => {
+  it("loads a saved theme and supports System, Light, and Dark selection", async () => {
     const user = userEvent.setup();
     window.localStorage.setItem("tule-theme", "dark");
 
     render(<App />);
 
+    const appearance = screen.getByLabelText("Appearance");
     expect(document.documentElement).toHaveAttribute("data-theme", "dark");
-    expect(screen.getByText("Dark", { selector: "dd" })).toBeVisible();
+    expect(appearance).toHaveValue("dark");
 
-    await user.click(
-      screen.getByRole("button", { name: /appearance: dark\. change appearance\./i }),
-    );
+    await user.selectOptions(appearance, "system");
 
     expect(document.documentElement).not.toHaveAttribute("data-theme");
     expect(window.localStorage.getItem("tule-theme")).toBeNull();
-    expect(screen.getByText("System", { selector: "dd" })).toBeVisible();
+    expect(appearance).toHaveValue("system");
+
+    await user.selectOptions(appearance, "light");
+
+    expect(document.documentElement).toHaveAttribute("data-theme", "light");
+    expect(window.localStorage.getItem("tule-theme")).toBe("light");
+    expect(appearance).toHaveValue("light");
+
+    await user.selectOptions(appearance, "dark");
+
+    expect(document.documentElement).toHaveAttribute("data-theme", "dark");
+    expect(window.localStorage.getItem("tule-theme")).toBe("dark");
+    expect(appearance).toHaveValue("dark");
   });
 
   it("shows loading before an empty project list resolves", async () => {
@@ -156,7 +226,7 @@ describe("App", () => {
     expect(firstProject).toHaveAttribute("aria-pressed", "false");
     expect(secondProject).toHaveAttribute("aria-pressed", "false");
     expect(screen.getByText("2 projects")).toBeVisible();
-    expect(screen.getByText("No project selected")).toBeVisible();
+    expect(screen.getByRole("heading", { level: 2, name: "No project selected" })).toBeVisible();
   });
 
   it("submits a trimmed name, shows creation progress, and selects the returned project", async () => {
@@ -179,7 +249,7 @@ describe("App", () => {
     const projectButton = await screen.findByRole("button", { name: /new plan/i });
     await waitFor(() => expect(projectButton).toHaveAttribute("aria-pressed", "true"));
     expect(screen.getByRole("heading", { level: 2, name: "New plan" })).toBeVisible();
-    expect(screen.getByText("Selected", { selector: ".selection-state" })).toBeVisible();
+    expect(projectButton).toHaveTextContent("Selected");
     expect(screen.getByLabelText("Project name")).toHaveValue("");
   });
 
@@ -216,7 +286,7 @@ describe("App", () => {
     expect(projectButton).toHaveAttribute("aria-pressed", "false");
     expect(projectButton).toHaveAttribute("aria-busy", "true");
     expect(screen.getByRole("button", { name: /first project.*opening/i })).toBe(projectButton);
-    expect(screen.getByText("No project selected")).toBeVisible();
+    expect(screen.getByRole("heading", { level: 2, name: "No project selected" })).toBeVisible();
 
     pendingProject.resolve({
       id: "project-1",
@@ -228,6 +298,7 @@ describe("App", () => {
     expect(projectButton).not.toHaveAttribute("aria-busy");
     expect(screen.getByRole("heading", { level: 2, name: "First project" })).toBeVisible();
     expect(screen.getByLabelText("Project instructions")).toHaveValue("Existing guidance");
+    expect(screen.getByRole("heading", { level: 3, name: "Instructions" })).toBeVisible();
   });
 
   it("saves exact instructions and replaces the selected and listed project", async () => {
@@ -295,7 +366,7 @@ describe("App", () => {
     closeRequestedHandler({ preventDefault: preventNativeClose });
 
     expect(confirmClose).toHaveBeenCalledWith(
-      "Discard unsaved project instructions and close Tule?",
+      "Discard unsaved project instructions and close TULE?",
     );
     expect(preventNativeClose).toHaveBeenCalledOnce();
 
@@ -377,7 +448,7 @@ describe("App", () => {
     closeRequestedHandler({ preventDefault: preventNativeClose });
 
     expect(confirmClose).toHaveBeenCalledWith(
-      "Discard unsaved project instructions and close Tule?",
+      "Discard unsaved project instructions and close TULE?",
     );
     expect(preventNativeClose).not.toHaveBeenCalled();
   });
@@ -609,7 +680,7 @@ describe("App", () => {
     render(<App />);
 
     const alert = await screen.findByRole("alert");
-    expect(alert).toHaveTextContent("Project storage is unavailable. Restart Tule to try again.");
+    expect(alert).toHaveTextContent("Project storage is unavailable. Restart TULE to try again.");
     expect(screen.getByText("Projects are unavailable.")).toBeVisible();
     expect(screen.queryByText("No projects yet")).not.toBeInTheDocument();
     expect(

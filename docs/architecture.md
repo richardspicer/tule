@@ -59,6 +59,15 @@ the main thread and return minimal project records or one of four allowlisted
 error codes; they never expose the database path, raw SQL, or internal errors.
 No frontend capability is required for project persistence.
 
+Project instructions extend that same project-owned boundary. The core keeps
+the instructions as exact plain text, permits empty content, and defines the
+update use case and repository operation. The native adapter persists the text
+through an append-only migration and bound SQLite parameters. The interface can
+save instructions only through the named `update_project_instructions` command;
+it receives the updated bounded project record and no storage details. This
+does not add a frontend capability, rich-text interpretation, instruction
+history, or a generic project-settings surface.
+
 ## Trust Boundary
 
 The webview is not a privileged execution environment. Native commands must

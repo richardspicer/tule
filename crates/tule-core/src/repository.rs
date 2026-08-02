@@ -20,4 +20,15 @@ pub trait ProjectRepository: Send + Sync {
 
     /// Finds a project by its stable identifier.
     fn find_by_id(&self, id: &ProjectId) -> Result<Option<Project>, Self::Error>;
+
+    /// Replaces a project's instructions and returns the updated project.
+    ///
+    /// Implementations must preserve `instructions` exactly, without trimming,
+    /// normalization, or interpretation. [`None`] indicates that no project has
+    /// the supplied identifier.
+    fn update_instructions(
+        &self,
+        id: &ProjectId,
+        instructions: &str,
+    ) -> Result<Option<Project>, Self::Error>;
 }

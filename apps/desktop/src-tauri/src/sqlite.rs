@@ -11,7 +11,10 @@ use tule_core::{Project, ProjectId, ProjectReconstructionError, ProjectRepositor
 
 pub(crate) const DATABASE_FILENAME: &str = "tule.sqlite3";
 
-const MIGRATION_SET: &[M<'static>] = &[M::up(include_str!("../migrations/0001_projects.sql"))];
+const MIGRATION_SET: &[M<'static>] = &[
+    M::up(include_str!("../migrations/0001_projects.sql")),
+    M::up(include_str!("../migrations/0002_project_instructions.sql")),
+];
 const MIGRATIONS: Migrations<'static> = Migrations::from_slice(MIGRATION_SET);
 
 pub(crate) struct SqliteProjectRepository {
@@ -51,10 +54,12 @@ impl ProjectRepository for SqliteProjectRepository {
     fn create(&self, project: &Project) -> Result<(), Self::Error> {
         self.connection()?
             .execute(
-                "INSERT INTO projects (id, display_name, created_at_unix_ms) VALUES (?1, ?2, ?3)",
+                "INSERT INTO projects (id, display_name, instructions, created_at_unix_ms) \
+                 VALUES (?1, ?2, ?3, ?4)",
                 params![
                     project.id().to_string(),
                     project.name().as_str(),
+                    project.instructions(),
                     project.created_at_unix_ms()
                 ],
             )
@@ -66,7 +71,7 @@ impl ProjectRepository for SqliteProjectRepository {
         let connection = self.connection()?;
         let mut statement = connection
             .prepare(
-                "SELECT id, display_name, created_at_unix_ms \
+                "SELECT id, display_name, instructions, created_at_unix_ms \
                  FROM projects \
                  ORDER BY created_at_unix_ms ASC, id ASC",
             )
@@ -76,16 +81,22 @@ impl ProjectRepository for SqliteProjectRepository {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
-                    row.get::<_, i64>(2)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
                 ))
             })
             .map_err(SqliteProjectRepositoryError::Database)?;
 
         let mut projects = Vec::new();
         for row in rows {
-            let (id, name, created_at_unix_ms) =
+            let (id, name, instructions, created_at_unix_ms) =
                 row.map_err(SqliteProjectRepositoryError::Database)?;
-            projects.push(reconstruct_stored_project(&id, &name, created_at_unix_ms)?);
+            projects.push(reconstruct_stored_project(
+                &id,
+                &name,
+                &instructions,
+                created_at_unix_ms,
+            )?);
         }
         Ok(projects)
     }
@@ -94,13 +105,15 @@ impl ProjectRepository for SqliteProjectRepository {
         let connection = self.connection()?;
         let stored = connection
             .query_row(
-                "SELECT id, display_name, created_at_unix_ms FROM projects WHERE id = ?1",
+                "SELECT id, display_name, instructions, created_at_unix_ms \
+                 FROM projects WHERE id = ?1",
                 [id.to_string()],
                 |row| {
                     Ok((
                         row.get::<_, String>(0)?,
                         row.get::<_, String>(1)?,
-                        row.get::<_, i64>(2)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, i64>(3)?,
                     ))
                 },
             )
@@ -108,21 +121,63 @@ impl ProjectRepository for SqliteProjectRepository {
             .map_err(SqliteProjectRepositoryError::Database)?;
 
         stored
-            .map(|(stored_id, name, created_at_unix_ms)| {
-                reconstruct_stored_project(&stored_id, &name, created_at_unix_ms)
+            .map(|(stored_id, name, instructions, created_at_unix_ms)| {
+                reconstruct_stored_project(&stored_id, &name, &instructions, created_at_unix_ms)
             })
             .transpose()
+    }
+
+    fn update_instructions(
+        &self,
+        id: &ProjectId,
+        instructions: &str,
+    ) -> Result<Option<Project>, Self::Error> {
+        let connection = self.connection()?;
+        let updated = connection
+            .execute(
+                "UPDATE projects SET instructions = ?1 WHERE id = ?2",
+                params![instructions, id.to_string()],
+            )
+            .map_err(SqliteProjectRepositoryError::Database)?;
+
+        if updated == 0 {
+            return Ok(None);
+        }
+
+        let (stored_id, name, stored_instructions, created_at_unix_ms) = connection
+            .query_row(
+                "SELECT id, display_name, instructions, created_at_unix_ms \
+                 FROM projects WHERE id = ?1",
+                [id.to_string()],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, i64>(3)?,
+                    ))
+                },
+            )
+            .map_err(SqliteProjectRepositoryError::Database)?;
+
+        reconstruct_stored_project(&stored_id, &name, &stored_instructions, created_at_unix_ms)
+            .map(Some)
     }
 }
 
 fn reconstruct_stored_project(
     id: &str,
     name: &str,
+    instructions: &str,
     created_at_unix_ms: i64,
 ) -> Result<Project, SqliteProjectRepositoryError> {
-    let project = Project::from_stored_parts(id, name, created_at_unix_ms).map_err(|error| {
-        SqliteProjectRepositoryError::MalformedProject(StoredProjectError::Reconstruction(error))
-    })?;
+    let project = Project::from_stored_parts(id, name, instructions, created_at_unix_ms).map_err(
+        |error| {
+            SqliteProjectRepositoryError::MalformedProject(StoredProjectError::Reconstruction(
+                error,
+            ))
+        },
+    )?;
     if project.id().to_string() != id {
         return Err(SqliteProjectRepositoryError::MalformedProject(
             StoredProjectError::NonCanonicalProjectId,
@@ -207,8 +262,13 @@ mod tests {
     }
 
     fn stored_project(name: &str, created_at_unix_ms: i64) -> Project {
-        Project::from_stored_parts(&ProjectId::generate().to_string(), name, created_at_unix_ms)
-            .unwrap()
+        Project::from_stored_parts(
+            &ProjectId::generate().to_string(),
+            name,
+            "",
+            created_at_unix_ms,
+        )
+        .unwrap()
     }
 
     fn open_repository(path: &Path) -> SqliteProjectRepository {
@@ -232,7 +292,7 @@ mod tests {
             .unwrap()
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 1);
+        assert_eq!(version, 2);
         drop(repository);
 
         let reopened = open_repository(&path);
@@ -242,7 +302,44 @@ mod tests {
             .unwrap()
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 1);
+        assert_eq!(version, 2);
+    }
+
+    #[test]
+    fn version_one_projects_migrate_with_empty_instructions() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = database_path(&directory);
+        let id = ProjectId::generate().to_string();
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch(include_str!("../migrations/0001_projects.sql"))
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO projects (id, display_name, created_at_unix_ms) VALUES (?1, ?2, ?3)",
+                params![id, "Existing project", 42_i64],
+            )
+            .unwrap();
+        connection
+            .pragma_update(None, "user_version", 1_i64)
+            .unwrap();
+        drop(connection);
+
+        let repository = open_repository(&path);
+        let projects = repository.list().unwrap();
+        let version: i64 = repository
+            .connection
+            .lock()
+            .unwrap()
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+
+        assert_eq!(version, 2);
+        assert_eq!(projects.len(), 1);
+        assert_eq!(projects[0].id().to_string(), id);
+        assert_eq!(projects[0].name().as_str(), "Existing project");
+        assert_eq!(projects[0].instructions(), "");
+        assert_eq!(projects[0].created_at_unix_ms(), 42);
     }
 
     #[test]
@@ -257,7 +354,7 @@ mod tests {
             )
             .unwrap();
         connection
-            .pragma_update(None, "user_version", 2_i64)
+            .pragma_update(None, "user_version", 3_i64)
             .unwrap();
         drop(connection);
 
@@ -270,7 +367,7 @@ mod tests {
         let sentinel: String = connection
             .query_row("SELECT value FROM future_sentinel", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 2);
+        assert_eq!(version, 3);
         assert_eq!(sentinel, "preserve me");
     }
 
@@ -403,15 +500,36 @@ mod tests {
     }
 
     #[test]
-    fn create_list_and_open_survive_drop_and_reopen() {
+    fn instruction_update_with_unicode_and_multiple_lines_survives_reopen() {
         let directory = tempfile::tempdir().unwrap();
         let path = database_path(&directory);
         let repository = open_repository(&path);
         let project = tule_core::create_project(&repository, "Persistent project").unwrap();
+        let instructions = "Explore the evidence.\n记录 the open questions.\nKeep ‘why’ visible.";
+        let updated = repository
+            .update_instructions(&project.id(), instructions)
+            .unwrap()
+            .unwrap();
+        assert_eq!(updated.instructions(), instructions);
         drop(repository);
 
         let reopened = open_repository(&path);
-        assert_eq!(reopened.list().unwrap(), vec![project.clone()]);
-        assert_eq!(reopened.find_by_id(&project.id()).unwrap(), Some(project));
+        assert_eq!(reopened.list().unwrap(), vec![updated.clone()]);
+        assert_eq!(reopened.find_by_id(&project.id()).unwrap(), Some(updated));
+    }
+
+    #[test]
+    fn instruction_update_returns_none_for_a_missing_project() {
+        let directory = tempfile::tempdir().unwrap();
+        let repository = open_repository(&database_path(&directory));
+        let missing_id = ProjectId::generate();
+
+        assert_eq!(
+            repository
+                .update_instructions(&missing_id, "Do not create a row")
+                .unwrap(),
+            None
+        );
+        assert!(repository.list().unwrap().is_empty());
     }
 }

@@ -1,6 +1,6 @@
-# Tule
+# TULE
 
-Tule is an early-stage desktop workspace for structured AI-assisted thinking,
+TULE is an early-stage desktop workspace for structured AI-assisted thinking,
 decisions, and implementation. This repository currently contains the native
 desktop foundation: a Tauri host, a React and TypeScript interface, and a
 Tauri-independent Rust core.
@@ -27,7 +27,7 @@ Run the read-only environment check at any time:
 pwsh -File .\scripts\doctor.ps1
 ```
 
-## Engineering Standards
+## Standards
 
 Contribution, commenting, testing, and review expectations are documented in
 [`CONTRIBUTING.md`](CONTRIBUTING.md). The current application boundaries are

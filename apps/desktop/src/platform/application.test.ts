@@ -15,7 +15,7 @@ describe("getApplicationInfo", () => {
   });
 
   it("returns a valid response from the narrow Tauri command", async () => {
-    const applicationInfo = { name: "Tule", version: "0.1.0" };
+    const applicationInfo = { name: "TULE", version: "0.1.0" };
     invokeMock.mockResolvedValue(applicationInfo);
 
     await expect(getApplicationInfo()).resolves.toEqual(applicationInfo);
@@ -23,7 +23,7 @@ describe("getApplicationInfo", () => {
   });
 
   it("rejects a response that violates the frontend contract", async () => {
-    invokeMock.mockResolvedValue({ name: "Tule", version: 1 });
+    invokeMock.mockResolvedValue({ name: "TULE", version: 1 });
 
     await expect(getApplicationInfo()).rejects.toThrow("invalid application-info response");
   });

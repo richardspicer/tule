@@ -5,7 +5,7 @@ import App from "./App";
 const rootElement = document.getElementById("root");
 
 if (rootElement === null) {
-  throw new Error("Tule could not find its application root element.");
+  throw new Error("TULE could not find its application root element.");
 }
 
 ReactDOM.createRoot(rootElement).render(

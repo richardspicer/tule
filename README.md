@@ -5,9 +5,11 @@ decisions, and implementation. This repository currently contains the native
 desktop foundation: a Tauri host, a React and TypeScript interface, and a
 Tauri-independent Rust core.
 
-The product surface is still being shaped. The initial foundation deliberately
-does not include provider integrations, an agent runtime, plugins, or publishing
-automation.
+The first operational slice centers on an Agent workbench: local sessions,
+optional Project context, and one experimental ChatGPT subscription
+compatibility adapter with OS-backed credentials. Tools, filesystem or process
+access, plugins, publication automation, and broader agent runtimes remain out
+of scope.
 
 ## Development
 

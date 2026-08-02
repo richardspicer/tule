@@ -73,7 +73,6 @@ export function ProjectList({
     <section className="project-list-panel" aria-labelledby="project-list-title">
       <div className="panel-heading">
         <div>
-          <p className="section-label">LOCAL WORK</p>
           <h2 id="project-list-title">Projects</h2>
         </div>
         {loadState === "ready" ? (

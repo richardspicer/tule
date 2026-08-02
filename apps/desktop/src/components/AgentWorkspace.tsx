@@ -1,19 +1,28 @@
 import { useId, type FormEvent, type KeyboardEvent } from "react";
-import type { AgentTurn } from "../platform/agents";
+import { getSafeAgentErrorMessageForCode, type AgentTurn } from "../platform/agents";
+
+interface AgentProjectOption {
+  id: string;
+  displayName: string;
+}
 
 interface AgentWorkspaceProps {
   title: string;
-  projectLabel: string;
+  projectId: string | null;
+  projects: readonly AgentProjectOption[];
   modelLabel: string;
   turns: readonly AgentTurn[];
   draft: string;
   connected: boolean;
   sending: boolean;
+  sendBlocked: boolean;
+  cancelRequested: boolean;
   activeTurnId: string | null;
   errorMessage: string | null;
   onDraftChange: (value: string) => void;
   onSend: () => void;
   onCancel: () => void;
+  onProjectChange: (projectId: string | null) => void;
   onOpenSettings: () => void;
   settingsButtonRef: React.RefObject<HTMLButtonElement | null>;
 }
@@ -36,17 +45,21 @@ function turnStateLabel(state: string): string | null {
 
 export function AgentWorkspace({
   title,
-  projectLabel,
+  projectId,
+  projects,
   modelLabel,
   turns,
   draft,
   connected,
   sending,
+  sendBlocked,
+  cancelRequested,
   activeTurnId,
   errorMessage,
   onDraftChange,
   onSend,
   onCancel,
+  onProjectChange,
   onOpenSettings,
   settingsButtonRef,
 }: AgentWorkspaceProps) {
@@ -54,7 +67,7 @@ export function AgentWorkspace({
 
   function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (connected && !sending) {
+    if (connected && !sending && !sendBlocked) {
       onSend();
     }
   }
@@ -62,7 +75,7 @@ export function AgentWorkspace({
   function handleKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
     if (event.key === "Enter" && !event.shiftKey) {
       event.preventDefault();
-      if (connected && !sending) {
+      if (connected && !sending && !sendBlocked) {
         onSend();
       }
     }
@@ -76,7 +89,20 @@ export function AgentWorkspace({
             {title}
           </h1>
           <p className="session-meta">
-            <span className="truncate">{projectLabel}</span>
+            <select
+              className="truncate"
+              aria-label="Project context"
+              value={projectId ?? ""}
+              disabled={sending || sendBlocked}
+              onChange={(event) => onProjectChange(event.currentTarget.value || null)}
+            >
+              <option value="">No project</option>
+              {projects.map((project) => (
+                <option key={project.id} value={project.id}>
+                  {project.displayName}
+                </option>
+              ))}
+            </select>
             <span aria-hidden="true">·</span>
             <span>ChatGPT subscription</span>
             <span aria-hidden="true">·</span>
@@ -114,7 +140,7 @@ export function AgentWorkspace({
                   {stateLabel === null ? null : <p className="turn-state">{stateLabel}</p>}
                   {turn.errorCode === null ? null : (
                     <p className="turn-state" role="status">
-                      {turn.errorCode}
+                      {getSafeAgentErrorMessageForCode(turn.errorCode)}
                     </p>
                   )}
                 </div>
@@ -146,14 +172,19 @@ export function AgentWorkspace({
             />
             <div className="composer-actions">
               {sending ? (
-                <button className="secondary-action" type="button" onClick={onCancel}>
-                  Cancel
+                <button
+                  className="secondary-action"
+                  type="button"
+                  disabled={cancelRequested}
+                  onClick={onCancel}
+                >
+                  {cancelRequested ? "Cancelling…" : "Cancel"}
                 </button>
               ) : null}
               <button
                 className="primary-action"
                 type="submit"
-                disabled={sending || draft.trim().length === 0}
+                disabled={sending || sendBlocked || draft.trim().length === 0}
               >
                 {sending ? "Sending…" : "Send"}
               </button>

@@ -58,7 +58,10 @@ fn initialize_store<R: tauri::Runtime>(app: &tauri::App<R>) -> Option<Arc<Sqlite
 
 #[tauri::command]
 fn connection_status(state: tauri::State<'_, AgentState>) -> ConnectionStatus {
-    state.provider.connection_status()
+    state.chatgpt().map_or_else(
+        || state.provider.connection_status(),
+        |adapter| adapter.connection_status_with_store(state.store.as_ref()),
+    )
 }
 
 /// Connection setup is intentionally native-only. The frontend is never given
@@ -68,6 +71,7 @@ async fn connect_chatgpt(
     app: tauri::AppHandle,
     state: tauri::State<'_, AgentState>,
 ) -> Result<ConnectionStatus, PublicError> {
+    let _operation = state.try_operation()?;
     let Some(adapter) = state.chatgpt() else {
         return Ok(state.provider.connection_status());
     };
@@ -83,9 +87,18 @@ async fn connect_chatgpt(
 }
 
 #[tauri::command]
+fn cancel_chatgpt_connect(state: tauri::State<'_, AgentState>) -> Result<(), PublicError> {
+    let Some(adapter) = state.chatgpt() else {
+        return Err(PublicError::ProviderUnavailable);
+    };
+    adapter.cancel_connect()
+}
+
+#[tauri::command]
 async fn disconnect_chatgpt(
     state: tauri::State<'_, AgentState>,
 ) -> Result<ConnectionStatus, PublicError> {
+    let _operation = state.try_operation()?;
     if state
         .store
         .has_inflight_turn()
@@ -108,7 +121,9 @@ pub fn run() {
                 app.manage(ProjectStorageState::unavailable());
                 return Ok(());
             };
-            let _ = tule_core::interrupt_inflight_turns(store.as_ref());
+            tule_core::interrupt_inflight_turns(store.as_ref()).map_err(|_| {
+                std::io::Error::other("Agent storage recovery failed during startup")
+            })?;
             let chatgpt = Arc::new(ChatGptAdapter::new(native_store()));
             let provider: Arc<dyn provider::ProviderAdapter> = Arc::clone(&chatgpt) as _;
             app.manage(ProjectStorageState::ready_shared(Arc::clone(&store)));
@@ -128,6 +143,7 @@ pub fn run() {
             set_agent_session_project,
             connection_status,
             connect_chatgpt,
+            cancel_chatgpt_connect,
             disconnect_chatgpt
         ])
         .run(tauri::generate_context!())

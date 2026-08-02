@@ -1,6 +1,6 @@
 //! Provider-neutral Agent lifecycle, context selection, and recovery use cases.
 
-use std::{error::Error, fmt};
+use std::{collections::HashMap, error::Error, fmt};
 
 use crate::{
     AgentContextError, AgentEvent, AgentEventKind, AgentInputError, AgentOutputLimitError,
@@ -41,14 +41,28 @@ where
         return Err(PrepareAgentSendError::SessionBusy);
     }
 
-    let completed_history = match session_id {
-        Some(id) => {
-            let turns = repository
-                .list_turns(&id)
-                .map_err(PrepareAgentSendError::repository)?;
-            completed_history_from_turns(&turns)
-        }
-        None => Vec::new(),
+    let existing_session = match session_id {
+        Some(id) => Some(
+            repository
+                .find_session(&id)
+                .map_err(PrepareAgentSendError::repository)?
+                .ok_or(PrepareAgentSendError::SessionNotFound)?,
+        ),
+        None => None,
+    };
+    if let Some(session) = existing_session.as_ref()
+        && session.project_id() != project_id
+    {
+        return Err(PrepareAgentSendError::ProjectAssociationMismatch);
+    }
+
+    let completed_history = if let Some(session) = existing_session.as_ref() {
+        let turns = repository
+            .list_turns(&session.id())
+            .map_err(PrepareAgentSendError::repository)?;
+        completed_history_from_turns(&turns)
+    } else {
+        Vec::new()
     };
 
     let request_json = assemble_responses_request_json(
@@ -64,12 +78,8 @@ where
 
     let provider_request_id = ProviderRequestId::generate();
 
-    if let Some(session_id) = session_id {
-        let mut session = repository
-            .find_session(&session_id)
-            .map_err(PrepareAgentSendError::repository)?
-            .ok_or(PrepareAgentSendError::SessionNotFound)?;
-        // Prospective association for this send uses the caller's selected project.
+    if let Some(mut session) = existing_session {
+        let session_id = session.id();
         let ordinal = repository
             .next_turn_ordinal(&session_id)
             .map_err(PrepareAgentSendError::repository)?;
@@ -289,10 +299,7 @@ where
     )
     .map_err(SetSessionProjectError::Time)?;
     repository
-        .update_session(&session)
-        .map_err(SetSessionProjectError::repository)?;
-    repository
-        .append_event(&event)
+        .update_session_with_event(&session, &event)
         .map_err(SetSessionProjectError::repository)?;
     Ok(session)
 }
@@ -305,11 +312,41 @@ where
     let inflight = repository
         .list_inflight_turns()
         .map_err(FinishAgentTurnError::repository)?;
-    let mut finished = Vec::with_capacity(inflight.len());
+    let mut next_sequences = HashMap::new();
+    let mut updates = Vec::with_capacity(inflight.len());
     for mut turn in inflight {
         turn.interrupt().map_err(FinishAgentTurnError::from)?;
-        finished.push(persist_terminal(repository, turn)?);
+        let mut session = repository
+            .find_session(&turn.session_id())
+            .map_err(FinishAgentTurnError::repository)?
+            .ok_or(FinishAgentTurnError::SessionNotFound)?;
+        session
+            .touch_updated_at()
+            .map_err(FinishAgentTurnError::Time)?;
+        let sequence = if let Some(next) = next_sequences.get_mut(&turn.session_id()) {
+            let sequence = *next;
+            *next += 1;
+            sequence
+        } else {
+            let sequence = repository
+                .next_event_sequence(&turn.session_id())
+                .map_err(FinishAgentTurnError::repository)?;
+            next_sequences.insert(turn.session_id(), sequence + 1);
+            sequence
+        };
+        let event = AgentEvent::new(
+            turn.session_id(),
+            Some(turn.id()),
+            sequence,
+            AgentEventKind::TurnInterrupted,
+        )
+        .map_err(FinishAgentTurnError::Time)?;
+        updates.push((session, turn, event));
     }
+    let finished = updates.iter().map(|(_, turn, _)| turn.clone()).collect();
+    repository
+        .finish_turns_with_terminal_events(&updates)
+        .map_err(FinishAgentTurnError::repository)?;
     Ok(finished)
 }
 
@@ -376,6 +413,8 @@ pub enum PrepareAgentSendError {
     SessionBusy,
     /// The referenced session does not exist.
     SessionNotFound,
+    /// The requested Project differs from the session's prospective association.
+    ProjectAssociationMismatch,
     /// Clock failure.
     Time(ProjectTimeError),
     /// Repository failure.
@@ -412,6 +451,9 @@ impl fmt::Display for PrepareAgentSendError {
             }
             Self::SessionBusy => formatter.write_str("an agent turn is already in flight"),
             Self::SessionNotFound => formatter.write_str("agent session not found"),
+            Self::ProjectAssociationMismatch => {
+                formatter.write_str("agent session Project association does not match")
+            }
             Self::Time(error) => error.fmt(formatter),
             Self::Repository(error) => error.fmt(formatter),
         }
@@ -424,7 +466,10 @@ impl Error for PrepareAgentSendError {
             Self::InvalidInput(error) => Some(error),
             Self::Time(error) => Some(error),
             Self::Repository(error) => Some(error.as_ref()),
-            Self::ContextLimit { .. } | Self::SessionBusy | Self::SessionNotFound => None,
+            Self::ContextLimit { .. }
+            | Self::SessionBusy
+            | Self::SessionNotFound
+            | Self::ProjectAssociationMismatch => None,
         }
     }
 }
@@ -774,6 +819,24 @@ mod tests {
             Ok(())
         }
 
+        fn update_session_with_event(
+            &self,
+            session: &AgentSession,
+            event: &AgentEvent,
+        ) -> Result<(), Self::Error> {
+            let mut state = self.inner.lock().unwrap();
+            let Some(index) = state
+                .sessions
+                .iter()
+                .position(|item| item.id() == session.id())
+            else {
+                return Err(FakeError("missing session"));
+            };
+            state.sessions[index] = session.clone();
+            state.events.push(event.clone());
+            Ok(())
+        }
+
         fn next_event_sequence(&self, session_id: &AgentSessionId) -> Result<u64, Self::Error> {
             Ok(self
                 .list_events(session_id)?
@@ -843,6 +906,37 @@ mod tests {
             self.update_session(session)?;
             self.update_turn(turn)?;
             self.append_event(terminal_event)?;
+            Ok(())
+        }
+
+        fn finish_turns_with_terminal_events(
+            &self,
+            updates: &[(AgentSession, AgentTurn, AgentEvent)],
+        ) -> Result<(), Self::Error> {
+            let mut state = self.inner.lock().unwrap();
+            for (session, turn, _) in updates {
+                if !state.sessions.iter().any(|item| item.id() == session.id()) {
+                    return Err(FakeError("missing session"));
+                }
+                if !state.turns.iter().any(|item| item.id() == turn.id()) {
+                    return Err(FakeError("missing turn"));
+                }
+            }
+            for (session, turn, event) in updates {
+                let session_index = state
+                    .sessions
+                    .iter()
+                    .position(|item| item.id() == session.id())
+                    .expect("validated session");
+                state.sessions[session_index] = session.clone();
+                let turn_index = state
+                    .turns
+                    .iter()
+                    .position(|item| item.id() == turn.id())
+                    .expect("validated turn");
+                state.turns[turn_index] = turn.clone();
+                state.events.push(event.clone());
+            }
             Ok(())
         }
     }
@@ -926,5 +1020,41 @@ mod tests {
                 .any(|event| event.kind() == AgentEventKind::ProjectAssociationChanged)
         );
         let _ = (PROVIDER_PROFILE_ID, MODEL_ID, AgentEventId::generate());
+    }
+
+    #[test]
+    fn existing_session_rejects_unconfirmed_project_context() {
+        let repository = FakeAgentRepository::default();
+        let prepared = prepare_agent_send(&repository, None, "Hello", None, "").unwrap();
+        complete_agent_turn(&repository, prepared.turn.id(), None, None, None).unwrap();
+        let event_count = repository
+            .list_events(&prepared.session.id())
+            .unwrap()
+            .len();
+
+        let error = prepare_agent_send(
+            &repository,
+            Some(prepared.session.id()),
+            "Use different context",
+            Some(ProjectId::generate()),
+            "unconfirmed instructions",
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            PrepareAgentSendError::ProjectAssociationMismatch
+        ));
+        assert_eq!(
+            repository.list_turns(&prepared.session.id()).unwrap().len(),
+            1
+        );
+        assert_eq!(
+            repository
+                .list_events(&prepared.session.id())
+                .unwrap()
+                .len(),
+            event_count
+        );
     }
 }

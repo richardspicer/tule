@@ -3,6 +3,7 @@ import {
   AgentError,
   cancelAgentTurn,
   getAgentErrorCode,
+  getAgentSession,
   getSafeAgentErrorMessage,
   listAgentSessions,
   sendAgentMessage,
@@ -45,6 +46,35 @@ describe("agents platform", () => {
     await expect(listAgentSessions()).rejects.toMatchObject({
       code: "agent_storage_unavailable",
     });
+  });
+
+  it("rejects non-allowlisted turn states and error codes", async () => {
+    for (const turn of [
+      { state: "secret-internal-state", errorCode: null },
+      { state: "failed", errorCode: "raw-provider-error" },
+    ]) {
+      invokeMock.mockResolvedValueOnce({
+        session: {
+          id: "s1",
+          title: "Hello",
+          projectId: null,
+          modelId: "gpt-5.5",
+        },
+        turns: [
+          {
+            id: "t1",
+            ordinal: 1,
+            userText: "Hello",
+            agentText: "",
+            ...turn,
+          },
+        ],
+      });
+
+      await expect(getAgentSession("s1")).rejects.toMatchObject({
+        code: "agent_storage_unavailable",
+      });
+    }
   });
 
   it("sends through a typed channel and preserves event order", async () => {

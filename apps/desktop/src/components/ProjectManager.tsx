@@ -47,7 +47,12 @@ export function ProjectManager({
           <h1 id="project-manager-title">Projects</h1>
           <p className="manager-copy">Manage local Projects used as optional Agent context.</p>
         </div>
-        <button className="secondary-action" type="button" onClick={onBackToAgents}>
+        <button
+          className="secondary-action"
+          type="button"
+          disabled={actionsDisabled}
+          onClick={onBackToAgents}
+        >
           Back to Agents
         </button>
       </header>
@@ -61,7 +66,7 @@ export function ProjectManager({
 
       <div className="project-manager-grid">
         <ProjectList
-          disabled={actionsDisabled && !isCreating}
+          disabled={actionsDisabled}
           loadState={loadState}
           openingProjectId={openingProjectId}
           projects={projects}
@@ -89,6 +94,7 @@ export function ProjectManager({
                 <button
                   className="primary-action"
                   type="button"
+                  disabled={actionsDisabled}
                   onClick={() => onUseWithAgents(selectedProject)}
                 >
                   Use with Agents

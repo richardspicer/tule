@@ -178,6 +178,13 @@ pub trait AgentRepository: Send + Sync {
     /// Appends an event. Sequence must be unique and increasing per session.
     fn append_event(&self, event: &AgentEvent) -> Result<(), Self::Error>;
 
+    /// Atomically updates a session and appends its provenance event.
+    fn update_session_with_event(
+        &self,
+        session: &AgentSession,
+        event: &AgentEvent,
+    ) -> Result<(), Self::Error>;
+
     /// Returns the next event sequence for a session.
     fn next_event_sequence(&self, session_id: &AgentSessionId) -> Result<u64, Self::Error>;
 
@@ -214,5 +221,11 @@ pub trait AgentRepository: Send + Sync {
         session: &AgentSession,
         turn: &AgentTurn,
         terminal_event: &AgentEvent,
+    ) -> Result<(), Self::Error>;
+
+    /// Atomically finishes every supplied in-flight turn and appends each terminal event.
+    fn finish_turns_with_terminal_events(
+        &self,
+        updates: &[(AgentSession, AgentTurn, AgentEvent)],
     ) -> Result<(), Self::Error>;
 }

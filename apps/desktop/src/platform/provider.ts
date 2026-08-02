@@ -60,7 +60,7 @@ export class ProviderError extends Error {
   }
 }
 
-function isProviderErrorCode(value: unknown): value is ProviderErrorCode {
+export function isProviderErrorCode(value: unknown): value is ProviderErrorCode {
   return typeof value === "string" && providerErrorCodes.includes(value as ProviderErrorCode);
 }
 
@@ -110,6 +110,10 @@ export async function getConnectionStatus(): Promise<ConnectionStatus> {
 
 export async function connectChatgpt(): Promise<ConnectionStatus> {
   return validateConnectionStatus(await invokeProviderCommand("connect_chatgpt"));
+}
+
+export async function cancelChatgptConnect(): Promise<void> {
+  await invokeProviderCommand("cancel_chatgpt_connect");
 }
 
 export async function disconnectChatgpt(): Promise<ConnectionStatus> {

@@ -8,6 +8,7 @@ import { WorkspaceSidebar } from "./components/WorkspaceSidebar";
 import type { ProjectListState } from "./components/ProjectList";
 import {
   cancelAgentTurn,
+  getAgentErrorCode,
   getAgentSession,
   getSafeAgentErrorMessage,
   listAgentSessions,
@@ -26,6 +27,7 @@ import {
   updateProjectInstructions,
 } from "./platform/projects";
 import {
+  cancelChatgptConnect,
   connectChatgpt,
   disconnectChatgpt,
   getConnectionStatus,
@@ -73,6 +75,9 @@ function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [connectionState, setConnectionState] = useState<ConnectionState>("disconnected");
   const [connectionBusy, setConnectionBusy] = useState(false);
+  const [connectCancelRequested, setConnectCancelRequested] = useState(false);
+  const [connectionStatusMessage, setConnectionStatusMessage] = useState<string | null>(null);
+  const [connectionErrorMessage, setConnectionErrorMessage] = useState<string | null>(null);
   const [mainView, setMainView] = useState<MainView>("agent");
   const [sessions, setSessions] = useState<AgentSession[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
@@ -80,7 +85,17 @@ function App() {
   const [turns, setTurns] = useState<AgentTurn[]>([]);
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
+  const sendingRef = useRef(false);
   const [activeTurnId, setActiveTurnId] = useState<string | null>(null);
+  const [cancelRequested, setCancelRequested] = useState(false);
+  const nativeActiveTurnIdRef = useRef<string | null>(null);
+  const cancelRequestedRef = useRef(false);
+  const cancelDispatchedRef = useRef(false);
+  const [sessionLoadPending, setSessionLoadPending] = useState(false);
+  const sessionLoadPendingRef = useRef(false);
+  const sessionRequestGenerationRef = useRef(0);
+  const [sessionProjectChangePending, setSessionProjectChangePending] = useState(false);
+  const sessionProjectChangePendingRef = useRef(false);
   const [agentError, setAgentError] = useState<string | null>(null);
   const [projects, setProjects] = useState<Project[]>([]);
   const [projectLoadState, setProjectLoadState] = useState<ProjectListState>("loading");
@@ -95,8 +110,6 @@ function App() {
 
   const activeSession = sessions.find((session) => session.id === activeSessionId) ?? null;
   const contextProjectId = activeSession?.projectId ?? pendingProjectId;
-  const contextProject = projects.find((project) => project.id === contextProjectId) ?? null;
-  const projectLabel = contextProject?.displayName ?? "No project";
   const sessionTitle = activeSession?.title ?? "New session";
   const modelLabel = "GPT-5.5";
   const connected = connectionState === "connected";
@@ -139,6 +152,7 @@ function App() {
 
   useEffect(() => {
     let active = true;
+    const requestGeneration = ++sessionRequestGenerationRef.current;
 
     Promise.all([listProjects(), listAgentSessions()])
       .then(async ([availableProjects, availableSessions]) => {
@@ -150,16 +164,32 @@ function App() {
         setSessions(availableSessions);
         setProjectLoadState("ready");
 
-        if (availableSessions.length > 0) {
+        if (
+          availableSessions.length > 0 &&
+          sessionRequestGenerationRef.current === requestGeneration
+        ) {
           const newest = availableSessions[0];
           if (newest === undefined) {
             return;
           }
           setActiveSessionId(newest.id);
           setPendingProjectId(newest.projectId);
-          const detail = await getAgentSession(newest.id);
-          if (active) {
-            setTurns(detail.turns);
+          sessionLoadPendingRef.current = true;
+          setSessionLoadPending(true);
+          try {
+            const detail = await getAgentSession(newest.id);
+            if (active && sessionRequestGenerationRef.current === requestGeneration) {
+              setTurns(detail.turns);
+            }
+          } catch (error: unknown) {
+            if (active && sessionRequestGenerationRef.current === requestGeneration) {
+              setAgentError(getSafeAgentErrorMessage(error));
+            }
+          } finally {
+            if (active && sessionRequestGenerationRef.current === requestGeneration) {
+              sessionLoadPendingRef.current = false;
+              setSessionLoadPending(false);
+            }
           }
         }
       })
@@ -182,6 +212,14 @@ function App() {
   useLayoutEffect(() => {
     dirtyProjectInstructionsIdRef.current = dirtyProjectInstructionsId;
   }, [dirtyProjectInstructionsId]);
+
+  const handleOpenSettings = useCallback(() => {
+    setSettingsOpen(true);
+  }, []);
+
+  const handleCloseSettings = useCallback(() => {
+    setSettingsOpen(false);
+  }, []);
 
   useEffect(() => {
     let disposed = false;
@@ -247,13 +285,40 @@ function App() {
   );
 
   function canDiscardUnsavedProjectInstructions(): boolean {
+    if (dirtyProjectInstructionsId === null) {
+      return true;
+    }
+
+    if (!window.confirm("Discard unsaved project instructions and continue?")) {
+      return false;
+    }
+
+    dirtyProjectInstructionsIdRef.current = null;
+    setDirtyProjectInstructionsId(null);
+    return true;
+  }
+
+  function invalidateSessionDetailRequest() {
+    sessionRequestGenerationRef.current += 1;
+    sessionLoadPendingRef.current = false;
+    setSessionLoadPending(false);
+  }
+
+  function canNavigateAwayFromProjectManager(): boolean {
     return (
-      dirtyProjectInstructionsId === null ||
-      window.confirm("Discard unsaved project instructions and continue?")
+      !sendingRef.current &&
+      projectOperation.kind === "idle" &&
+      !sessionProjectChangePendingRef.current &&
+      canDiscardUnsavedProjectInstructions()
     );
   }
 
   function handleNewSession() {
+    if (!canNavigateAwayFromProjectManager()) {
+      return;
+    }
+
+    invalidateSessionDetailRequest();
     setMainView("agent");
     setActiveSessionId(null);
     setPendingProjectId(null);
@@ -263,10 +328,24 @@ function App() {
   }
 
   async function handleSelectSession(sessionId: string) {
+    if (!canNavigateAwayFromProjectManager()) {
+      return;
+    }
+
+    const requestGeneration = ++sessionRequestGenerationRef.current;
+    sessionLoadPendingRef.current = true;
+    setSessionLoadPending(true);
+    const summary = sessions.find((session) => session.id === sessionId);
     setMainView("agent");
+    setActiveSessionId(sessionId);
+    setPendingProjectId(summary?.projectId ?? null);
+    setTurns([]);
     setAgentError(null);
     try {
       const detail = await getAgentSession(sessionId);
+      if (sessionRequestGenerationRef.current !== requestGeneration) {
+        return;
+      }
       setActiveSessionId(detail.session.id);
       setPendingProjectId(detail.session.projectId);
       setTurns(detail.turns);
@@ -277,11 +356,23 @@ function App() {
           : [detail.session, ...current];
       });
     } catch (error: unknown) {
-      setAgentError(getSafeAgentErrorMessage(error));
+      if (sessionRequestGenerationRef.current === requestGeneration) {
+        setAgentError(getSafeAgentErrorMessage(error));
+      }
+    } finally {
+      if (sessionRequestGenerationRef.current === requestGeneration) {
+        sessionLoadPendingRef.current = false;
+        setSessionLoadPending(false);
+      }
     }
   }
 
   function handleSelectProject(projectId: string) {
+    if (!canNavigateAwayFromProjectManager()) {
+      return;
+    }
+
+    invalidateSessionDetailRequest();
     setMainView("agent");
     setActiveSessionId(null);
     setPendingProjectId(projectId);
@@ -290,13 +381,49 @@ function App() {
     setAgentError(null);
   }
 
+  function handleBackToAgents() {
+    if (!canNavigateAwayFromProjectManager()) {
+      return;
+    }
+
+    setMainView("agent");
+  }
+
+  function clearAgentCancellation() {
+    nativeActiveTurnIdRef.current = null;
+    cancelRequestedRef.current = false;
+    cancelDispatchedRef.current = false;
+    setCancelRequested(false);
+  }
+
+  function dispatchAgentCancellation(turnId: string) {
+    if (cancelDispatchedRef.current) {
+      return;
+    }
+
+    cancelDispatchedRef.current = true;
+    void cancelAgentTurn(turnId).catch((error: unknown) => {
+      cancelDispatchedRef.current = false;
+      cancelRequestedRef.current = false;
+      setCancelRequested(false);
+      setAgentError(getSafeAgentErrorMessage(error));
+    });
+  }
+
   async function handleSend() {
-    if (sending || draft.trim().length === 0) {
+    if (
+      sendingRef.current ||
+      sessionLoadPendingRef.current ||
+      sessionProjectChangePendingRef.current ||
+      draft.trim().length === 0
+    ) {
       return;
     }
 
     const userText = draft;
+    sendingRef.current = true;
     setSending(true);
+    clearAgentCancellation();
     setAgentError(null);
     setDraft("");
 
@@ -318,6 +445,7 @@ function App() {
         projectId: contextProjectId,
         onEvent: (event) => {
           if (event.kind === "started") {
+            nativeActiveTurnIdRef.current = event.turn_id;
             setActiveSessionId(event.session_id);
             setActiveTurnId(event.turn_id);
             setTurns((current) =>
@@ -330,6 +458,9 @@ function App() {
             void listAgentSessions()
               .then(setSessions)
               .catch(() => undefined);
+            if (cancelRequestedRef.current) {
+              dispatchAgentCancellation(event.turn_id);
+            }
           } else if (event.kind === "delta") {
             setTurns((current) =>
               current.map((turn) =>
@@ -342,6 +473,10 @@ function App() {
             setTurns((current) =>
               current.map((turn) => (turn.id === event.turn.id ? event.turn : turn)),
             );
+            if (event.turn.errorCode === "authentication_required") {
+              setConnectionState("reconnect_required");
+            }
+            clearAgentCancellation();
             setActiveTurnId(null);
           }
         },
@@ -352,32 +487,47 @@ function App() {
       setAgentError(getSafeAgentErrorMessage(error));
       setTurns((current) => current.filter((turn) => turn.id !== optimisticTurn.id));
       setDraft(userText);
+      clearAgentCancellation();
       setActiveTurnId(null);
     } finally {
+      clearAgentCancellation();
+      sendingRef.current = false;
       setSending(false);
     }
   }
 
-  async function handleCancel() {
-    if (activeTurnId === null) {
+  function handleCancel() {
+    if (!sending || cancelRequestedRef.current) {
       return;
     }
 
-    try {
-      await cancelAgentTurn(activeTurnId);
-    } catch (error: unknown) {
-      setAgentError(getSafeAgentErrorMessage(error));
+    cancelRequestedRef.current = true;
+    setCancelRequested(true);
+    const nativeTurnId = nativeActiveTurnIdRef.current;
+    if (nativeTurnId !== null) {
+      dispatchAgentCancellation(nativeTurnId);
     }
   }
 
   async function handleConnect() {
     setConnectionBusy(true);
+    setConnectCancelRequested(false);
+    setConnectionStatusMessage(null);
+    setConnectionErrorMessage(null);
     setConnectionState("connecting");
     try {
       const status = await connectChatgpt();
       setConnectionState(status.state);
+      setConnectionStatusMessage(null);
     } catch (error: unknown) {
-      setAgentError(getSafeAgentErrorMessage(error));
+      const errorCode = getAgentErrorCode(error);
+      if (errorCode === "cancelled") {
+        setConnectionStatusMessage("Browser connection cancelled.");
+      } else {
+        const message = getSafeAgentErrorMessage(error);
+        setConnectionErrorMessage(message);
+        setAgentError(message);
+      }
       const status = await getConnectionStatus().catch(() => null);
       if (status !== null) {
         setConnectionState(status.state);
@@ -385,17 +535,42 @@ function App() {
         setConnectionState("disconnected");
       }
     } finally {
+      setConnectCancelRequested(false);
       setConnectionBusy(false);
+    }
+  }
+
+  async function handleCancelConnect() {
+    if (connectionState !== "connecting" || connectCancelRequested) {
+      return;
+    }
+
+    setConnectCancelRequested(true);
+    setConnectionStatusMessage("Cancelling browser connection…");
+    setConnectionErrorMessage(null);
+    try {
+      await cancelChatgptConnect();
+    } catch (error: unknown) {
+      setConnectCancelRequested(false);
+      setConnectionStatusMessage(null);
+      setConnectionErrorMessage(getSafeAgentErrorMessage(error));
     }
   }
 
   async function handleDisconnect() {
     setConnectionBusy(true);
+    setConnectionStatusMessage(null);
+    setConnectionErrorMessage(null);
     try {
       const status = await disconnectChatgpt();
       setConnectionState(status.state);
+      if (status.state === "disconnected") {
+        setConnectionStatusMessage("Removed from this device");
+      }
     } catch (error: unknown) {
-      setAgentError(getSafeAgentErrorMessage(error));
+      const message = getSafeAgentErrorMessage(error);
+      setConnectionErrorMessage(message);
+      setAgentError(message);
     } finally {
       setConnectionBusy(false);
     }
@@ -495,10 +670,11 @@ function App() {
   }
 
   function handleUseWithAgents(project: Project) {
-    if (!canDiscardUnsavedProjectInstructions()) {
+    if (!canNavigateAwayFromProjectManager()) {
       return;
     }
 
+    invalidateSessionDetailRequest();
     setMainView("agent");
     setActiveSessionId(null);
     setPendingProjectId(project.id);
@@ -508,30 +684,42 @@ function App() {
   }
 
   async function handleChangePersistedProject(projectId: string | null) {
+    if (sessionLoadPendingRef.current || sessionProjectChangePendingRef.current) {
+      return;
+    }
+
     if (activeSessionId === null) {
       setPendingProjectId(projectId);
       return;
     }
 
-    const project = projects.find((item) => item.id === projectId);
-    const name = project?.displayName ?? "No project";
-    if (projectId !== null && !window.confirm(`Use ${name} for future messages in this session?`)) {
+    if (projectId === activeSession?.projectId) {
       return;
     }
 
+    const project = projects.find((item) => item.id === projectId);
+    const name = project?.displayName ?? "No project";
+    if (!window.confirm(`Use ${name} for future messages in this session?`)) {
+      return;
+    }
+
+    sessionProjectChangePendingRef.current = true;
+    setSessionProjectChangePending(true);
     try {
       const session = await setAgentSessionProject(activeSessionId, projectId);
       setSessions((current) => current.map((item) => (item.id === session.id ? session : item)));
       setPendingProjectId(session.projectId);
     } catch (error: unknown) {
       setAgentError(getSafeAgentErrorMessage(error));
+    } finally {
+      sessionProjectChangePendingRef.current = false;
+      setSessionProjectChangePending(false);
     }
   }
 
   const openingProjectId = projectOperation.kind === "opening" ? projectOperation.projectId : null;
   const projectActionsDisabled = projectOperation.kind !== "idle" || projectLoadState !== "ready";
   void applicationInfo;
-  void handleChangePersistedProject; // retained for persisted session Project association confirmations
 
   return (
     <div className={`app-shell${settingsOpen ? " settings-open" : ""}`}>
@@ -540,10 +728,18 @@ function App() {
         sessions={sessions}
         activeSessionId={activeSessionId}
         pendingProjectId={pendingProjectId}
+        inert={settingsOpen}
+        navigationDisabled={
+          sending || projectOperation.kind !== "idle" || sessionProjectChangePending
+        }
         onNewSession={handleNewSession}
         onSelectSession={(sessionId) => void handleSelectSession(sessionId)}
         onSelectProject={handleSelectProject}
-        onManageProjects={() => setMainView("projects")}
+        onManageProjects={() => {
+          if (canNavigateAwayFromProjectManager()) {
+            setMainView("projects");
+          }
+        }}
       />
 
       <main className="main-panel" inert={settingsOpen ? true : undefined}>
@@ -564,23 +760,27 @@ function App() {
             onDirtyChange={handleProjectInstructionsDirtyChange}
             onSaveInstructions={handleUpdateProjectInstructions}
             onUseWithAgents={handleUseWithAgents}
-            onBackToAgents={() => setMainView("agent")}
+            onBackToAgents={handleBackToAgents}
           />
         ) : (
           <AgentWorkspace
             title={sessionTitle}
-            projectLabel={projectLabel}
+            projectId={contextProjectId}
+            projects={projects}
             modelLabel={modelLabel}
             turns={turns}
             draft={draft}
             connected={connected}
             sending={sending}
+            sendBlocked={sessionLoadPending || sessionProjectChangePending}
+            cancelRequested={cancelRequested}
             activeTurnId={activeTurnId}
             errorMessage={agentError}
             onDraftChange={setDraft}
             onSend={() => void handleSend()}
-            onCancel={() => void handleCancel()}
-            onOpenSettings={() => setSettingsOpen(true)}
+            onCancel={handleCancel}
+            onProjectChange={(projectId) => void handleChangePersistedProject(projectId)}
+            onOpenSettings={handleOpenSettings}
             settingsButtonRef={settingsButtonRef}
           />
         )}
@@ -592,8 +792,13 @@ function App() {
         model="gpt-5.5"
         theme={theme}
         busy={connectionBusy}
-        onClose={() => setSettingsOpen(false)}
+        turnBusy={sending}
+        cancelRequested={connectCancelRequested}
+        statusMessage={connectionStatusMessage}
+        errorMessage={connectionErrorMessage}
+        onClose={handleCloseSettings}
         onConnect={() => void handleConnect()}
+        onCancelConnect={() => void handleCancelConnect()}
         onDisconnect={() => void handleDisconnect()}
         onThemeChange={setTheme}
         returnFocusRef={settingsButtonRef}

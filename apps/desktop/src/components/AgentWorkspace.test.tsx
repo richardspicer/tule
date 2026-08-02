@@ -9,17 +9,21 @@ describe("AgentWorkspace", () => {
     render(
       <AgentWorkspace
         title="New session"
-        projectLabel="No project"
+        projectId={null}
+        projects={[]}
         modelLabel="GPT-5.5"
         turns={[]}
         draft=""
         connected={false}
         sending={false}
+        sendBlocked={false}
+        cancelRequested={false}
         activeTurnId={null}
         errorMessage={null}
         onDraftChange={vi.fn()}
         onSend={vi.fn()}
         onCancel={vi.fn()}
+        onProjectChange={vi.fn()}
         onOpenSettings={onOpenSettings}
         settingsButtonRef={createRef<HTMLButtonElement>()}
       />,
@@ -38,7 +42,8 @@ describe("AgentWorkspace", () => {
     const { rerender } = render(
       <AgentWorkspace
         title="Hello"
-        projectLabel="No project"
+        projectId={null}
+        projects={[{ id: "p1", displayName: "Research" }]}
         modelLabel="GPT-5.5"
         turns={[
           {
@@ -53,11 +58,14 @@ describe("AgentWorkspace", () => {
         draft="Next"
         connected
         sending={false}
+        sendBlocked={false}
+        cancelRequested={false}
         activeTurnId={null}
         errorMessage={null}
         onDraftChange={vi.fn()}
         onSend={onSend}
         onCancel={onCancel}
+        onProjectChange={vi.fn()}
         onOpenSettings={vi.fn()}
         settingsButtonRef={createRef<HTMLButtonElement>()}
       />,
@@ -72,7 +80,8 @@ describe("AgentWorkspace", () => {
     rerender(
       <AgentWorkspace
         title="Hello"
-        projectLabel="Research"
+        projectId="p1"
+        projects={[{ id: "p1", displayName: "Research" }]}
         modelLabel="GPT-5.5"
         turns={[
           {
@@ -87,11 +96,14 @@ describe("AgentWorkspace", () => {
         draft=""
         connected
         sending
+        sendBlocked={false}
+        cancelRequested={false}
         activeTurnId="t1"
         errorMessage={null}
         onDraftChange={vi.fn()}
         onSend={onSend}
         onCancel={onCancel}
+        onProjectChange={vi.fn()}
         onOpenSettings={vi.fn()}
         settingsButtonRef={createRef<HTMLButtonElement>()}
       />,
@@ -100,5 +112,50 @@ describe("AgentWorkspace", () => {
     expect(screen.getByText("Research")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
     expect(onCancel).toHaveBeenCalled();
+  });
+
+  it("changes optional Project context and renders only safe failure copy", () => {
+    const onProjectChange = vi.fn();
+    render(
+      <AgentWorkspace
+        title="Hello"
+        projectId="p1"
+        projects={[
+          { id: "p1", displayName: "Research" },
+          { id: "p2", displayName: "Atlas" },
+        ]}
+        modelLabel="GPT-5.5"
+        turns={[
+          {
+            id: "t1",
+            ordinal: 1,
+            userText: "Hi",
+            agentText: "",
+            state: "failed",
+            errorCode: "provider_unavailable",
+          },
+        ]}
+        draft=""
+        connected
+        sending={false}
+        sendBlocked={false}
+        cancelRequested={false}
+        activeTurnId={null}
+        errorMessage={null}
+        onDraftChange={vi.fn()}
+        onSend={vi.fn()}
+        onCancel={vi.fn()}
+        onProjectChange={onProjectChange}
+        onOpenSettings={vi.fn()}
+        settingsButtonRef={createRef<HTMLButtonElement>()}
+      />,
+    );
+
+    fireEvent.change(screen.getByRole("combobox", { name: "Project context" }), {
+      target: { value: "p2" },
+    });
+    expect(onProjectChange).toHaveBeenCalledWith("p2");
+    expect(screen.getByText("The provider is unavailable. Try again.")).toBeInTheDocument();
+    expect(screen.queryByText("provider_unavailable")).not.toBeInTheDocument();
   });
 });

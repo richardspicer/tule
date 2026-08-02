@@ -16,15 +16,18 @@ use std::{
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use futures_util::StreamExt;
 use oauth2::{CsrfToken, PkceCodeChallenge};
-use reqwest::{Client, StatusCode, redirect::Policy};
+use reqwest::{
+    Client, StatusCode,
+    header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue, USER_AGENT},
+    redirect::Policy,
+};
 use serde_json::Value;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpListener,
-    sync::oneshot,
     time::timeout,
 };
-use tule_core::{AgentRepository, PROVIDER_PROFILE_ID};
+use tule_core::{AgentRepository, PROVIDER_PROFILE_ID, ProviderProfile};
 use zeroize::Zeroize;
 
 use crate::{
@@ -53,12 +56,71 @@ const MAX_CALLBACK_VALUE: usize = 8 * 1024;
 const MAX_PROVIDER_BODY: usize = 64 * 1024;
 const MAX_SSE_BUFFER: usize = 256 * 1024;
 const REFRESH_SKEW_SECS: i64 = 60;
+const ALL_CREDENTIAL_KINDS: [CredentialKind; 3] = [
+    CredentialKind::RefreshToken,
+    CredentialKind::AccessToken,
+    CredentialKind::AccountId,
+];
+/// Keep the refresh credential until every other protected value is gone so a
+/// partial Disconnect remains visibly retryable rather than falsely disconnected.
+const DELETE_CREDENTIAL_ORDER: [CredentialKind; 3] = [
+    CredentialKind::AccountId,
+    CredentialKind::AccessToken,
+    CredentialKind::RefreshToken,
+];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TokenPersistence {
+    Initial,
+    Rotation,
+}
+
+#[derive(Clone, Copy)]
+enum PersistenceCancellation<'a> {
+    None,
+    Operation(&'a CancellationToken),
+    BrowserConnect(&'a Arc<CancellationToken>),
+}
+
+impl PersistenceCancellation<'_> {
+    fn is_cancelled(self) -> bool {
+        match self {
+            Self::None => false,
+            Self::Operation(token) => token.is_cancelled(),
+            Self::BrowserConnect(token) => token.is_cancelled(),
+        }
+    }
+}
+
+struct CredentialSnapshot {
+    entries: Vec<(CredentialKind, Option<Vec<u8>>)>,
+}
+
+impl CredentialSnapshot {
+    fn value(&self, kind: CredentialKind) -> Option<&[u8]> {
+        self.entries
+            .iter()
+            .find_map(|(stored_kind, value)| (*stored_kind == kind).then_some(value.as_deref()))
+            .flatten()
+    }
+}
+
+impl Drop for CredentialSnapshot {
+    fn drop(&mut self) {
+        for (_, value) in &mut self.entries {
+            if let Some(value) = value {
+                value.zeroize();
+            }
+        }
+    }
+}
 
 pub(crate) struct ChatGptAdapter {
     credentials: Arc<dyn CredentialStore>,
     client: Client,
-    refresh_lock: tokio::sync::Mutex<()>,
-    connect_cancel: Mutex<Option<oneshot::Sender<()>>>,
+    /// Serializes every credential-using operation for the single built-in profile.
+    profile_lock: tokio::sync::Mutex<()>,
+    connect_cancel: Mutex<Option<Arc<CancellationToken>>>,
     connecting: AtomicBool,
     reconnect_required: AtomicBool,
     #[cfg(test)]
@@ -75,7 +137,7 @@ impl ChatGptAdapter {
         Self {
             credentials,
             client,
-            refresh_lock: tokio::sync::Mutex::new(()),
+            profile_lock: tokio::sync::Mutex::new(()),
             connect_cancel: Mutex::new(None),
             connecting: AtomicBool::new(false),
             reconnect_required: AtomicBool::new(false),
@@ -84,11 +146,20 @@ impl ChatGptAdapter {
         }
     }
 
+    #[cfg(test)]
     pub(crate) async fn ensure_fresh_access_public(
         &self,
         store: &SqliteStore,
     ) -> Result<(), PublicError> {
-        self.ensure_fresh_access(store).await
+        self.ensure_fresh_access(store, None).await
+    }
+
+    pub(crate) async fn ensure_fresh_access_cancellable_public(
+        &self,
+        store: &SqliteStore,
+        cancel: CancellationToken,
+    ) -> Result<(), PublicError> {
+        self.ensure_fresh_access(store, Some(&cancel)).await
     }
 
     #[cfg(test)]
@@ -101,34 +172,66 @@ impl ChatGptAdapter {
         store: Arc<SqliteStore>,
         open_url: impl FnOnce(&str) -> Result<(), PublicError>,
     ) -> Result<ConnectionStatus, PublicError> {
-        if self.connection_status().state == ConnectionState::UnavailableInThisBuild {
-            return Ok(self.connection_status());
+        if self.connection_status_with_store(store.as_ref()).state
+            == ConnectionState::UnavailableInThisBuild
+        {
+            return Ok(self.connection_status_with_store(store.as_ref()));
         }
         if self.connecting.swap(true, Ordering::SeqCst) {
             return Err(PublicError::SessionBusy);
         }
-        let result = self.connect_in_browser_inner(store, open_url).await;
+        let cancel = Arc::new(CancellationToken::new());
+        match self.connect_cancel.lock() {
+            Ok(mut slot) if slot.is_none() => *slot = Some(cancel.clone()),
+            Ok(_) | Err(_) => {
+                self.connecting.store(false, Ordering::SeqCst);
+                return Err(PublicError::SessionBusy);
+            }
+        }
+        let operation = match self.profile_lock.try_lock() {
+            Ok(operation) => operation,
+            Err(_) => {
+                let was_cancelled = cancel.is_cancelled();
+                let _ = self.clear_connect_cancel(&cancel);
+                self.connecting.store(false, Ordering::SeqCst);
+                return Err(if was_cancelled {
+                    PublicError::Cancelled
+                } else {
+                    PublicError::SessionBusy
+                });
+            }
+        };
+        let result = self
+            .connect_in_browser_inner(store, open_url, &cancel)
+            .await;
+        drop(operation);
+        let cleanup = self.clear_connect_cancel(&cancel);
         self.connecting.store(false, Ordering::SeqCst);
-        result
+        match (result, cleanup) {
+            (Ok(status), Ok(())) => Ok(status),
+            (Err(error), _) => Err(error),
+            (Ok(_), Err(error)) => Err(error),
+        }
     }
 
     async fn connect_in_browser_inner(
         &self,
         store: Arc<SqliteStore>,
         open_url: impl FnOnce(&str) -> Result<(), PublicError>,
+        cancel: &Arc<CancellationToken>,
     ) -> Result<ConnectionStatus, PublicError> {
         let (pkce_challenge, pkce_verifier) = PkceCodeChallenge::new_random_sha256();
         let csrf = CsrfToken::new_random();
-        let (listener, redirect_uri) = bind_callback_listener().await?;
+        let (listener, redirect_uri) = tokio::select! {
+            _ = cancel.cancelled() => return Err(PublicError::Cancelled),
+            listener = bind_callback_listener() => listener?,
+        };
         let auth_url =
             build_authorization_url(&redirect_uri, pkce_challenge.as_str(), csrf.secret());
 
-        let (cancel_tx, cancel_rx) = oneshot::channel();
-        *self
-            .connect_cancel
-            .lock()
-            .map_err(|_| PublicError::ProviderUnavailable)? = Some(cancel_tx);
-
+        if cancel.is_cancelled() {
+            return Err(PublicError::Cancelled);
+        }
         open_url(&auth_url)?;
 
         let callback = tokio::select! {
@@ -138,61 +241,68 @@ impl ChatGptAdapter {
                     Err(_) => Err(PublicError::ProviderUnavailable),
                 }
             }
-            _ = cancel_rx => Err(PublicError::Cancelled),
+            _ = cancel.cancelled() => Err(PublicError::Cancelled),
         };
-        let _ = self.connect_cancel.lock().map(|mut slot| slot.take());
 
         let code = callback?;
         let token = self
-            .exchange_token(&redirect_uri, pkce_verifier.secret(), &code)
+            .exchange_token(
+                &redirect_uri,
+                pkce_verifier.secret(),
+                &code,
+                cancel.as_ref(),
+            )
             .await?;
         match token {
             TokenBundle::Success(values) => {
-                self.persist_tokens(store.as_ref(), values)?;
+                self.persist_tokens(
+                    store.as_ref(),
+                    values,
+                    TokenPersistence::Initial,
+                    PersistenceCancellation::BrowserConnect(cancel),
+                )?;
                 self.reconnect_required.store(false, Ordering::SeqCst);
             }
             TokenBundle::InvalidGrant => return Err(PublicError::AuthenticationRequired),
         }
-        Ok(self.connection_status())
+        Ok(self.connection_status_with_store(store.as_ref()))
     }
 
-    #[allow(dead_code)]
-    pub(crate) fn cancel_connect(&self) {
-        if let Ok(mut slot) = self.connect_cancel.lock()
-            && let Some(tx) = slot.take()
-        {
-            let _ = tx.send(());
+    pub(crate) fn cancel_connect(&self) -> Result<(), PublicError> {
+        let slot = self
+            .connect_cancel
+            .lock()
+            .map_err(|_| PublicError::ProviderUnavailable)?;
+        let cancel = slot.as_ref().ok_or(PublicError::InvalidInput)?;
+        if cancel.is_cancelled() {
+            return Err(PublicError::InvalidInput);
         }
+        cancel.cancel();
+        Ok(())
+    }
+
+    fn clear_connect_cancel(&self, cancel: &Arc<CancellationToken>) -> Result<(), PublicError> {
+        let mut slot = self
+            .connect_cancel
+            .lock()
+            .map_err(|_| PublicError::ProviderUnavailable)?;
+        if slot
+            .as_ref()
+            .is_some_and(|active| Arc::ptr_eq(active, cancel))
+        {
+            slot.take();
+        }
+        Ok(())
     }
 
     pub(crate) fn disconnect(&self, store: &SqliteStore) -> Result<ConnectionStatus, PublicError> {
-        let mut deleted = Vec::new();
-        for kind in [
-            CredentialKind::RefreshToken,
-            CredentialKind::AccessToken,
-            CredentialKind::AccountId,
-        ] {
-            match self.credentials.delete(CREDENTIAL_HANDLE, kind) {
-                Ok(()) => deleted.push(kind),
-                Err(error) => {
-                    let _ = error;
-                    return Err(PublicError::CredentialStoreUnavailable);
-                }
-            }
-        }
-
-        let mut profile = store
-            .get_provider_profile(PROVIDER_PROFILE_ID)
-            .map_err(|_| PublicError::AgentStorageUnavailable)?
-            .ok_or(PublicError::AgentStorageUnavailable)?;
-        let now = unix_now_ms().map_err(|_| PublicError::AgentStorageUnavailable)?;
-        profile.set_credential_metadata(None, None, now);
-        store
-            .update_provider_profile(&profile)
-            .map_err(|_| PublicError::AgentStorageUnavailable)?;
+        let _operation = self
+            .profile_lock
+            .try_lock()
+            .map_err(|_| PublicError::SessionBusy)?;
+        self.remove_credentials_and_metadata(store, true)?;
         self.reconnect_required.store(false, Ordering::SeqCst);
-        let _ = deleted;
-        Ok(self.connection_status())
+        Ok(self.connection_status_with_store(store))
     }
 
     async fn exchange_token(
@@ -200,13 +310,19 @@ impl ChatGptAdapter {
         redirect_uri: &str,
         verifier: &str,
         code: &str,
+        cancel: &CancellationToken,
     ) -> Result<TokenBundle, PublicError> {
         #[cfg(test)]
         if let Some(transport) = self.test_transport.lock().expect("lock").clone() {
-            return transport.exchange_token(TOKEN_URL, redirect_uri, verifier, code);
+            let result = transport.exchange_token(TOKEN_URL, redirect_uri, verifier, code);
+            return if cancel.is_cancelled() {
+                Err(PublicError::Cancelled)
+            } else {
+                result
+            };
         }
 
-        let response = self
+        let request = self
             .client
             .post(TOKEN_URL)
             .header("Content-Type", "application/x-www-form-urlencoded")
@@ -218,57 +334,75 @@ impl ChatGptAdapter {
                 urlencoding(redirect_uri),
                 urlencoding(verifier)
             ))
-            .send()
-            .await
-            .map_err(|_| PublicError::ProviderUnavailable)?;
-        parse_token_response(response).await
+            .send();
+        let response = tokio::select! {
+            _ = cancel.cancelled() => return Err(PublicError::Cancelled),
+            response = request => response.map_err(|_| PublicError::ProviderUnavailable)?,
+        };
+        tokio::select! {
+            _ = cancel.cancelled() => Err(PublicError::Cancelled),
+            result = parse_token_response(response, TokenPersistence::Initial) => result,
+        }
     }
 
-    async fn refresh_access_token(&self, store: &SqliteStore) -> Result<(), PublicError> {
-        let _guard = self.refresh_lock.lock().await;
+    async fn refresh_access_token_locked(
+        &self,
+        store: &SqliteStore,
+        cancel: Option<&CancellationToken>,
+    ) -> Result<(), PublicError> {
+        if cancel.is_some_and(CancellationToken::is_cancelled) {
+            return Err(PublicError::Cancelled);
+        }
         let refresh = self
             .credentials
             .read(CREDENTIAL_HANDLE, CredentialKind::RefreshToken)
             .map_err(map_credential_error)?
             .ok_or(PublicError::AuthenticationRequired)?;
-        let refresh =
+        let mut refresh =
             String::from_utf8(refresh).map_err(|_| PublicError::AuthenticationRequired)?;
 
         #[cfg(test)]
-        let token = if let Some(transport) = self.test_transport.lock().expect("lock").clone() {
-            transport.refresh_token(TOKEN_URL, &refresh)?
-        } else {
-            self.refresh_via_http(&refresh).await?
-        };
+        let token_result =
+            if let Some(transport) = self.test_transport.lock().expect("lock").clone() {
+                let result = transport.refresh_token(TOKEN_URL, &refresh);
+                if cancel.is_some_and(CancellationToken::is_cancelled) {
+                    Err(PublicError::Cancelled)
+                } else {
+                    result
+                }
+            } else {
+                self.refresh_via_http(&refresh, cancel).await
+            };
         #[cfg(not(test))]
-        let token = self.refresh_via_http(&refresh).await?;
+        let token_result = self.refresh_via_http(&refresh, cancel).await;
+        refresh.zeroize();
+        let token = token_result?;
 
         if matches!(token, TokenBundle::InvalidGrant) {
-            let _ = self
-                .credentials
-                .delete(CREDENTIAL_HANDLE, CredentialKind::AccessToken);
-            let _ = self
-                .credentials
-                .delete(CREDENTIAL_HANDLE, CredentialKind::RefreshToken);
-            let _ = self
-                .credentials
-                .delete(CREDENTIAL_HANDLE, CredentialKind::AccountId);
-            if let Ok(Some(mut profile)) = store.get_provider_profile(PROVIDER_PROFILE_ID) {
-                let now = unix_now_ms().unwrap_or(0);
-                profile.set_credential_metadata(None, None, now);
-                let _ = store.update_provider_profile(&profile);
-            }
             self.reconnect_required.store(true, Ordering::SeqCst);
+            self.remove_credentials_and_metadata(store, false)?;
             return Err(PublicError::AuthenticationRequired);
         }
         if let TokenBundle::Success(values) = token {
-            self.persist_tokens(store, values)?;
+            self.persist_tokens(
+                store,
+                values,
+                TokenPersistence::Rotation,
+                cancel.map_or(
+                    PersistenceCancellation::None,
+                    PersistenceCancellation::Operation,
+                ),
+            )?;
         }
         Ok(())
     }
 
-    async fn refresh_via_http(&self, refresh: &str) -> Result<TokenBundle, PublicError> {
-        let response = self
+    async fn refresh_via_http(
+        &self,
+        refresh: &str,
+        cancel: Option<&CancellationToken>,
+    ) -> Result<TokenBundle, PublicError> {
+        let request = self
             .client
             .post(TOKEN_URL)
             .header("Content-Type", "application/x-www-form-urlencoded")
@@ -278,52 +412,71 @@ impl ChatGptAdapter {
                 urlencoding(CLIENT_ID),
                 urlencoding(refresh)
             ))
-            .send()
-            .await
-            .map_err(|_| PublicError::ProviderUnavailable)?;
+            .send();
+        let response = match cancel {
+            Some(cancel) => {
+                tokio::select! {
+                    _ = cancel.cancelled() => return Err(PublicError::Cancelled),
+                    response = request => response.map_err(|_| PublicError::ProviderUnavailable)?,
+                }
+            }
+            None => request
+                .await
+                .map_err(|_| PublicError::ProviderUnavailable)?,
+        };
         if response.status() == StatusCode::BAD_REQUEST {
-            let body = response.text().await.unwrap_or_default();
-            if body.contains("invalid_grant") {
+            let body = match cancel {
+                Some(cancel) => {
+                    tokio::select! {
+                        _ = cancel.cancelled() => return Err(PublicError::Cancelled),
+                        body = read_bounded_response_body(response, MAX_PROVIDER_BODY) => body?,
+                    }
+                }
+                None => read_bounded_response_body(response, MAX_PROVIDER_BODY).await?,
+            };
+            let invalid_grant = serde_json::from_slice::<Value>(&body)
+                .ok()
+                .and_then(|value| {
+                    value
+                        .get("error")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                })
+                .is_some_and(|error| error == "invalid_grant");
+            if invalid_grant {
                 return Ok(TokenBundle::InvalidGrant);
             }
             return Err(PublicError::ProviderUnavailable);
         }
-        parse_token_response(response).await
+        match cancel {
+            Some(cancel) => {
+                tokio::select! {
+                    _ = cancel.cancelled() => Err(PublicError::Cancelled),
+                    result = parse_token_response(response, TokenPersistence::Rotation) => result,
+                }
+            }
+            None => parse_token_response(response, TokenPersistence::Rotation).await,
+        }
     }
 
     fn persist_tokens(
         &self,
         store: &SqliteStore,
         mut token: TokenValues,
+        persistence: TokenPersistence,
+        cancellation: PersistenceCancellation<'_>,
     ) -> Result<(), PublicError> {
-        let mut written = Vec::new();
-        let mut steps = Vec::new();
-        if !token.preserve_refresh {
-            if token.refresh.is_empty() {
-                token.zeroize();
-                return Err(PublicError::ProviderUnavailable);
-            }
-            steps.push((
-                CredentialKind::RefreshToken,
-                token.refresh.as_bytes().to_vec(),
-            ));
+        if token.access.is_empty()
+            || token.account.is_empty()
+            || (persistence == TokenPersistence::Initial
+                && (token.preserve_refresh || token.refresh.is_empty()))
+        {
+            token.zeroize();
+            return Err(PublicError::ProviderUnavailable);
         }
-        steps.push((
-            CredentialKind::AccessToken,
-            token.access.as_bytes().to_vec(),
-        ));
-        steps.push((CredentialKind::AccountId, token.account.as_bytes().to_vec()));
-        for (kind, value) in &steps {
-            match self.credentials.replace(CREDENTIAL_HANDLE, *kind, value) {
-                Ok(()) => written.push(*kind),
-                Err(error) => {
-                    for prior in &written {
-                        let _ = self.credentials.delete(CREDENTIAL_HANDLE, *prior);
-                    }
-                    token.zeroize();
-                    return Err(map_credential_error(error));
-                }
-            }
+        if cancellation.is_cancelled() {
+            token.zeroize();
+            return Err(PublicError::Cancelled);
         }
 
         let mut profile = store
@@ -331,32 +484,242 @@ impl ChatGptAdapter {
             .map_err(|_| PublicError::AgentStorageUnavailable)?
             .ok_or(PublicError::AgentStorageUnavailable)?;
         let now = unix_now_ms().map_err(|_| PublicError::AgentStorageUnavailable)?;
+        let snapshot = self.credential_snapshot()?;
+        if cancellation.is_cancelled() {
+            token.zeroize();
+            return Err(PublicError::Cancelled);
+        }
+        let original_profile = profile.clone();
+        profile.set_credential_metadata(None, None, now);
+        if store.update_provider_profile(&profile).is_err() {
+            token.zeroize();
+            return Err(PublicError::AgentStorageUnavailable);
+        }
+        let mut written = Vec::new();
+        let mut steps = Vec::with_capacity(3);
+        if !token.preserve_refresh {
+            steps.push(CredentialKind::RefreshToken);
+        }
+        steps.push(CredentialKind::AccessToken);
+        steps.push(CredentialKind::AccountId);
+        for kind in steps {
+            let value = match kind {
+                CredentialKind::RefreshToken => token.refresh.as_bytes(),
+                CredentialKind::AccessToken => token.access.as_bytes(),
+                CredentialKind::AccountId => token.account.as_bytes(),
+            };
+            match self.credentials.replace(CREDENTIAL_HANDLE, kind, value) {
+                Ok(()) => written.push(kind),
+                Err(error) => {
+                    let restored = self.restore_persistence_state(
+                        store,
+                        &snapshot,
+                        &written,
+                        &original_profile,
+                    );
+                    token.zeroize();
+                    if !restored {
+                        self.reconnect_required.store(true, Ordering::SeqCst);
+                        return Err(PublicError::CredentialStoreUnavailable);
+                    }
+                    return Err(map_credential_error(error));
+                }
+            }
+            if cancellation.is_cancelled() {
+                let restored =
+                    self.restore_persistence_state(store, &snapshot, &written, &original_profile);
+                token.zeroize();
+                if !restored {
+                    self.reconnect_required.store(true, Ordering::SeqCst);
+                    return Err(PublicError::CredentialStoreUnavailable);
+                }
+                return Err(PublicError::Cancelled);
+            }
+        }
+
         profile.set_credential_metadata(
             Some(CREDENTIAL_HANDLE.to_owned()),
             token.expires_at_unix_ms,
             now,
         );
-        if store.update_provider_profile(&profile).is_err() {
-            for prior in &written {
-                let _ = self.credentials.delete(CREDENTIAL_HANDLE, *prior);
+        let mut connect_commit_guard = match cancellation {
+            PersistenceCancellation::BrowserConnect(cancel) => {
+                let guard = match self.connect_cancel.lock() {
+                    Ok(guard) => guard,
+                    Err(_) => {
+                        let restored = self.restore_persistence_state(
+                            store,
+                            &snapshot,
+                            &written,
+                            &original_profile,
+                        );
+                        token.zeroize();
+                        if !restored {
+                            self.reconnect_required.store(true, Ordering::SeqCst);
+                            return Err(PublicError::CredentialStoreUnavailable);
+                        }
+                        return Err(PublicError::ProviderUnavailable);
+                    }
+                };
+                if cancel.is_cancelled()
+                    || !guard
+                        .as_ref()
+                        .is_some_and(|active| Arc::ptr_eq(active, cancel))
+                {
+                    let restored = self.restore_persistence_state(
+                        store,
+                        &snapshot,
+                        &written,
+                        &original_profile,
+                    );
+                    token.zeroize();
+                    if !restored {
+                        self.reconnect_required.store(true, Ordering::SeqCst);
+                        return Err(PublicError::CredentialStoreUnavailable);
+                    }
+                    return Err(PublicError::Cancelled);
+                }
+                Some(guard)
             }
+            PersistenceCancellation::Operation(cancel) if cancel.is_cancelled() => {
+                let restored =
+                    self.restore_persistence_state(store, &snapshot, &written, &original_profile);
+                token.zeroize();
+                if !restored {
+                    self.reconnect_required.store(true, Ordering::SeqCst);
+                    return Err(PublicError::CredentialStoreUnavailable);
+                }
+                return Err(PublicError::Cancelled);
+            }
+            _ => None,
+        };
+        if store.update_provider_profile(&profile).is_err() {
+            let restored =
+                self.restore_persistence_state(store, &snapshot, &written, &original_profile);
             token.zeroize();
+            if !restored {
+                self.reconnect_required.store(true, Ordering::SeqCst);
+                return Err(PublicError::CredentialStoreUnavailable);
+            }
             return Err(PublicError::AgentStorageUnavailable);
         }
+        if let Some(slot) = connect_commit_guard.as_mut() {
+            slot.take();
+        }
         token.zeroize();
+        self.reconnect_required.store(false, Ordering::SeqCst);
         Ok(())
     }
 
-    async fn ensure_fresh_access(&self, store: &SqliteStore) -> Result<(), PublicError> {
+    async fn ensure_fresh_access(
+        &self,
+        store: &SqliteStore,
+        cancel: Option<&CancellationToken>,
+    ) -> Result<(), PublicError> {
+        let _operation = match cancel {
+            Some(cancel) => {
+                tokio::select! {
+                    _ = cancel.cancelled() => return Err(PublicError::Cancelled),
+                    operation = self.profile_lock.lock() => operation,
+                }
+            }
+            None => self.profile_lock.lock().await,
+        };
+        if cancel.is_some_and(CancellationToken::is_cancelled) {
+            return Err(PublicError::Cancelled);
+        }
         let profile = store
             .get_provider_profile(PROVIDER_PROFILE_ID)
             .map_err(|_| PublicError::AgentStorageUnavailable)?
             .ok_or(PublicError::NotConnected)?;
+        if profile.credential_handle() != Some(CREDENTIAL_HANDLE) {
+            self.reconnect_required.store(true, Ordering::SeqCst);
+            return Err(PublicError::AuthenticationRequired);
+        }
         let now = unix_now_ms().map_err(|_| PublicError::AgentStorageUnavailable)?;
         if let Some(expires) = profile.access_token_expires_at_unix_ms()
             && expires - now <= REFRESH_SKEW_SECS * 1000
         {
-            self.refresh_access_token(store).await?;
+            self.refresh_access_token_locked(store, cancel).await?;
+        }
+        Ok(())
+    }
+
+    fn credential_snapshot(&self) -> Result<CredentialSnapshot, PublicError> {
+        let mut entries = Vec::with_capacity(ALL_CREDENTIAL_KINDS.len());
+        for kind in ALL_CREDENTIAL_KINDS {
+            let value = self
+                .credentials
+                .read(CREDENTIAL_HANDLE, kind)
+                .map_err(map_credential_error)?;
+            entries.push((kind, value));
+        }
+        Ok(CredentialSnapshot { entries })
+    }
+
+    fn restore_snapshot(&self, snapshot: &CredentialSnapshot, changed: &[CredentialKind]) -> bool {
+        let mut restored = true;
+        for kind in changed.iter().rev() {
+            let result = match snapshot.value(*kind) {
+                Some(value) => self.credentials.replace(CREDENTIAL_HANDLE, *kind, value),
+                None => self.credentials.delete(CREDENTIAL_HANDLE, *kind),
+            };
+            restored &= result.is_ok();
+        }
+        restored
+    }
+
+    fn restore_persistence_state(
+        &self,
+        store: &SqliteStore,
+        snapshot: &CredentialSnapshot,
+        changed: &[CredentialKind],
+        profile: &ProviderProfile,
+    ) -> bool {
+        if !self.restore_snapshot(snapshot, changed) {
+            return false;
+        }
+        store.update_provider_profile(profile).is_ok()
+    }
+
+    fn remove_credentials_and_metadata(
+        &self,
+        store: &SqliteStore,
+        restore_on_failure: bool,
+    ) -> Result<(), PublicError> {
+        let mut profile = store
+            .get_provider_profile(PROVIDER_PROFILE_ID)
+            .map_err(|_| PublicError::AgentStorageUnavailable)?
+            .ok_or(PublicError::AgentStorageUnavailable)?;
+        let now = unix_now_ms().map_err(|_| PublicError::AgentStorageUnavailable)?;
+        let snapshot = self.credential_snapshot()?;
+        let mut deleted = Vec::new();
+        for kind in DELETE_CREDENTIAL_ORDER {
+            if let Err(error) = self.credentials.delete(CREDENTIAL_HANDLE, kind) {
+                if restore_on_failure && !self.restore_snapshot(&snapshot, &deleted) {
+                    self.reconnect_required.store(true, Ordering::SeqCst);
+                }
+                return Err(map_credential_error(error));
+            }
+            deleted.push(kind);
+            match self.credentials.read(CREDENTIAL_HANDLE, kind) {
+                Ok(None) => {}
+                Ok(Some(_)) | Err(_) => {
+                    if restore_on_failure && !self.restore_snapshot(&snapshot, &deleted) {
+                        self.reconnect_required.store(true, Ordering::SeqCst);
+                    }
+                    return Err(PublicError::CredentialStoreUnavailable);
+                }
+            }
+        }
+
+        profile.set_credential_metadata(None, None, now);
+        if store.update_provider_profile(&profile).is_err() {
+            if restore_on_failure && !self.restore_snapshot(&snapshot, &deleted) {
+                self.reconnect_required.store(true, Ordering::SeqCst);
+                return Err(PublicError::CredentialStoreUnavailable);
+            }
+            return Err(PublicError::AgentStorageUnavailable);
         }
         Ok(())
     }
@@ -377,22 +740,55 @@ impl ChatGptAdapter {
             String::from_utf8(account).map_err(|_| PublicError::AuthenticationRequired)?,
         ))
     }
-}
 
-impl ProviderAdapter for ChatGptAdapter {
-    fn connection_status(&self) -> ConnectionStatus {
+    pub(crate) fn connection_status_with_store(&self, store: &SqliteStore) -> ConnectionStatus {
+        let commit_marker = store
+            .get_provider_profile(PROVIDER_PROFILE_ID)
+            .map_err(|_| ())
+            .and_then(|profile| {
+                profile
+                    .map(|profile| match profile.credential_handle() {
+                        Some(CREDENTIAL_HANDLE) => true,
+                        None => false,
+                        Some(_) => {
+                            self.reconnect_required.store(true, Ordering::SeqCst);
+                            false
+                        }
+                    })
+                    .ok_or(())
+            })
+            .map(Some);
+        self.connection_status_for_commit_marker(commit_marker)
+    }
+
+    fn connection_status_for_commit_marker(
+        &self,
+        commit_marker: Result<Option<bool>, ()>,
+    ) -> ConnectionStatus {
         let state = if self.connecting.load(Ordering::SeqCst) {
             ConnectionState::Connecting
         } else if self.reconnect_required.load(Ordering::SeqCst) {
             ConnectionState::ReconnectRequired
         } else {
-            match self
-                .credentials
-                .read(CREDENTIAL_HANDLE, CredentialKind::RefreshToken)
-            {
-                Ok(Some(_)) => ConnectionState::Connected,
-                Ok(None) => ConnectionState::Disconnected,
-                Err(_) => ConnectionState::UnavailableInThisBuild,
+            let present = ALL_CREDENTIAL_KINDS
+                .iter()
+                .try_fold(0_usize, |present, kind| {
+                    self.credentials
+                        .read(CREDENTIAL_HANDLE, *kind)
+                        .map(|value| present + usize::from(value.is_some()))
+                        .map_err(|_| ())
+                });
+            match (present, commit_marker) {
+                (Err(()), _) | (_, Err(())) => ConnectionState::UnavailableInThisBuild,
+                (Ok(present), Ok(None)) if present == ALL_CREDENTIAL_KINDS.len() => {
+                    ConnectionState::Connected
+                }
+                (Ok(0), Ok(None)) => ConnectionState::Disconnected,
+                (Ok(present), Ok(Some(true))) if present == ALL_CREDENTIAL_KINDS.len() => {
+                    ConnectionState::Connected
+                }
+                (Ok(0), Ok(Some(false))) => ConnectionState::Disconnected,
+                _ => ConnectionState::ReconnectRequired,
             }
         };
         ConnectionStatus {
@@ -400,6 +796,12 @@ impl ProviderAdapter for ChatGptAdapter {
             provider_id: PROVIDER_ID,
             model: MODEL,
         }
+    }
+}
+
+impl ProviderAdapter for ChatGptAdapter {
+    fn connection_status(&self) -> ConnectionStatus {
+        self.connection_status_for_commit_marker(Ok(None))
     }
 
     fn stream<'a>(
@@ -412,40 +814,56 @@ impl ProviderAdapter for ChatGptAdapter {
             if cancel.is_cancelled() {
                 return Err(PublicError::Cancelled);
             }
+            let _operation = tokio::select! {
+                _ = cancel.cancelled() => return Err(PublicError::Cancelled),
+                operation = self.profile_lock.lock() => operation,
+            };
             let (mut access, mut account) = self.read_access_and_account()?;
+            let headers = match build_inference_headers(&access, &account, &request.session_id) {
+                Ok(headers) => headers,
+                Err(error) => {
+                    access.zeroize();
+                    account.zeroize();
+                    return Err(error);
+                }
+            };
 
             #[cfg(test)]
             {
                 let transport = self.test_transport.lock().expect("lock").clone();
                 if let Some(transport) = transport {
+                    let mock = transport.inference(INFERENCE_URL, &headers, &request.request_json);
                     access.zeroize();
                     account.zeroize();
-                    let mock = transport.inference(INFERENCE_URL, &request.request_json)?;
-                    return emit_mock_inference(mock, cancel, &mut on_event).await;
+                    let result = match mock {
+                        Ok(mock) => emit_mock_inference(mock, cancel, &mut on_event).await,
+                        Err(error) => Err(error),
+                    };
+                    if matches!(result, Err(PublicError::AuthenticationRequired)) {
+                        self.reconnect_required.store(true, Ordering::SeqCst);
+                    }
+                    return result;
                 }
             }
 
-            let response = self
+            let request_future = self
                 .client
                 .post(INFERENCE_URL)
-                .header("Authorization", format!("Bearer {access}"))
-                .header("Accept", "text/event-stream")
-                .header("Content-Type", "application/json")
-                .header("originator", "tule")
-                .header("User-Agent", "tule-desktop/0.1.0")
-                .header("session_id", &request.session_id)
-                .header("ChatGPT-Account-Id", account.as_str())
+                .headers(headers)
                 .body(request.request_json)
-                .send()
-                .await
-                .map_err(|_| PublicError::ProviderUnavailable)?;
+                .send();
+            let response_result = tokio::select! {
+                _ = cancel.cancelled() => Err(PublicError::Cancelled),
+                response = request_future => response.map_err(|_| PublicError::ProviderUnavailable),
+            };
             access.zeroize();
             account.zeroize();
-            if cancel.is_cancelled() {
-                return Err(PublicError::Cancelled);
-            }
+            let response = response_result?;
             match response.status() {
-                StatusCode::UNAUTHORIZED => return Err(PublicError::AuthenticationRequired),
+                StatusCode::UNAUTHORIZED => {
+                    self.reconnect_required.store(true, Ordering::SeqCst);
+                    return Err(PublicError::AuthenticationRequired);
+                }
                 StatusCode::FORBIDDEN => return Err(PublicError::EntitlementUnavailable),
                 StatusCode::TOO_MANY_REQUESTS => return Err(PublicError::RateLimited),
                 status if !status.is_success() => return Err(PublicError::ProviderUnavailable),
@@ -477,7 +895,35 @@ async fn emit_mock_inference(
             Ok(Vec::new())
         }
         MockInference::Sse(body) => parse_sse_buffer(body.as_bytes(), cancel, on_event).await,
+        MockInference::WaitForCancellation => {
+            cancel.cancelled().await;
+            Err(PublicError::Cancelled)
+        }
     }
+}
+
+fn build_inference_headers(
+    access: &str,
+    account: &str,
+    session_id: &str,
+) -> Result<HeaderMap, PublicError> {
+    let mut headers = HeaderMap::with_capacity(7);
+    let authorization = HeaderValue::from_str(&format!("Bearer {access}"))
+        .map_err(|_| PublicError::AuthenticationRequired)?;
+    let account =
+        HeaderValue::from_str(account).map_err(|_| PublicError::AuthenticationRequired)?;
+    let session = HeaderValue::from_str(session_id).map_err(|_| PublicError::InvalidInput)?;
+    headers.insert(AUTHORIZATION, authorization);
+    headers.insert(ACCEPT, HeaderValue::from_static("text/event-stream"));
+    headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    headers.insert(
+        HeaderName::from_static("originator"),
+        HeaderValue::from_static("tule"),
+    );
+    headers.insert(USER_AGENT, HeaderValue::from_static("tule-desktop/0.1.0"));
+    headers.insert(HeaderName::from_static("session_id"), session);
+    headers.insert(HeaderName::from_static("chatgpt-account-id"), account);
+    Ok(headers)
 }
 
 async fn bind_callback_listener() -> Result<(TcpListener, String), PublicError> {
@@ -540,24 +986,34 @@ async fn accept_callback(
     }
     let request = std::str::from_utf8(&buf[..read]).map_err(|_| PublicError::InvalidInput)?;
     let line = request.lines().next().ok_or(PublicError::InvalidInput)?;
-    let path = line
-        .split_whitespace()
-        .nth(1)
-        .ok_or(PublicError::InvalidInput)?;
-    let query = path.split('?').nth(1).unwrap_or("");
-    let params = parse_query(query)?;
-    if params.contains_key("error") {
-        let _ = socket
-            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 16\r\n\r\nSign-in declined")
-            .await;
-        return Err(PublicError::AuthenticationRequired);
+    let mut request_line = line.split_whitespace();
+    let method = request_line.next().ok_or(PublicError::InvalidInput)?;
+    let target = request_line.next().ok_or(PublicError::InvalidInput)?;
+    let version = request_line.next().ok_or(PublicError::InvalidInput)?;
+    if request_line.next().is_some()
+        || method != "GET"
+        || !version.starts_with("HTTP/1.")
+        || target.contains('#')
+    {
+        return Err(PublicError::InvalidInput);
     }
+    let (path, query) = target.split_once('?').unwrap_or((target, ""));
+    if path != "/auth/callback" {
+        return Err(PublicError::InvalidInput);
+    }
+    let params = parse_query(query)?;
     let state = params.get("state").ok_or(PublicError::InvalidInput)?;
     if state.len() > MAX_CALLBACK_VALUE || state != expected_state {
         let _ = socket
             .write_all(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n")
             .await;
         return Err(PublicError::InvalidInput);
+    }
+    if params.contains_key("error") {
+        let _ = socket
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 16\r\n\r\nSign-in declined")
+            .await;
+        return Err(PublicError::AuthenticationRequired);
     }
     let code = params.get("code").ok_or(PublicError::InvalidInput)?;
     if code.is_empty() || code.len() > MAX_CALLBACK_VALUE {
@@ -575,25 +1031,24 @@ fn parse_query(query: &str) -> Result<HashMap<String, String>, PublicError> {
         let mut parts = pair.splitn(2, '=');
         let key = parts.next().unwrap_or_default();
         let value = parts.next().unwrap_or_default();
-        map.insert(urldecoding(key), urldecoding(value));
+        if map.insert(urldecoding(key)?, urldecoding(value)?).is_some() {
+            return Err(PublicError::InvalidInput);
+        }
     }
     Ok(map)
 }
 
-async fn parse_token_response(response: reqwest::Response) -> Result<TokenBundle, PublicError> {
+async fn parse_token_response(
+    response: reqwest::Response,
+    persistence: TokenPersistence,
+) -> Result<TokenBundle, PublicError> {
     if !response.status().is_success() {
         return Err(PublicError::ProviderUnavailable);
     }
-    let bytes = response
-        .bytes()
-        .await
-        .map_err(|_| PublicError::ProviderUnavailable)?;
-    if bytes.len() > MAX_PROVIDER_BODY {
-        return Err(PublicError::InvalidInput);
-    }
+    let bytes = read_bounded_response_body(response, MAX_PROVIDER_BODY).await?;
     let value: Value =
         serde_json::from_slice(&bytes).map_err(|_| PublicError::ProviderUnavailable)?;
-    let access = value
+    let mut access = value
         .get("access_token")
         .and_then(Value::as_str)
         .ok_or(PublicError::ProviderUnavailable)?
@@ -608,15 +1063,21 @@ async fn parse_token_response(response: reqwest::Response) -> Result<TokenBundle
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_owned();
-    let account = extract_account_id(&id_token)?;
+    let account_result = extract_account_id(&id_token);
     id_token.zeroize();
+    let mut account = account_result?;
     let expires_in = value
         .get("expires_in")
         .and_then(Value::as_i64)
         .unwrap_or(3600);
     let expires_at_unix_ms = unix_now_ms().ok().map(|now| now + expires_in * 1000);
     if refresh.is_empty() {
-        // Rotation without a new refresh token preserves the existing refresh outside this parser.
+        if persistence == TokenPersistence::Initial {
+            access.zeroize();
+            account.zeroize();
+            return Err(PublicError::ProviderUnavailable);
+        }
+        // Rotation without a replacement preserves the existing refresh credential.
         return Ok(TokenBundle::Success(TokenValues {
             access,
             refresh: String::new(),
@@ -632,6 +1093,35 @@ async fn parse_token_response(response: reqwest::Response) -> Result<TokenBundle
         expires_at_unix_ms,
         preserve_refresh: false,
     }))
+}
+
+async fn read_bounded_response_body(
+    response: reqwest::Response,
+    limit: usize,
+) -> Result<Vec<u8>, PublicError> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > limit as u64)
+    {
+        return Err(PublicError::InvalidInput);
+    }
+    let mut body = Vec::with_capacity(
+        response
+            .content_length()
+            .and_then(|length| usize::try_from(length).ok())
+            .unwrap_or(0)
+            .min(limit),
+    );
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|_| PublicError::ProviderUnavailable)?;
+        if body.len().saturating_add(chunk.len()) > limit {
+            body.zeroize();
+            return Err(PublicError::InvalidInput);
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
 }
 
 fn extract_account_id(id_token: &str) -> Result<String, PublicError> {
@@ -666,40 +1156,30 @@ async fn parse_sse_response(
     let mut buffer = Vec::new();
     let mut saw_completed = false;
     let mut stream = response.bytes_stream();
-    while let Some(next) = stream.next().await {
-        if cancel.is_cancelled() {
-            return Err(PublicError::Cancelled);
-        }
+    loop {
+        let next = tokio::select! {
+            _ = cancel.cancelled() => return Err(PublicError::Cancelled),
+            next = stream.next() => next,
+        };
+        let Some(next) = next else {
+            break;
+        };
         let chunk = next.map_err(|_| PublicError::ProviderUnavailable)?;
-        if buffer.len().saturating_add(chunk.len()) > MAX_SSE_BUFFER {
-            return Err(PublicError::OutputLimit);
-        }
-        buffer.extend_from_slice(&chunk);
-        while let Some(boundary) = find_event_boundary(&buffer) {
-            let event = buffer.drain(..boundary).collect::<Vec<_>>();
-            let delimiter = event_delimiter_len(&buffer);
-            if delimiter > 0 {
-                buffer.drain(..delimiter);
+        for piece in chunk.chunks(4096) {
+            if buffer.len().saturating_add(piece.len()) > MAX_SSE_BUFFER {
+                return Err(PublicError::OutputLimit);
             }
-            let mut batch = Vec::new();
-            parse_sse_event(&event, &mut batch)?;
-            for item in batch {
-                if matches!(item, ProviderEvent::Completed { .. }) {
-                    saw_completed = true;
-                }
-                on_event(item)?;
+            buffer.extend_from_slice(piece);
+            emit_complete_sse_events(&mut buffer, &mut saw_completed, on_event)?;
+            if saw_completed {
+                return Ok(Vec::new());
             }
         }
     }
     if !buffer.is_empty() {
         let mut batch = Vec::new();
         parse_sse_event(&buffer, &mut batch)?;
-        for item in batch {
-            if matches!(item, ProviderEvent::Completed { .. }) {
-                saw_completed = true;
-            }
-            on_event(item)?;
-        }
+        emit_provider_batch(batch, &mut saw_completed, on_event)?;
     }
     if saw_completed {
         Ok(Vec::new())
@@ -717,41 +1197,70 @@ async fn parse_sse_buffer(
     if cancel.is_cancelled() {
         return Err(PublicError::Cancelled);
     }
-    if bytes.len() > MAX_SSE_BUFFER {
-        return Err(PublicError::OutputLimit);
-    }
-    let mut buffer = bytes.to_vec();
+    let mut buffer = Vec::new();
     let mut saw_completed = false;
-    while let Some(boundary) = find_event_boundary(&buffer) {
-        let event = buffer.drain(..boundary).collect::<Vec<_>>();
-        let delimiter = event_delimiter_len(&buffer);
-        if delimiter > 0 {
-            buffer.drain(..delimiter);
+    for chunk in bytes.chunks(4096) {
+        if buffer.len().saturating_add(chunk.len()) > MAX_SSE_BUFFER {
+            return Err(PublicError::OutputLimit);
         }
-        let mut batch = Vec::new();
-        parse_sse_event(&event, &mut batch)?;
-        for item in batch {
-            if matches!(item, ProviderEvent::Completed { .. }) {
-                saw_completed = true;
-            }
-            on_event(item)?;
+        buffer.extend_from_slice(chunk);
+        emit_complete_sse_events(&mut buffer, &mut saw_completed, on_event)?;
+        if saw_completed {
+            return Ok(Vec::new());
         }
     }
     if !buffer.is_empty() {
         let mut batch = Vec::new();
         parse_sse_event(&buffer, &mut batch)?;
-        for item in batch {
-            if matches!(item, ProviderEvent::Completed { .. }) {
-                saw_completed = true;
-            }
-            on_event(item)?;
-        }
+        emit_provider_batch(batch, &mut saw_completed, on_event)?;
     }
     if saw_completed {
         Ok(Vec::new())
     } else {
         Err(PublicError::ProviderUnavailable)
     }
+}
+
+fn emit_complete_sse_events(
+    buffer: &mut Vec<u8>,
+    saw_completed: &mut bool,
+    on_event: &mut ProviderEventSink,
+) -> Result<(), PublicError> {
+    while !*saw_completed {
+        let Some(boundary) = find_event_boundary(buffer) else {
+            break;
+        };
+        let event = buffer.drain(..boundary).collect::<Vec<_>>();
+        let delimiter = event_delimiter_len(buffer);
+        if delimiter > 0 {
+            buffer.drain(..delimiter);
+        }
+        let mut batch = Vec::new();
+        parse_sse_event(&event, &mut batch)?;
+        emit_provider_batch(batch, saw_completed, on_event)?;
+    }
+    Ok(())
+}
+
+fn emit_provider_batch(
+    batch: Vec<ProviderEvent>,
+    saw_completed: &mut bool,
+    on_event: &mut ProviderEventSink,
+) -> Result<(), PublicError> {
+    for item in batch {
+        match &item {
+            ProviderEvent::Completed { .. } if *saw_completed => {
+                return Err(PublicError::ProviderUnavailable);
+            }
+            ProviderEvent::Completed { .. } => *saw_completed = true,
+            ProviderEvent::Delta(_) if *saw_completed => {
+                return Err(PublicError::ProviderUnavailable);
+            }
+            ProviderEvent::Delta(_) => {}
+        }
+        on_event(item)?;
+    }
+    Ok(())
 }
 
 fn find_event_boundary(buffer: &[u8]) -> Option<usize> {
@@ -786,11 +1295,7 @@ fn parse_sse_event(event: &[u8], output: &mut Vec<ProviderEvent>) -> Result<(), 
         return Ok(());
     }
     if data == "[DONE]" {
-        output.push(ProviderEvent::Completed {
-            response_id: None,
-            input_tokens: None,
-            output_tokens: None,
-        });
+        // Framing marker only. `response.completed` is the sole success terminal.
         return Ok(());
     }
     let value: Value = serde_json::from_str(&data).map_err(|_| PublicError::ProviderUnavailable)?;
@@ -798,29 +1303,63 @@ fn parse_sse_event(event: &[u8], output: &mut Vec<ProviderEvent>) -> Result<(), 
         .get("type")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    if kind.contains("tool") || kind.contains("function") {
+    if contains_unsupported_provider_output(&value) {
         return Err(PublicError::UnsupportedProviderOutput);
     }
-    if kind.contains("delta")
-        && let Some(delta) = value
-            .pointer("/delta")
-            .and_then(Value::as_str)
-            .or_else(|| value.pointer("/text").and_then(Value::as_str))
-    {
-        output.push(ProviderEvent::Delta(delta.to_owned()));
-    }
-    if kind.contains("completed") || kind.contains("done") {
-        output.push(ProviderEvent::Completed {
-            response_id: value
-                .get("response")
-                .and_then(|v| v.get("id"))
+    match kind {
+        "response.output_text.delta" => {
+            let delta = value
+                .get("delta")
                 .and_then(Value::as_str)
-                .map(str::to_owned),
-            input_tokens: None,
-            output_tokens: None,
-        });
+                .ok_or(PublicError::ProviderUnavailable)?;
+            output.push(ProviderEvent::Delta(delta.to_owned()));
+        }
+        "response.completed" => {
+            output.push(ProviderEvent::Completed {
+                response_id: value
+                    .get("response")
+                    .and_then(|response| response.get("id"))
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+                input_tokens: value
+                    .pointer("/response/usage/input_tokens")
+                    .and_then(Value::as_u64),
+                output_tokens: value
+                    .pointer("/response/usage/output_tokens")
+                    .and_then(Value::as_u64),
+            });
+        }
+        "response.failed" | "response.incomplete" | "error" => {
+            return Err(PublicError::ProviderUnavailable);
+        }
+        _ => {}
     }
     Ok(())
+}
+
+fn contains_unsupported_provider_output(value: &Value) -> bool {
+    match value {
+        Value::Object(fields) => fields.iter().any(|(key, value)| {
+            (key == "type"
+                && value
+                    .as_str()
+                    .is_some_and(is_unsupported_provider_output_type))
+                || contains_unsupported_provider_output(value)
+        }),
+        Value::Array(items) => items.iter().any(contains_unsupported_provider_output),
+        _ => false,
+    }
+}
+
+fn is_unsupported_provider_output_type(kind: &str) -> bool {
+    kind.contains("function")
+        || kind.contains("tool")
+        || kind.contains("computer_call")
+        || kind.contains("web_search_call")
+        || kind.contains("mcp_call")
+        || kind.contains("shell_call")
+        || kind.contains("image_generation_call")
+        || kind.ends_with("_call")
 }
 
 pub(crate) struct TokenValues {
@@ -872,7 +1411,7 @@ fn urlencoding(value: &str) -> String {
     out
 }
 
-fn urldecoding(value: &str) -> String {
+fn urldecoding(value: &str) -> Result<String, PublicError> {
     let bytes = value.as_bytes();
     let mut out = Vec::new();
     let mut index = 0;
@@ -882,15 +1421,14 @@ fn urldecoding(value: &str) -> String {
                 out.push(b' ');
                 index += 1;
             }
-            b'%' if index + 2 < bytes.len() => {
-                let hex = &value[index + 1..index + 3];
-                if let Ok(byte) = u8::from_str_radix(hex, 16) {
-                    out.push(byte);
-                    index += 3;
-                } else {
-                    out.push(bytes[index]);
-                    index += 1;
+            b'%' => {
+                if index + 2 >= bytes.len() {
+                    return Err(PublicError::InvalidInput);
                 }
+                let high = decode_hex(bytes[index + 1]).ok_or(PublicError::InvalidInput)?;
+                let low = decode_hex(bytes[index + 2]).ok_or(PublicError::InvalidInput)?;
+                out.push((high << 4) | low);
+                index += 3;
             }
             byte => {
                 out.push(byte);
@@ -898,7 +1436,16 @@ fn urldecoding(value: &str) -> String {
             }
         }
     }
-    String::from_utf8_lossy(&out).into_owned()
+    String::from_utf8(out).map_err(|_| PublicError::InvalidInput)
+}
+
+const fn decode_hex(value: u8) -> Option<u8> {
+    match value {
+        b'0'..=b'9' => Some(value - b'0'),
+        b'a'..=b'f' => Some(value - b'a' + 10),
+        b'A'..=b'F' => Some(value - b'A' + 10),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -907,6 +1454,7 @@ pub(crate) enum MockInference {
     Events(Vec<ProviderEvent>),
     Sse(String),
     Status(u16),
+    WaitForCancellation,
 }
 
 #[cfg(test)]
@@ -919,7 +1467,12 @@ pub(crate) trait TestTransport: Send + Sync {
         code: &str,
     ) -> Result<TokenBundle, PublicError>;
     fn refresh_token(&self, token_url: &str, refresh: &str) -> Result<TokenBundle, PublicError>;
-    fn inference(&self, inference_url: &str, body: &str) -> Result<MockInference, PublicError>;
+    fn inference(
+        &self,
+        inference_url: &str,
+        headers: &HeaderMap,
+        body: &str,
+    ) -> Result<MockInference, PublicError>;
 }
 
 #[cfg(test)]
@@ -949,57 +1502,437 @@ mod tests {
 
     #[test]
     fn tool_events_are_rejected() {
-        let mut output = Vec::new();
-        assert_eq!(
-            parse_sse_event(b"data: {\"type\":\"response.function_call\"}", &mut output),
-            Err(PublicError::UnsupportedProviderOutput)
-        );
+        for event in [
+            r#"data: {"type":"response.function_call"}"#,
+            r#"data: {"type":"response.output_item.added","item":{"type":"function_call"}}"#,
+        ] {
+            let mut output = Vec::new();
+            assert_eq!(
+                parse_sse_event(event.as_bytes(), &mut output),
+                Err(PublicError::UnsupportedProviderOutput)
+            );
+        }
     }
 
     #[test]
     fn terminal_can_arrive_before_delta() {
         let mut output = Vec::new();
-        parse_sse_event(b"data: [DONE]", &mut output).unwrap();
+        parse_sse_event(
+            br#"data: {"type":"response.completed","response":{"id":"response-1"}}"#,
+            &mut output,
+        )
+        .unwrap();
         assert!(matches!(
             output.as_slice(),
+            [ProviderEvent::Completed { .. }]
+        ));
+
+        output.clear();
+        parse_sse_event(
+            br#"data: {"type":"response.output_text.done"}"#,
+            &mut output,
+        )
+        .unwrap();
+        parse_sse_event(b"data: [DONE]", &mut output).unwrap();
+        assert!(output.is_empty());
+    }
+
+    #[tokio::test]
+    async fn sse_requires_exact_response_terminal_and_stops_after_completion() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let captured = Arc::clone(&events);
+        let mut sink: ProviderEventSink = Box::new(move |event| {
+            captured.lock().unwrap().push(event);
+            Ok(())
+        });
+        parse_sse_buffer(
+            b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\"}\n\ndata: {\"type\":\"response.output_text.done\"}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"r1\"}}\n\ndata: [DONE]\n\n",
+            CancellationToken::new(),
+            &mut sink,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            events.lock().unwrap().as_slice(),
+            [ProviderEvent::Delta(text), ProviderEvent::Completed { response_id: Some(id), .. }]
+                if text == "hello" && id == "r1"
+        ));
+
+        let mut discard: ProviderEventSink = Box::new(|_| Ok(()));
+        let incomplete = parse_sse_buffer(
+            b"data: {\"type\":\"response.output_text.done\"}\n\ndata: [DONE]\n\n",
+            CancellationToken::new(),
+            &mut discard,
+        )
+        .await;
+        assert_eq!(incomplete, Err(PublicError::ProviderUnavailable));
+
+        let duplicate_events = Arc::new(Mutex::new(Vec::new()));
+        let duplicate_events_cb = Arc::clone(&duplicate_events);
+        let mut capture_duplicate: ProviderEventSink = Box::new(move |event| {
+            duplicate_events_cb.lock().unwrap().push(event);
+            Ok(())
+        });
+        parse_sse_buffer(
+            b"data: {\"type\":\"response.completed\",\"response\":{}}\n\ndata: {\"type\":\"response.completed\",\"response\":{}}\n\n",
+            CancellationToken::new(),
+            &mut capture_duplicate,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            duplicate_events.lock().unwrap().as_slice(),
             [ProviderEvent::Completed { .. }]
         ));
     }
 
     #[test]
-    fn credential_write_order_compensates_on_failure() {
-        let store = FakeCredentialStore::default();
-        store.fail_on_operation(2); // fail second replace (access)
-        let adapter = ChatGptAdapter::new(Arc::new(store));
-        // Build a temp sqlite for metadata path is heavier; unit-test compensation via direct replace sequence.
-        let fake = FakeCredentialStore::default();
-        fake.fail_on_operation(2);
-        let mut written = Vec::new();
-        for (idx, kind) in [
-            CredentialKind::RefreshToken,
-            CredentialKind::AccessToken,
-            CredentialKind::AccountId,
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            match fake.replace("h", kind, b"x") {
-                Ok(()) => written.push(kind),
-                Err(_) => {
-                    assert_eq!(idx, 1);
-                    for prior in &written {
-                        fake.delete("h", *prior).unwrap();
-                    }
-                    break;
-                }
+    fn connection_status_requires_a_complete_credential_set_across_restart() {
+        let fake = Arc::new(FakeCredentialStore::default());
+        let dir = tempfile_dir();
+        let store = SqliteStore::open(dir.join("tule.sqlite3")).unwrap();
+        let adapter = ChatGptAdapter::new(fake.clone());
+        assert_eq!(
+            adapter.connection_status_with_store(&store).state,
+            ConnectionState::Disconnected
+        );
+
+        fake.replace(CREDENTIAL_HANDLE, CredentialKind::RefreshToken, b"refresh")
+            .unwrap();
+        assert_eq!(
+            adapter.connection_status_with_store(&store).state,
+            ConnectionState::ReconnectRequired
+        );
+        let restarted = ChatGptAdapter::new(fake.clone());
+        assert_eq!(
+            restarted.connection_status_with_store(&store).state,
+            ConnectionState::ReconnectRequired
+        );
+
+        fake.replace(CREDENTIAL_HANDLE, CredentialKind::AccessToken, b"access")
+            .unwrap();
+        fake.replace(CREDENTIAL_HANDLE, CredentialKind::AccountId, b"account")
+            .unwrap();
+        assert_eq!(
+            restarted.connection_status_with_store(&store).state,
+            ConnectionState::ReconnectRequired
+        );
+
+        let mut wrong_profile = store
+            .get_provider_profile(PROVIDER_PROFILE_ID)
+            .unwrap()
+            .unwrap();
+        wrong_profile.set_credential_metadata(Some("unexpected-handle".into()), None, 1);
+        store.update_provider_profile(&wrong_profile).unwrap();
+        assert_eq!(
+            restarted.connection_status_with_store(&store).state,
+            ConnectionState::ReconnectRequired
+        );
+
+        mark_profile_connected(&store, Some(i64::MAX / 2));
+        let committed_restart = ChatGptAdapter::new(fake);
+        assert_eq!(
+            committed_restart.connection_status_with_store(&store).state,
+            ConnectionState::Connected
+        );
+    }
+
+    #[test]
+    fn cancel_connect_rejects_noop_and_duplicate_requests() {
+        let adapter = ChatGptAdapter::new(Arc::new(FakeCredentialStore::default()));
+        assert_eq!(adapter.cancel_connect(), Err(PublicError::InvalidInput));
+
+        let cancel = Arc::new(CancellationToken::new());
+        *adapter.connect_cancel.lock().unwrap() = Some(cancel.clone());
+        assert_eq!(adapter.cancel_connect(), Ok(()));
+        assert!(cancel.is_cancelled());
+        assert_eq!(adapter.cancel_connect(), Err(PublicError::InvalidInput));
+    }
+
+    #[tokio::test]
+    async fn cancellation_during_token_exchange_does_not_persist_credentials() {
+        struct CancelExchange(CancellationToken);
+        impl TestTransport for CancelExchange {
+            fn exchange_token(
+                &self,
+                _: &str,
+                _: &str,
+                _: &str,
+                _: &str,
+            ) -> Result<TokenBundle, PublicError> {
+                self.0.cancel();
+                Ok(TokenBundle::Success(token_values(
+                    "access", "refresh", "account", false,
+                )))
+            }
+            fn refresh_token(&self, _: &str, _: &str) -> Result<TokenBundle, PublicError> {
+                unreachable!()
+            }
+            fn inference(
+                &self,
+                _: &str,
+                _: &HeaderMap,
+                _: &str,
+            ) -> Result<MockInference, PublicError> {
+                unreachable!()
             }
         }
-        assert!(
-            fake.read("h", CredentialKind::RefreshToken)
-                .unwrap()
-                .is_none()
+
+        let fake = Arc::new(FakeCredentialStore::default());
+        let adapter = ChatGptAdapter::new(fake.clone());
+        let cancel = CancellationToken::new();
+        adapter.set_test_transport(Arc::new(CancelExchange(cancel.clone())));
+        assert!(matches!(
+            adapter
+                .exchange_token("redirect", "verifier", "code", &cancel)
+                .await,
+            Err(PublicError::Cancelled)
+        ));
+        for kind in ALL_CREDENTIAL_KINDS {
+            assert_eq!(fake.peek(CREDENTIAL_HANDLE, kind), None);
+        }
+    }
+
+    #[test]
+    fn cancellation_during_persistence_restores_the_credential_snapshot() {
+        struct CancelOnFirstWrite {
+            inner: FakeCredentialStore,
+            cancel: CancellationToken,
+            writes: std::sync::atomic::AtomicUsize,
+        }
+        impl CredentialStore for CancelOnFirstWrite {
+            fn read(
+                &self,
+                handle: &str,
+                kind: CredentialKind,
+            ) -> Result<Option<Vec<u8>>, CredentialStoreError> {
+                self.inner.read(handle, kind)
+            }
+            fn replace(
+                &self,
+                handle: &str,
+                kind: CredentialKind,
+                value: &[u8],
+            ) -> Result<(), CredentialStoreError> {
+                self.inner.replace(handle, kind, value)?;
+                if self.writes.fetch_add(1, Ordering::SeqCst) == 0 {
+                    self.cancel.cancel();
+                }
+                Ok(())
+            }
+            fn delete(
+                &self,
+                handle: &str,
+                kind: CredentialKind,
+            ) -> Result<(), CredentialStoreError> {
+                self.inner.delete(handle, kind)
+            }
+        }
+
+        let cancel = Arc::new(CancellationToken::new());
+        let credentials = Arc::new(CancelOnFirstWrite {
+            inner: FakeCredentialStore::default(),
+            cancel: cancel.as_ref().clone(),
+            writes: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let adapter = ChatGptAdapter::new(credentials.clone());
+        *adapter.connect_cancel.lock().unwrap() = Some(cancel.clone());
+        let dir = tempfile_dir();
+        let store = SqliteStore::open(dir.join("tule.sqlite3")).unwrap();
+        assert_eq!(
+            adapter.persist_tokens(
+                &store,
+                token_values("access", "refresh", "account", false),
+                TokenPersistence::Initial,
+                PersistenceCancellation::BrowserConnect(&cancel),
+            ),
+            Err(PublicError::Cancelled)
         );
-        let _ = adapter;
+        for kind in ALL_CREDENTIAL_KINDS {
+            assert_eq!(credentials.inner.peek(CREDENTIAL_HANDLE, kind), None);
+        }
+    }
+
+    #[test]
+    fn credential_write_order_compensates_on_failure() {
+        for failed_operation in 4..=6 {
+            let fake = Arc::new(FakeCredentialStore::default());
+            fake.fail_on_operation(failed_operation);
+            let adapter = ChatGptAdapter::new(fake.clone());
+            let dir = tempfile_dir();
+            let store = SqliteStore::open(dir.join("tule.sqlite3")).unwrap();
+            let result = adapter.persist_tokens(
+                &store,
+                token_values("access", "refresh", "account", false),
+                TokenPersistence::Initial,
+                PersistenceCancellation::None,
+            );
+            assert_eq!(result, Err(PublicError::CredentialStoreUnavailable));
+            for kind in ALL_CREDENTIAL_KINDS {
+                assert_eq!(fake.peek(CREDENTIAL_HANDLE, kind), None);
+            }
+            assert_ne!(
+                adapter.connection_status().state,
+                ConnectionState::Connected
+            );
+        }
+    }
+
+    #[test]
+    fn metadata_failure_restores_initial_credential_state() {
+        let fake = Arc::new(FakeCredentialStore::default());
+        let adapter = ChatGptAdapter::new(fake.clone());
+        let dir = tempfile_dir();
+        let store = SqliteStore::open(dir.join("tule.sqlite3")).unwrap();
+        store
+            .connection()
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER fail_provider_update
+                 BEFORE UPDATE ON provider_profiles
+                 BEGIN SELECT RAISE(ABORT, 'injected'); END;",
+            )
+            .unwrap();
+
+        assert_eq!(
+            adapter.persist_tokens(
+                &store,
+                token_values("access", "refresh", "account", false),
+                TokenPersistence::Initial,
+                PersistenceCancellation::None,
+            ),
+            Err(PublicError::AgentStorageUnavailable)
+        );
+        for kind in ALL_CREDENTIAL_KINDS {
+            assert_eq!(fake.peek(CREDENTIAL_HANDLE, kind), None);
+        }
+    }
+
+    #[test]
+    fn failed_rotation_restoration_leaves_the_commit_marker_cleared() {
+        let fake = Arc::new(FakeCredentialStore::default());
+        seed_connected(&fake);
+        let dir = tempfile_dir();
+        let store = SqliteStore::open(dir.join("tule.sqlite3")).unwrap();
+        mark_profile_connected(&store, Some(0));
+        fake.reset_operations();
+        fake.fail_on_operations([5, 6]);
+        let adapter = ChatGptAdapter::new(fake.clone());
+
+        assert_eq!(
+            adapter.persist_tokens(
+                &store,
+                token_values("new-access", "new-refresh", "new-account", false),
+                TokenPersistence::Rotation,
+                PersistenceCancellation::None,
+            ),
+            Err(PublicError::CredentialStoreUnavailable)
+        );
+        assert_eq!(
+            store
+                .get_provider_profile(PROVIDER_PROFILE_ID)
+                .unwrap()
+                .unwrap()
+                .credential_handle(),
+            None
+        );
+
+        let restarted = ChatGptAdapter::new(fake);
+        assert_eq!(
+            restarted.connection_status_with_store(&store).state,
+            ConnectionState::ReconnectRequired
+        );
+    }
+
+    #[test]
+    fn initial_connection_requires_refresh_but_rotation_may_preserve_it() {
+        let fake = Arc::new(FakeCredentialStore::default());
+        let adapter = ChatGptAdapter::new(fake.clone());
+        let dir = tempfile_dir();
+        let store = SqliteStore::open(dir.join("tule.sqlite3")).unwrap();
+        assert_eq!(
+            adapter.persist_tokens(
+                &store,
+                token_values("access", "", "account", true),
+                TokenPersistence::Initial,
+                PersistenceCancellation::None,
+            ),
+            Err(PublicError::ProviderUnavailable)
+        );
+        for kind in ALL_CREDENTIAL_KINDS {
+            assert_eq!(fake.peek(CREDENTIAL_HANDLE, kind), None);
+        }
+
+        seed_connected(&fake);
+        fake.reset_operations();
+        adapter
+            .persist_tokens(
+                &store,
+                token_values("new-access", "", "new-account", true),
+                TokenPersistence::Rotation,
+                PersistenceCancellation::None,
+            )
+            .unwrap();
+        assert_eq!(
+            fake.peek(CREDENTIAL_HANDLE, CredentialKind::RefreshToken),
+            Some(b"refresh".to_vec())
+        );
+        assert_eq!(
+            fake.peek(CREDENTIAL_HANDLE, CredentialKind::AccessToken),
+            Some(b"new-access".to_vec())
+        );
+    }
+
+    #[test]
+    fn disconnect_failure_restores_credentials_or_fails_closed() {
+        for failed_operation in 4..=9 {
+            let fake = Arc::new(FakeCredentialStore::default());
+            seed_connected(&fake);
+            fake.reset_operations();
+            fake.fail_on_operation(failed_operation);
+            let adapter = ChatGptAdapter::new(fake.clone());
+            let dir = tempfile_dir();
+            let store = SqliteStore::open(dir.join("tule.sqlite3")).unwrap();
+            mark_profile_connected(&store, Some(i64::MAX / 2));
+
+            assert_eq!(
+                adapter.disconnect(&store),
+                Err(PublicError::CredentialStoreUnavailable)
+            );
+            assert_eq!(
+                adapter.connection_status_with_store(&store).state,
+                ConnectionState::Connected
+            );
+            assert_eq!(
+                fake.peek(CREDENTIAL_HANDLE, CredentialKind::RefreshToken),
+                Some(b"refresh".to_vec())
+            );
+            assert_eq!(
+                fake.peek(CREDENTIAL_HANDLE, CredentialKind::AccessToken),
+                Some(b"access".to_vec())
+            );
+            assert_eq!(
+                fake.peek(CREDENTIAL_HANDLE, CredentialKind::AccountId),
+                Some(b"account".to_vec())
+            );
+        }
+
+        let fake = Arc::new(FakeCredentialStore::default());
+        seed_connected(&fake);
+        fake.reset_operations();
+        fake.fail_on_operations([5, 6]);
+        let adapter = ChatGptAdapter::new(fake);
+        let dir = tempfile_dir();
+        let store = SqliteStore::open(dir.join("tule.sqlite3")).unwrap();
+        mark_profile_connected(&store, Some(i64::MAX / 2));
+        assert_eq!(
+            adapter.disconnect(&store),
+            Err(PublicError::CredentialStoreUnavailable)
+        );
+        assert_eq!(
+            adapter.connection_status().state,
+            ConnectionState::ReconnectRequired
+        );
     }
 
     #[test]
@@ -1024,6 +1957,58 @@ mod tests {
         assert_eq!(params.get("code").unwrap(), "a+b");
         assert_eq!(params.get("state").unwrap(), "s t");
         assert_eq!(params.get("error").unwrap(), "access_denied");
+        assert_eq!(
+            parse_query("state=one&state=two"),
+            Err(PublicError::InvalidInput)
+        );
+        assert_eq!(
+            parse_query("state=%💩&code=x"),
+            Err(PublicError::InvalidInput)
+        );
+        assert_eq!(
+            parse_query("state=%FF&code=x"),
+            Err(PublicError::InvalidInput)
+        );
+    }
+
+    #[tokio::test]
+    async fn callback_requires_exact_method_path_and_state_before_result() {
+        assert_eq!(
+            callback_result(
+                "GET /auth/callback?state=expected&code=ok HTTP/1.1\r\nHost: localhost\r\n\r\n",
+                "expected",
+            )
+            .await,
+            Ok("ok".to_owned())
+        );
+        for request in [
+            "POST /auth/callback?state=expected&code=ok HTTP/1.1\r\nHost: localhost\r\n\r\n",
+            "GET /wrong?state=expected&code=ok HTTP/1.1\r\nHost: localhost\r\n\r\n",
+            "GET /auth/callback?state=wrong&code=ok HTTP/1.1\r\nHost: localhost\r\n\r\n",
+            "GET /auth/callback?error=access_denied HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        ] {
+            assert_eq!(
+                callback_result(request, "expected").await,
+                Err(PublicError::InvalidInput)
+            );
+        }
+        assert_eq!(
+            callback_result(
+                "GET /auth/callback?state=expected&error=access_denied HTTP/1.1\r\nHost: localhost\r\n\r\n",
+                "expected",
+            )
+            .await,
+            Err(PublicError::AuthenticationRequired)
+        );
+    }
+
+    #[tokio::test]
+    async fn token_body_limit_is_enforced_during_streamed_read() {
+        let response = local_http_response(StatusCode::OK, vec![b'x'; MAX_PROVIDER_BODY + 1]).await;
+        assert!(matches!(
+            parse_token_response(response, TokenPersistence::Initial).await,
+            Err(PublicError::InvalidInput)
+        ));
     }
 
     #[tokio::test]
@@ -1056,7 +2041,12 @@ mod tests {
             fn refresh_token(&self, _: &str, _: &str) -> Result<TokenBundle, PublicError> {
                 unreachable!()
             }
-            fn inference(&self, url: &str, _: &str) -> Result<MockInference, PublicError> {
+            fn inference(
+                &self,
+                url: &str,
+                _: &HeaderMap,
+                _: &str,
+            ) -> Result<MockInference, PublicError> {
                 assert_eq!(url, INFERENCE_URL);
                 Ok(MockInference::Status(self.0))
             }
@@ -1108,9 +2098,22 @@ mod tests {
                 assert_eq!(token_url, TOKEN_URL);
                 Err(PublicError::ProviderUnavailable)
             }
-            fn inference(&self, url: &str, body: &str) -> Result<MockInference, PublicError> {
+            fn inference(
+                &self,
+                url: &str,
+                headers: &HeaderMap,
+                body: &str,
+            ) -> Result<MockInference, PublicError> {
                 assert_eq!(url, INFERENCE_URL);
-                let _ = body;
+                assert_eq!(headers.len(), 7);
+                assert_eq!(headers.get(AUTHORIZATION).unwrap(), "Bearer a");
+                assert_eq!(headers.get(ACCEPT).unwrap(), "text/event-stream");
+                assert_eq!(headers.get(CONTENT_TYPE).unwrap(), "application/json");
+                assert_eq!(headers.get("originator").unwrap(), "tule");
+                assert_eq!(headers.get(USER_AGENT).unwrap(), "tule-desktop/0.1.0");
+                assert_eq!(headers.get("session_id").unwrap(), "s");
+                assert_eq!(headers.get("ChatGPT-Account-Id").unwrap(), "acct");
+                assert!(!body.is_empty());
                 Ok(MockInference::Sse(self.0.clone()))
             }
         }
@@ -1130,7 +2133,9 @@ mod tests {
             .await;
         assert_eq!(err, Err(PublicError::UnsupportedProviderOutput));
 
-        adapter.set_test_transport(Arc::new(SseTransport("data: [DONE]\n\n".into())));
+        adapter.set_test_transport(Arc::new(SseTransport(
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"r1\"}}\n\ndata: [DONE]\n\n".into(),
+        )));
         let events = Arc::new(Mutex::new(Vec::new()));
         let events_cb = Arc::clone(&events);
         adapter
@@ -1151,6 +2156,10 @@ mod tests {
             events.lock().unwrap().as_slice(),
             [ProviderEvent::Completed { .. }]
         ));
+        assert_eq!(
+            adapter.connection_status().state,
+            ConnectionState::ReconnectRequired
+        );
 
         adapter.set_test_transport(Arc::new(SseTransport("x".repeat(MAX_SSE_BUFFER + 1))));
         let oversized = adapter
@@ -1196,18 +2205,148 @@ mod tests {
                 assert_eq!(refresh, "refresh");
                 Ok(TokenBundle::InvalidGrant)
             }
-            fn inference(&self, _: &str, _: &str) -> Result<MockInference, PublicError> {
+            fn inference(
+                &self,
+                _: &str,
+                _: &HeaderMap,
+                _: &str,
+            ) -> Result<MockInference, PublicError> {
                 unreachable!()
             }
         }
         adapter.set_test_transport(Arc::new(InvalidGrant));
         let dir = tempfile_dir();
         let store = SqliteStore::open(dir.join("tule.sqlite3")).unwrap();
-        let err = adapter.refresh_access_token(&store).await;
+        let _operation = adapter.profile_lock.lock().await;
+        let err = adapter.refresh_access_token_locked(&store, None).await;
         assert_eq!(err, Err(PublicError::AuthenticationRequired));
         assert_eq!(
             adapter.connection_status().state,
             ConnectionState::ReconnectRequired
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_freshness_checks_share_one_refresh() {
+        use std::sync::atomic::AtomicUsize;
+
+        let fake = Arc::new(FakeCredentialStore::default());
+        seed_connected(&fake);
+        let adapter = ChatGptAdapter::new(fake);
+        let calls = Arc::new(AtomicUsize::new(0));
+        struct RefreshOnce(Arc<AtomicUsize>);
+        impl TestTransport for RefreshOnce {
+            fn exchange_token(
+                &self,
+                _: &str,
+                _: &str,
+                _: &str,
+                _: &str,
+            ) -> Result<TokenBundle, PublicError> {
+                unreachable!()
+            }
+            fn refresh_token(&self, url: &str, refresh: &str) -> Result<TokenBundle, PublicError> {
+                assert_eq!(url, TOKEN_URL);
+                assert_eq!(refresh, "refresh");
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Ok(TokenBundle::Success(TokenValues {
+                    access: "new-access".into(),
+                    refresh: "new-refresh".into(),
+                    account: "account".into(),
+                    expires_at_unix_ms: Some(i64::MAX / 2),
+                    preserve_refresh: false,
+                }))
+            }
+            fn inference(
+                &self,
+                _: &str,
+                _: &HeaderMap,
+                _: &str,
+            ) -> Result<MockInference, PublicError> {
+                unreachable!()
+            }
+        }
+        adapter.set_test_transport(Arc::new(RefreshOnce(Arc::clone(&calls))));
+        let dir = tempfile_dir();
+        let store = SqliteStore::open(dir.join("tule.sqlite3")).unwrap();
+        let mut profile = store
+            .get_provider_profile(PROVIDER_PROFILE_ID)
+            .unwrap()
+            .unwrap();
+        profile.set_credential_metadata(Some(CREDENTIAL_HANDLE.into()), Some(0), 1);
+        store.update_provider_profile(&profile).unwrap();
+
+        let (first, second) = tokio::join!(
+            adapter.ensure_fresh_access_public(&store),
+            adapter.ensure_fresh_access_public(&store)
+        );
+        first.unwrap();
+        second.unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn pre_stream_cancellation_interrupts_refresh_without_rotating_credentials() {
+        let fake = Arc::new(FakeCredentialStore::default());
+        seed_connected(&fake);
+        let adapter = ChatGptAdapter::new(fake.clone());
+        let cancel = CancellationToken::new();
+        struct CancelRefresh(CancellationToken);
+        impl TestTransport for CancelRefresh {
+            fn exchange_token(
+                &self,
+                _: &str,
+                _: &str,
+                _: &str,
+                _: &str,
+            ) -> Result<TokenBundle, PublicError> {
+                unreachable!()
+            }
+            fn refresh_token(&self, _: &str, _: &str) -> Result<TokenBundle, PublicError> {
+                self.0.cancel();
+                Ok(TokenBundle::Success(token_values(
+                    "new-access",
+                    "new-refresh",
+                    "new-account",
+                    false,
+                )))
+            }
+            fn inference(
+                &self,
+                _: &str,
+                _: &HeaderMap,
+                _: &str,
+            ) -> Result<MockInference, PublicError> {
+                unreachable!()
+            }
+        }
+        adapter.set_test_transport(Arc::new(CancelRefresh(cancel.clone())));
+        let dir = tempfile_dir();
+        let store = SqliteStore::open(dir.join("tule.sqlite3")).unwrap();
+        let mut profile = store
+            .get_provider_profile(PROVIDER_PROFILE_ID)
+            .unwrap()
+            .unwrap();
+        profile.set_credential_metadata(Some(CREDENTIAL_HANDLE.into()), Some(0), 1);
+        store.update_provider_profile(&profile).unwrap();
+
+        assert_eq!(
+            adapter
+                .ensure_fresh_access_cancellable_public(&store, cancel)
+                .await,
+            Err(PublicError::Cancelled)
+        );
+        assert_eq!(
+            fake.peek(CREDENTIAL_HANDLE, CredentialKind::RefreshToken),
+            Some(b"refresh".to_vec())
+        );
+        assert_eq!(
+            fake.peek(CREDENTIAL_HANDLE, CredentialKind::AccessToken),
+            Some(b"access".to_vec())
+        );
+        assert_eq!(
+            fake.peek(CREDENTIAL_HANDLE, CredentialKind::AccountId),
+            Some(b"account".to_vec())
         );
     }
 
@@ -1235,7 +2374,12 @@ mod tests {
             fn refresh_token(&self, _: &str, _: &str) -> Result<TokenBundle, PublicError> {
                 unreachable!()
             }
-            fn inference(&self, url: &str, _: &str) -> Result<MockInference, PublicError> {
+            fn inference(
+                &self,
+                url: &str,
+                _: &HeaderMap,
+                _: &str,
+            ) -> Result<MockInference, PublicError> {
                 assert_eq!(url, INFERENCE_URL);
                 Ok(MockInference::Events(vec![
                     ProviderEvent::Delta("a".into()),
@@ -1264,6 +2408,57 @@ mod tests {
         assert_eq!(result, Err(PublicError::Cancelled));
     }
 
+    #[tokio::test]
+    async fn idle_stream_cancels_promptly_and_blocks_disconnect() {
+        let fake = Arc::new(FakeCredentialStore::default());
+        seed_connected(&fake);
+        let adapter = ChatGptAdapter::new(fake);
+        struct WaitTransport;
+        impl TestTransport for WaitTransport {
+            fn exchange_token(
+                &self,
+                _: &str,
+                _: &str,
+                _: &str,
+                _: &str,
+            ) -> Result<TokenBundle, PublicError> {
+                unreachable!()
+            }
+            fn refresh_token(&self, _: &str, _: &str) -> Result<TokenBundle, PublicError> {
+                unreachable!()
+            }
+            fn inference(
+                &self,
+                url: &str,
+                _: &HeaderMap,
+                _: &str,
+            ) -> Result<MockInference, PublicError> {
+                assert_eq!(url, INFERENCE_URL);
+                Ok(MockInference::WaitForCancellation)
+            }
+        }
+        adapter.set_test_transport(Arc::new(WaitTransport));
+        let dir = tempfile_dir();
+        let store = SqliteStore::open(dir.join("tule.sqlite3")).unwrap();
+        let cancel = CancellationToken::new();
+        let control_cancel = cancel.clone();
+        let stream = adapter.stream(
+            ProviderRequest {
+                session_id: "session".into(),
+                request_json: "{}".into(),
+            },
+            cancel,
+            Box::new(|_| Ok(())),
+        );
+        let control = async {
+            tokio::task::yield_now().await;
+            assert_eq!(adapter.disconnect(&store), Err(PublicError::SessionBusy));
+            control_cancel.cancel();
+        };
+        let (result, ()) = tokio::join!(stream, control);
+        assert_eq!(result, Err(PublicError::Cancelled));
+    }
+
     #[test]
     fn endpoint_constants_reject_drift_targets() {
         assert!(!AUTH_URL.contains("api.openai.com/v1"));
@@ -1273,6 +2468,82 @@ mod tests {
             "https://chatgpt.com/backend-api/codex/responses"
         );
         assert!(!SCOPES.contains("api.connectors"));
+    }
+
+    fn token_values(
+        access: &str,
+        refresh: &str,
+        account: &str,
+        preserve_refresh: bool,
+    ) -> TokenValues {
+        TokenValues {
+            access: access.into(),
+            refresh: refresh.into(),
+            account: account.into(),
+            expires_at_unix_ms: Some(i64::MAX / 2),
+            preserve_refresh,
+        }
+    }
+
+    fn seed_connected(store: &FakeCredentialStore) {
+        store
+            .replace(CREDENTIAL_HANDLE, CredentialKind::RefreshToken, b"refresh")
+            .unwrap();
+        store
+            .replace(CREDENTIAL_HANDLE, CredentialKind::AccessToken, b"access")
+            .unwrap();
+        store
+            .replace(CREDENTIAL_HANDLE, CredentialKind::AccountId, b"account")
+            .unwrap();
+    }
+
+    fn mark_profile_connected(store: &SqliteStore, expires_at_unix_ms: Option<i64>) {
+        let mut profile = store
+            .get_provider_profile(PROVIDER_PROFILE_ID)
+            .unwrap()
+            .unwrap();
+        profile.set_credential_metadata(Some(CREDENTIAL_HANDLE.into()), expires_at_unix_ms, 1);
+        store.update_provider_profile(&profile).unwrap();
+    }
+
+    async fn callback_result(request: &str, expected_state: &str) -> Result<String, PublicError> {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = accept_callback(listener, expected_state);
+        let client = async {
+            let mut socket = tokio::net::TcpStream::connect(address).await.unwrap();
+            socket.write_all(request.as_bytes()).await.unwrap();
+            let mut response = Vec::new();
+            let _ = socket.read_to_end(&mut response).await;
+        };
+        let (result, ()) = tokio::join!(server, client);
+        result
+    }
+
+    async fn local_http_response(status: StatusCode, body: Vec<u8>) -> reqwest::Response {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0_u8; 1024];
+            let _ = socket.read(&mut request).await;
+            let header = format!(
+                "HTTP/1.1 {} Test\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                status.as_u16(),
+                body.len()
+            );
+            socket.write_all(header.as_bytes()).await.unwrap();
+            socket.write_all(&body).await.unwrap();
+        };
+        let client = async move {
+            Client::new()
+                .get(format!("http://{address}"))
+                .send()
+                .await
+                .unwrap()
+        };
+        let ((), response) = tokio::join!(server, client);
+        response
     }
 
     fn tempfile_dir() -> std::path::PathBuf {

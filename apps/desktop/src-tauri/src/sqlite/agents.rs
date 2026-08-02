@@ -202,6 +202,20 @@ impl AgentRepository for SqliteStore {
         insert_event(&self.connection()?, event)
     }
 
+    fn update_session_with_event(
+        &self,
+        session: &AgentSession,
+        event: &AgentEvent,
+    ) -> Result<(), Self::Error> {
+        let mut connection = self.connection()?;
+        let transaction = connection
+            .transaction()
+            .map_err(SqliteStoreError::Database)?;
+        update_session(&transaction, session)?;
+        insert_event(&transaction, event)?;
+        transaction.commit().map_err(SqliteStoreError::Database)
+    }
+
     fn next_event_sequence(&self, session_id: &AgentSessionId) -> Result<u64, Self::Error> {
         let sequence: Option<i64> = self
             .connection()?
@@ -278,7 +292,7 @@ impl AgentRepository for SqliteStore {
         let transaction = connection
             .transaction()
             .map_err(SqliteStoreError::Database)?;
-        update_turn(&transaction, turn)?;
+        update_inflight_turn(&transaction, turn)?;
         if let Some(event) = streaming_event {
             insert_event(&transaction, event)?;
         }
@@ -296,8 +310,24 @@ impl AgentRepository for SqliteStore {
             .transaction()
             .map_err(SqliteStoreError::Database)?;
         update_session(&transaction, session)?;
-        update_turn(&transaction, turn)?;
+        update_inflight_turn(&transaction, turn)?;
         insert_event(&transaction, terminal_event)?;
+        transaction.commit().map_err(SqliteStoreError::Database)
+    }
+
+    fn finish_turns_with_terminal_events(
+        &self,
+        updates: &[(AgentSession, AgentTurn, AgentEvent)],
+    ) -> Result<(), Self::Error> {
+        let mut connection = self.connection()?;
+        let transaction = connection
+            .transaction()
+            .map_err(SqliteStoreError::Database)?;
+        for (session, turn, terminal_event) in updates {
+            update_session(&transaction, session)?;
+            update_inflight_turn(&transaction, turn)?;
+            insert_event(&transaction, terminal_event)?;
+        }
         transaction.commit().map_err(SqliteStoreError::Database)
     }
 }
@@ -374,6 +404,35 @@ fn update_turn(
         params![turn.id().to_string(), turn.agent_text(), turn.state().as_str(), turn.error_code(),
             turn.provider_response_id(), input, output, turn.finished_at_unix_ms()],
     ).map_err(SqliteStoreError::Database)?;
+    Ok(())
+}
+
+fn update_inflight_turn(
+    connection: &impl Deref<Target = rusqlite::Connection>,
+    turn: &AgentTurn,
+) -> Result<(), SqliteStoreError> {
+    let input = turn
+        .usage_input_tokens()
+        .map(i64::try_from)
+        .transpose()
+        .map_err(|_| SqliteStoreError::Numeric)?;
+    let output = turn
+        .usage_output_tokens()
+        .map(i64::try_from)
+        .transpose()
+        .map_err(|_| SqliteStoreError::Numeric)?;
+    let updated = connection.execute(
+        "UPDATE agent_turns SET agent_text = ?2, state = ?3, error_code = ?4, provider_response_id = ?5,
+             usage_input_tokens = ?6, usage_output_tokens = ?7, finished_at_unix_ms = ?8
+         WHERE id = ?1 AND state IN ('pending', 'streaming')",
+        params![turn.id().to_string(), turn.agent_text(), turn.state().as_str(), turn.error_code(),
+            turn.provider_response_id(), input, output, turn.finished_at_unix_ms()],
+    ).map_err(SqliteStoreError::Database)?;
+    if updated != 1 {
+        return Err(SqliteStoreError::Database(
+            rusqlite::Error::QueryReturnedNoRows,
+        ));
+    }
     Ok(())
 }
 
@@ -544,8 +603,8 @@ fn reconstruct_event(row: EventRow) -> Result<AgentEvent, SqliteStoreError> {
 #[cfg(test)]
 mod tests {
     use tule_core::{
-        AgentEvent, AgentEventKind, AgentRepository, AgentSession, AgentTurn, PROVIDER_PROFILE_ID,
-        ProviderRequestId,
+        AgentEvent, AgentEventKind, AgentRepository, AgentSession, AgentTurn, AgentTurnState,
+        PROVIDER_PROFILE_ID, ProviderRequestId,
     };
 
     use super::*;
@@ -649,5 +708,139 @@ mod tests {
         }
         assert!(migration.contains("credential_handle"));
         assert!(migration.contains("expires_at_unix_ms"));
+    }
+
+    #[test]
+    fn project_association_and_event_roll_back_together() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = SqliteStore::open(directory.path().join("association.sqlite3")).unwrap();
+        let project = tule_core::create_project(&store, "Project context").unwrap();
+        let prepared = tule_core::prepare_agent_send(&store, None, "Hello", None, "").unwrap();
+        tule_core::complete_agent_turn(&store, prepared.turn.id(), None, None, None).unwrap();
+
+        let mut changed = store.find_session(&prepared.session.id()).unwrap().unwrap();
+        changed.set_project_id(Some(project.id())).unwrap();
+        let duplicate_sequence = store
+            .list_events(&prepared.session.id())
+            .unwrap()
+            .last()
+            .unwrap()
+            .sequence();
+        let conflicting = AgentEvent::new(
+            prepared.session.id(),
+            None,
+            duplicate_sequence,
+            AgentEventKind::ProjectAssociationChanged,
+        )
+        .unwrap();
+
+        assert!(
+            store
+                .update_session_with_event(&changed, &conflicting)
+                .is_err()
+        );
+        assert_eq!(
+            store
+                .find_session(&prepared.session.id())
+                .unwrap()
+                .unwrap()
+                .project_id(),
+            None
+        );
+    }
+
+    #[test]
+    fn stale_terminal_write_cannot_change_terminal_kind() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = SqliteStore::open(directory.path().join("terminal-cas.sqlite3")).unwrap();
+        let prepared = tule_core::prepare_agent_send(&store, None, "Hello", None, "").unwrap();
+        let mut stale = prepared.turn.clone();
+        let completed =
+            tule_core::complete_agent_turn(&store, prepared.turn.id(), None, None, None).unwrap();
+        stale.cancel().unwrap();
+        let session = store.find_session(&prepared.session.id()).unwrap().unwrap();
+        let event = AgentEvent::new(
+            prepared.session.id(),
+            Some(stale.id()),
+            store.next_event_sequence(&prepared.session.id()).unwrap(),
+            AgentEventKind::TurnCancelled,
+        )
+        .unwrap();
+
+        assert!(
+            store
+                .finish_turn_with_terminal_event(&session, &stale, &event)
+                .is_err()
+        );
+        assert_eq!(
+            store.find_turn(&stale.id()).unwrap().unwrap().state(),
+            AgentTurnState::Completed
+        );
+        assert_eq!(
+            store
+                .list_events(&prepared.session.id())
+                .unwrap()
+                .iter()
+                .filter(|event| matches!(
+                    event.kind(),
+                    AgentEventKind::TurnCompleted | AgentEventKind::TurnCancelled
+                ))
+                .count(),
+            1
+        );
+        assert_eq!(completed.state(), AgentTurnState::Completed);
+    }
+
+    #[test]
+    fn batch_interruption_rolls_back_every_turn_on_failure() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = SqliteStore::open(directory.path().join("recovery-atomic.sqlite3")).unwrap();
+        let mut updates = Vec::new();
+        let mut turn_ids = Vec::new();
+
+        for index in 0..2 {
+            let mut session = AgentSession::new(format!("Session {index}"), None).unwrap();
+            let mut turn = AgentTurn::new_pending(
+                session.id(),
+                0,
+                format!("Message {index}"),
+                None,
+                "",
+                ProviderRequestId::generate(),
+            )
+            .unwrap();
+            let created =
+                AgentEvent::new(session.id(), None, 0, AgentEventKind::SessionCreated).unwrap();
+            let pending = AgentEvent::new(
+                session.id(),
+                Some(turn.id()),
+                1,
+                AgentEventKind::TurnPending,
+            )
+            .unwrap();
+            store
+                .create_session_with_first_turn(&session, &turn, &created, &pending)
+                .unwrap();
+            turn_ids.push(turn.id());
+            turn.interrupt().unwrap();
+            session.touch_updated_at().unwrap();
+            let sequence = if index == 0 { 2 } else { 1 };
+            let interrupted = AgentEvent::new(
+                session.id(),
+                Some(turn.id()),
+                sequence,
+                AgentEventKind::TurnInterrupted,
+            )
+            .unwrap();
+            updates.push((session, turn, interrupted));
+        }
+
+        assert!(store.finish_turns_with_terminal_events(&updates).is_err());
+        for turn_id in turn_ids {
+            assert_eq!(
+                store.find_turn(&turn_id).unwrap().unwrap().state(),
+                AgentTurnState::Pending
+            );
+        }
     }
 }

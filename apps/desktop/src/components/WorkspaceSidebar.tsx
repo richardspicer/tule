@@ -21,6 +21,8 @@ interface WorkspaceSidebarProps {
   sessions: readonly SidebarSession[];
   activeSessionId: string | null;
   pendingProjectId: string | null;
+  inert: boolean;
+  navigationDisabled: boolean;
   onNewSession: () => void;
   onSelectSession: (sessionId: string) => void;
   onSelectProject: (projectId: string) => void;
@@ -32,6 +34,8 @@ export function WorkspaceSidebar({
   sessions,
   activeSessionId,
   pendingProjectId,
+  inert,
+  navigationDisabled,
   onNewSession,
   onSelectSession,
   onSelectProject,
@@ -40,14 +44,19 @@ export function WorkspaceSidebar({
   const projectless = sessions.filter((session) => session.projectId === null);
 
   return (
-    <aside className="workspace-sidebar" aria-label="Workspace">
+    <aside className="workspace-sidebar" aria-label="Workspace" inert={inert ? true : undefined}>
       <div className="wordmark" role="img" aria-label="TULE">
         <pre className="wordmark-art" aria-hidden="true">
           {tuleWordmark}
         </pre>
       </div>
 
-      <button className="sidebar-action" type="button" onClick={onNewSession}>
+      <button
+        className="sidebar-action"
+        type="button"
+        disabled={navigationDisabled}
+        onClick={onNewSession}
+      >
         New session
       </button>
 
@@ -63,6 +72,7 @@ export function WorkspaceSidebar({
                 <button
                   className={`sidebar-row${projectSelected ? " is-selected" : ""}`}
                   type="button"
+                  disabled={navigationDisabled}
                   onClick={() => onSelectProject(project.id)}
                 >
                   <span className="sidebar-row-label">{project.displayName}</span>
@@ -74,6 +84,7 @@ export function WorkspaceSidebar({
                         <button
                           className={`sidebar-row nested${activeSessionId === session.id ? " is-selected" : ""}`}
                           type="button"
+                          disabled={navigationDisabled}
                           onClick={() => onSelectSession(session.id)}
                         >
                           <span className="sidebar-row-label">{session.title}</span>
@@ -99,6 +110,7 @@ export function WorkspaceSidebar({
                 <button
                   className={`sidebar-row${activeSessionId === session.id ? " is-selected" : ""}`}
                   type="button"
+                  disabled={navigationDisabled}
                   onClick={() => onSelectSession(session.id)}
                 >
                   <span className="sidebar-row-label">{session.title}</span>
@@ -109,7 +121,12 @@ export function WorkspaceSidebar({
         </ul>
       </div>
 
-      <button className="sidebar-action secondary" type="button" onClick={onManageProjects}>
+      <button
+        className="sidebar-action secondary"
+        type="button"
+        disabled={navigationDisabled}
+        onClick={onManageProjects}
+      >
         Manage projects
       </button>
     </aside>

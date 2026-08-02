@@ -1,5 +1,10 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
-import { getProviderErrorCode, type ProviderErrorCode, ProviderError } from "./provider";
+import {
+  getProviderErrorCode,
+  isProviderErrorCode,
+  type ProviderErrorCode,
+  ProviderError,
+} from "./provider";
 
 export interface AgentSession {
   id: string;
@@ -8,13 +13,25 @@ export interface AgentSession {
   modelId: string;
 }
 
+export type AgentTurnState =
+  "pending" | "streaming" | "completed" | "cancelled" | "failed" | "interrupted";
+
+const agentTurnStates: readonly AgentTurnState[] = [
+  "pending",
+  "streaming",
+  "completed",
+  "cancelled",
+  "failed",
+  "interrupted",
+];
+
 export interface AgentTurn {
   id: string;
   ordinal: number;
   userText: string;
   agentText: string;
-  state: string;
-  errorCode: string | null;
+  state: AgentTurnState;
+  errorCode: AgentErrorCode | null;
 }
 
 export interface AgentSessionDetail {
@@ -84,8 +101,9 @@ function isAgentTurn(value: unknown): value is AgentTurn {
     typeof value.agentText === "string" &&
     "state" in value &&
     typeof value.state === "string" &&
+    agentTurnStates.includes(value.state as AgentTurnState) &&
     "errorCode" in value &&
-    (value.errorCode === null || typeof value.errorCode === "string")
+    (value.errorCode === null || isProviderErrorCode(value.errorCode))
   );
 }
 
@@ -220,8 +238,8 @@ export async function sendAgentMessage(options: {
   }
 }
 
-export function getSafeAgentErrorMessage(error: unknown): string {
-  switch (getAgentErrorCode(error)) {
+export function getSafeAgentErrorMessageForCode(code: AgentErrorCode): string {
+  switch (code) {
     case "not_connected":
       return "Connect ChatGPT in Settings to message the Agent.";
     case "invalid_input":
@@ -251,4 +269,8 @@ export function getSafeAgentErrorMessage(error: unknown): string {
     case "provider_unavailable":
       return "The provider is unavailable. Try again.";
   }
+}
+
+export function getSafeAgentErrorMessage(error: unknown): string {
+  return getSafeAgentErrorMessageForCode(getAgentErrorCode(error));
 }

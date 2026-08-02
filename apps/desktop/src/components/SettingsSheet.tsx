@@ -8,8 +8,13 @@ interface SettingsSheetProps {
   model: string;
   theme: ThemePreference;
   busy: boolean;
+  turnBusy: boolean;
+  cancelRequested: boolean;
+  statusMessage: string | null;
+  errorMessage: string | null;
   onClose: () => void;
   onConnect: () => void;
+  onCancelConnect: () => void;
   onDisconnect: () => void;
   onThemeChange: (theme: ThemePreference) => void;
   returnFocusRef: React.RefObject<HTMLButtonElement | null>;
@@ -36,55 +41,96 @@ export function SettingsSheet({
   model,
   theme,
   busy,
+  turnBusy,
+  cancelRequested,
+  statusMessage,
+  errorMessage,
   onClose,
   onConnect,
+  onCancelConnect,
   onDisconnect,
   onThemeChange,
   returnFocusRef,
 }: SettingsSheetProps) {
   const titleId = useId();
   const closeRef = useRef<HTMLButtonElement>(null);
+  const sheetRef = useRef<HTMLDivElement>(null);
+  const wasOpenRef = useRef(false);
   const displayModel = model === "gpt-5.5" ? "GPT-5.5" : model;
 
   useEffect(() => {
     if (!open) {
+      if (wasOpenRef.current) {
+        returnFocusRef.current?.focus();
+      }
+      wasOpenRef.current = false;
       return;
     }
 
+    wasOpenRef.current = true;
     closeRef.current?.focus();
 
     function onKeyDown(event: KeyboardEvent) {
       if (event.key === "Escape") {
         event.preventDefault();
         onClose();
+        return;
+      }
+
+      if (event.key !== "Tab") {
+        return;
+      }
+
+      const focusable = Array.from(
+        sheetRef.current?.querySelectorAll<HTMLElement>(
+          'button:not([disabled]), select:not([disabled]), input:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+        ) ?? [],
+      );
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (first === undefined || last === undefined) {
+        event.preventDefault();
+        return;
+      }
+
+      const activeElement = document.activeElement;
+      if (
+        event.shiftKey &&
+        (activeElement === first || !sheetRef.current?.contains(activeElement))
+      ) {
+        event.preventDefault();
+        last.focus();
+      } else if (
+        !event.shiftKey &&
+        (activeElement === last || !sheetRef.current?.contains(activeElement))
+      ) {
+        event.preventDefault();
+        first.focus();
       }
     }
 
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [open, onClose]);
-
-  useEffect(() => {
-    if (open) {
-      return;
-    }
-
-    returnFocusRef.current?.focus();
-  }, [open, returnFocusRef]);
+  }, [open, onClose, returnFocusRef]);
 
   if (!open) {
     return null;
   }
 
   const connecting = connectionState === "connecting";
-  const canConnect =
-    connectionState === "disconnected" || connectionState === "reconnect_required" || connecting;
+  const canConnect = connectionState === "disconnected" || connectionState === "reconnect_required";
   const canDisconnect = connectionState === "connected";
 
   return (
     <div className="settings-layer">
       <div className="settings-backdrop" aria-hidden="true" />
-      <div className="settings-sheet" role="dialog" aria-modal="true" aria-labelledby={titleId}>
+      <div
+        ref={sheetRef}
+        className="settings-sheet"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+      >
         <div className="settings-header">
           <h2 id={titleId}>Settings</h2>
           <button ref={closeRef} className="icon-button" type="button" onClick={onClose}>
@@ -109,21 +155,25 @@ export function SettingsSheet({
             <span>Model</span>
             <strong>{displayModel}</strong>
           </p>
-          {canConnect ? (
+          {connecting ? (
             <button
-              className="primary-action"
+              className="secondary-action"
               type="button"
-              disabled={busy || connecting}
-              onClick={onConnect}
+              disabled={cancelRequested}
+              onClick={onCancelConnect}
             >
-              {connecting ? "Connecting…" : "Connect in browser"}
+              {cancelRequested ? "Cancelling…" : "Cancel connection"}
+            </button>
+          ) : canConnect ? (
+            <button className="primary-action" type="button" disabled={busy} onClick={onConnect}>
+              Connect in browser
             </button>
           ) : null}
           {canDisconnect ? (
             <button
               className="secondary-action"
               type="button"
-              disabled={busy}
+              disabled={busy || turnBusy}
               onClick={onDisconnect}
             >
               Disconnect
@@ -132,6 +182,21 @@ export function SettingsSheet({
           {connectionState === "connected" ? (
             <p className="settings-note">Removed from this device clears local credentials only.</p>
           ) : null}
+          {turnBusy && connectionState === "connected" ? (
+            <p className="settings-note">
+              Disconnect is unavailable while the Agent is responding.
+            </p>
+          ) : null}
+          {statusMessage === null ? null : (
+            <p className="settings-note" role="status">
+              {statusMessage}
+            </p>
+          )}
+          {errorMessage === null ? null : (
+            <p className="field-error" role="alert">
+              {errorMessage}
+            </p>
+          )}
           {connectionState === "unavailable_in_this_build" ? (
             <p className="settings-note" role="status">
               ChatGPT connection is unavailable in this build.

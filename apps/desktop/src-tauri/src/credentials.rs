@@ -1,7 +1,7 @@
 //! Native-only credential storage for provider adapter secrets.
 
 #[cfg(test)]
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 /// Windows Credential Manager's per-entry blob limit.
@@ -161,20 +161,37 @@ impl CredentialStore for WindowsCredentialStore {
 #[derive(Default)]
 pub(crate) struct FakeCredentialStore {
     values: Mutex<HashMap<(String, CredentialKind), Vec<u8>>>,
-    fail_at: Mutex<Option<usize>>,
+    fail_at: Mutex<HashSet<usize>>,
     operations: Mutex<usize>,
 }
 
 #[cfg(test)]
 impl FakeCredentialStore {
     pub(crate) fn fail_on_operation(&self, operation: usize) {
-        *self.fail_at.lock().unwrap() = Some(operation);
+        self.fail_at.lock().unwrap().insert(operation);
+    }
+
+    pub(crate) fn fail_on_operations(&self, operations: impl IntoIterator<Item = usize>) {
+        self.fail_at.lock().unwrap().extend(operations);
+    }
+
+    pub(crate) fn reset_operations(&self) {
+        *self.operations.lock().unwrap() = 0;
+        self.fail_at.lock().unwrap().clear();
+    }
+
+    pub(crate) fn peek(&self, handle: &str, kind: CredentialKind) -> Option<Vec<u8>> {
+        self.values
+            .lock()
+            .unwrap()
+            .get(&(handle.into(), kind))
+            .cloned()
     }
 
     fn may_fail(&self) -> Result<(), CredentialStoreError> {
         let mut operations = self.operations.lock().unwrap();
         *operations += 1;
-        if *self.fail_at.lock().unwrap() == Some(*operations) {
+        if self.fail_at.lock().unwrap().contains(&*operations) {
             return Err(CredentialStoreError::Unavailable);
         }
         Ok(())
@@ -223,6 +240,25 @@ impl CredentialStore for FakeCredentialStore {
 mod tests {
     use super::*;
 
+    #[cfg(windows)]
+    struct WindowsCredentialCleanup<'a> {
+        store: &'a WindowsCredentialStore,
+        handle: String,
+    }
+
+    #[cfg(windows)]
+    impl Drop for WindowsCredentialCleanup<'_> {
+        fn drop(&mut self) {
+            for kind in [
+                CredentialKind::AccessToken,
+                CredentialKind::RefreshToken,
+                CredentialKind::AccountId,
+            ] {
+                let _ = self.store.delete(&self.handle, kind);
+            }
+        }
+    }
+
     #[test]
     fn fake_enforces_windows_blob_limit() {
         let store = FakeCredentialStore::default();
@@ -248,5 +284,49 @@ mod tests {
         );
         store.delete("h", CredentialKind::RefreshToken).unwrap();
         assert_eq!(store.read("h", CredentialKind::RefreshToken).unwrap(), None);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "uses the current Windows user's Credential Manager"]
+    fn windows_credential_manager_round_trips_and_deletes() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let store = WindowsCredentialStore::new();
+        let handle = format!(
+            "test-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system clock must be after the Unix epoch")
+                .as_nanos()
+        );
+        let cleanup = WindowsCredentialCleanup {
+            store: &store,
+            handle,
+        };
+
+        store
+            .replace(
+                &cleanup.handle,
+                CredentialKind::RefreshToken,
+                b"tule-credential-round-trip",
+            )
+            .expect("temporary credential must be writable");
+        assert_eq!(
+            store
+                .read(&cleanup.handle, CredentialKind::RefreshToken)
+                .expect("temporary credential must be readable"),
+            Some(b"tule-credential-round-trip".to_vec())
+        );
+        store
+            .delete(&cleanup.handle, CredentialKind::RefreshToken)
+            .expect("temporary credential must be deletable");
+        assert_eq!(
+            store
+                .read(&cleanup.handle, CredentialKind::RefreshToken)
+                .expect("deleted credential lookup must succeed"),
+            None
+        );
     }
 }

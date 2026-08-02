@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  cancelChatgptConnect,
   connectChatgpt,
   disconnectChatgpt,
   getConnectionStatus,
@@ -40,8 +41,10 @@ describe("provider platform", () => {
     });
 
     await expect(connectChatgpt()).resolves.toMatchObject({ state: "connected" });
+    await expect(cancelChatgptConnect()).resolves.toBeUndefined();
     await expect(disconnectChatgpt()).resolves.toMatchObject({ state: "connected" });
     expect(invokeMock).toHaveBeenCalledWith("connect_chatgpt");
+    expect(invokeMock).toHaveBeenCalledWith("cancel_chatgpt_connect");
     expect(invokeMock).toHaveBeenCalledWith("disconnect_chatgpt");
   });
 

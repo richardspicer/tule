@@ -1,6 +1,6 @@
-# Tule Architecture
+# TULE Architecture
 
-Tule is a local desktop application with a React interface, a narrow Tauri host,
+TULE is a local desktop application with a React interface, a narrow Tauri host,
 and a framework-independent Rust core. This document describes the current
 boundaries; it does not commit the project to unimplemented features.
 
@@ -19,7 +19,7 @@ The normal call path is:
 React interface
     -> named, typed Tauri command
         -> host-side validation and adaptation
-            -> Tule core behavior
+            -> TULE core behavior
 ```
 
 Responses return through the same typed boundary. Host response types may differ
@@ -28,13 +28,25 @@ domain.
 
 ## Ownership
 
-Tule owns its projects, workflows, permissions, provenance, artifacts, and
+TULE owns its projects, workflows, permissions, provenance, artifacts, and
 history. Model providers and future agent runtimes are replaceable adapters;
-they do not own Tule's domain model. Hermes and ACP are not initial dependencies.
+they do not own TULE's domain model. Hermes and ACP are not initial dependencies.
 
-Persistence and provider integrations should be introduced behind explicit Rust
-interfaces when needed. Their storage or transport details must not leak into
-domain behavior or React components.
+Persistence and provider integrations are introduced behind explicit Rust
+interfaces. Their storage or transport details must not leak into domain
+behavior or React components.
+
+## Agent Sessions and Provider Boundary
+
+The first Agent slice lives in `tule-core` as provider-neutral session, turn,
+event, and lifecycle use cases. The desktop host persists non-secret session
+state in the shared SQLite store, streams ordered channel events to the
+interface, and owns one experimental ChatGPT subscription compatibility
+adapter. Credentials stay in the OS credential store behind an opaque handle.
+The frontend receives only typed connection status and transcript data; it never
+receives authorization URLs, codes, tokens, account identifiers, or raw provider
+frames. Tools, connectors, filesystem access, and autonomous retries are out of
+scope for this slice.
 
 ## Project Persistence
 

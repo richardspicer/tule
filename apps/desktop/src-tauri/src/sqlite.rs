@@ -1,55 +1,75 @@
+//! Shared serialized SQLite persistence for Projects and Agent conversations.
+
+mod agents;
+
 use std::{
     error::Error,
     fmt,
     path::Path,
     sync::{Mutex, MutexGuard},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use rusqlite::{Connection, OptionalExtension, params};
 use rusqlite_migration::{M, Migrations};
-use tule_core::{Project, ProjectId, ProjectReconstructionError, ProjectRepository};
+use tule_core::{
+    MODEL_ID, PROVIDER_PROFILE_ID, Project, ProjectId, ProjectReconstructionError,
+    ProjectRepository, ProviderProfile,
+};
 
 pub(crate) const DATABASE_FILENAME: &str = "tule.sqlite3";
 
 const MIGRATION_SET: &[M<'static>] = &[
     M::up(include_str!("../migrations/0001_projects.sql")),
     M::up(include_str!("../migrations/0002_project_instructions.sql")),
+    M::up(include_str!("../migrations/0003_agent_conversations.sql")),
 ];
 const MIGRATIONS: Migrations<'static> = Migrations::from_slice(MIGRATION_SET);
 
-pub(crate) struct SqliteProjectRepository {
+/// The single, synchronized SQLite owner used by all desktop repositories.
+pub(crate) struct SqliteStore {
     connection: Mutex<Connection>,
 }
 
-impl SqliteProjectRepository {
-    pub(crate) fn open(path: impl AsRef<Path>) -> Result<Self, SqliteProjectRepositoryError> {
-        let mut connection =
-            Connection::open(path).map_err(SqliteProjectRepositoryError::Database)?;
+impl SqliteStore {
+    pub(crate) fn open(path: impl AsRef<Path>) -> Result<Self, SqliteStoreError> {
+        let mut connection = Connection::open(path).map_err(SqliteStoreError::Database)?;
         connection
             .pragma_update(None, "foreign_keys", true)
-            .map_err(SqliteProjectRepositoryError::Database)?;
-
-        MIGRATIONS
-            .validate()
-            .map_err(SqliteProjectRepositoryError::Migration)?;
+            .map_err(SqliteStoreError::Database)?;
+        MIGRATIONS.validate().map_err(SqliteStoreError::Migration)?;
         MIGRATIONS
             .to_latest(&mut connection)
-            .map_err(SqliteProjectRepositoryError::Migration)?;
+            .map_err(SqliteStoreError::Migration)?;
 
-        Ok(Self {
+        let store = Self {
             connection: Mutex::new(connection),
-        })
+        };
+        store.ensure_builtin_provider_profile()?;
+        Ok(store)
     }
 
-    fn connection(&self) -> Result<MutexGuard<'_, Connection>, SqliteProjectRepositoryError> {
+    pub(super) fn connection(&self) -> Result<MutexGuard<'_, Connection>, SqliteStoreError> {
         self.connection
             .lock()
-            .map_err(|_| SqliteProjectRepositoryError::LockPoisoned)
+            .map_err(|_| SqliteStoreError::LockPoisoned)
+    }
+
+    fn ensure_builtin_provider_profile(&self) -> Result<(), SqliteStoreError> {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| SqliteStoreError::Clock)?
+            .as_millis()
+            .try_into()
+            .map_err(|_| SqliteStoreError::Clock)?;
+        let profile =
+            ProviderProfile::built_in(PROVIDER_PROFILE_ID, PROVIDER_PROFILE_ID, MODEL_ID, now);
+        <Self as tule_core::AgentRepository>::ensure_provider_profile(self, &profile)
     }
 }
 
-impl ProjectRepository for SqliteProjectRepository {
-    type Error = SqliteProjectRepositoryError;
+impl ProjectRepository for SqliteStore {
+    type Error = SqliteStoreError;
 
     fn create(&self, project: &Project) -> Result<(), Self::Error> {
         self.connection()?
@@ -63,7 +83,7 @@ impl ProjectRepository for SqliteProjectRepository {
                     project.created_at_unix_ms()
                 ],
             )
-            .map_err(SqliteProjectRepositoryError::Database)?;
+            .map_err(SqliteStoreError::Database)?;
         Ok(())
     }
 
@@ -75,7 +95,7 @@ impl ProjectRepository for SqliteProjectRepository {
                  FROM projects \
                  ORDER BY created_at_unix_ms ASC, id ASC",
             )
-            .map_err(SqliteProjectRepositoryError::Database)?;
+            .map_err(SqliteStoreError::Database)?;
         let rows = statement
             .query_map([], |row| {
                 Ok((
@@ -85,12 +105,12 @@ impl ProjectRepository for SqliteProjectRepository {
                     row.get::<_, i64>(3)?,
                 ))
             })
-            .map_err(SqliteProjectRepositoryError::Database)?;
+            .map_err(SqliteStoreError::Database)?;
 
         let mut projects = Vec::new();
         for row in rows {
             let (id, name, instructions, created_at_unix_ms) =
-                row.map_err(SqliteProjectRepositoryError::Database)?;
+                row.map_err(SqliteStoreError::Database)?;
             projects.push(reconstruct_stored_project(
                 &id,
                 &name,
@@ -118,7 +138,7 @@ impl ProjectRepository for SqliteProjectRepository {
                 },
             )
             .optional()
-            .map_err(SqliteProjectRepositoryError::Database)?;
+            .map_err(SqliteStoreError::Database)?;
 
         stored
             .map(|(stored_id, name, instructions, created_at_unix_ms)| {
@@ -138,7 +158,7 @@ impl ProjectRepository for SqliteProjectRepository {
                 "UPDATE projects SET instructions = ?1 WHERE id = ?2",
                 params![instructions, id.to_string()],
             )
-            .map_err(SqliteProjectRepositoryError::Database)?;
+            .map_err(SqliteStoreError::Database)?;
 
         if updated == 0 {
             return Ok(None);
@@ -158,28 +178,24 @@ impl ProjectRepository for SqliteProjectRepository {
                     ))
                 },
             )
-            .map_err(SqliteProjectRepositoryError::Database)?;
+            .map_err(SqliteStoreError::Database)?;
 
         reconstruct_stored_project(&stored_id, &name, &stored_instructions, created_at_unix_ms)
             .map(Some)
     }
 }
 
-fn reconstruct_stored_project(
+pub(super) fn reconstruct_stored_project(
     id: &str,
     name: &str,
     instructions: &str,
     created_at_unix_ms: i64,
-) -> Result<Project, SqliteProjectRepositoryError> {
+) -> Result<Project, SqliteStoreError> {
     let project = Project::from_stored_parts(id, name, instructions, created_at_unix_ms).map_err(
-        |error| {
-            SqliteProjectRepositoryError::MalformedProject(StoredProjectError::Reconstruction(
-                error,
-            ))
-        },
+        |error| SqliteStoreError::MalformedProject(StoredProjectError::Reconstruction(error)),
     )?;
     if project.id().to_string() != id {
-        return Err(SqliteProjectRepositoryError::MalformedProject(
+        return Err(SqliteStoreError::MalformedProject(
             StoredProjectError::NonCanonicalProjectId,
         ));
     }
@@ -214,36 +230,48 @@ impl Error for StoredProjectError {
 }
 
 #[derive(Debug)]
-pub(crate) enum SqliteProjectRepositoryError {
+pub(crate) enum SqliteStoreError {
     Database(rusqlite::Error),
     Migration(rusqlite_migration::Error),
     MalformedProject(StoredProjectError),
+    MalformedAgent(tule_core::AgentReconstructionError),
     LockPoisoned,
+    Clock,
+    Numeric,
 }
 
-impl fmt::Display for SqliteProjectRepositoryError {
+impl fmt::Display for SqliteStoreError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Database(error) => write!(formatter, "SQLite project storage failed: {error}"),
-            Self::Migration(error) => write!(formatter, "project migration failed: {error}"),
+            Self::Database(error) => write!(formatter, "SQLite storage failed: {error}"),
+            Self::Migration(error) => write!(formatter, "SQLite migration failed: {error}"),
             Self::MalformedProject(error) => {
                 write!(
                     formatter,
                     "stored project could not be reconstructed: {error}"
                 )
             }
-            Self::LockPoisoned => formatter.write_str("project storage lock is poisoned"),
+            Self::MalformedAgent(error) => {
+                write!(
+                    formatter,
+                    "stored agent record could not be reconstructed: {error}"
+                )
+            }
+            Self::LockPoisoned => formatter.write_str("SQLite storage lock is poisoned"),
+            Self::Clock => formatter.write_str("system clock cannot initialize provider profile"),
+            Self::Numeric => formatter.write_str("stored numeric value is out of range"),
         }
     }
 }
 
-impl Error for SqliteProjectRepositoryError {
+impl Error for SqliteStoreError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Database(error) => Some(error),
             Self::Migration(error) => Some(error),
             Self::MalformedProject(error) => Some(error),
-            Self::LockPoisoned => None,
+            Self::MalformedAgent(error) => Some(error),
+            Self::LockPoisoned | Self::Clock | Self::Numeric => None,
         }
     }
 }
@@ -271,8 +299,8 @@ mod tests {
         .unwrap()
     }
 
-    fn open_repository(path: &Path) -> SqliteProjectRepository {
-        SqliteProjectRepository::open(path).unwrap()
+    fn open_repository(path: &Path) -> SqliteStore {
+        SqliteStore::open(path).unwrap()
     }
 
     #[test]
@@ -292,7 +320,7 @@ mod tests {
             .unwrap()
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 2);
+        assert_eq!(version, 3);
         drop(repository);
 
         let reopened = open_repository(&path);
@@ -302,7 +330,7 @@ mod tests {
             .unwrap()
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 2);
+        assert_eq!(version, 3);
     }
 
     #[test]
@@ -334,12 +362,44 @@ mod tests {
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
 
-        assert_eq!(version, 2);
+        assert_eq!(version, 3);
         assert_eq!(projects.len(), 1);
         assert_eq!(projects[0].id().to_string(), id);
         assert_eq!(projects[0].name().as_str(), "Existing project");
         assert_eq!(projects[0].instructions(), "");
         assert_eq!(projects[0].created_at_unix_ms(), 42);
+    }
+
+    #[test]
+    fn version_two_projects_preserve_exact_instructions() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = database_path(&directory);
+        let id = ProjectId::generate().to_string();
+        let instructions = "Keep\r\nunicode: 記録";
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch(include_str!("../migrations/0001_projects.sql"))
+            .unwrap();
+        connection
+            .execute_batch(include_str!("../migrations/0002_project_instructions.sql"))
+            .unwrap();
+        connection.execute(
+            "INSERT INTO projects (id, display_name, instructions, created_at_unix_ms) VALUES (?1, ?2, ?3, ?4)",
+            params![id, "Existing project", instructions, 42_i64],
+        ).unwrap();
+        connection
+            .pragma_update(None, "user_version", 2_i64)
+            .unwrap();
+        drop(connection);
+
+        let repository = open_repository(&path);
+        assert_eq!(repository.list().unwrap()[0].instructions(), instructions);
+        let version: i64 = repository
+            .connection()
+            .unwrap()
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 3);
     }
 
     #[test]
@@ -358,7 +418,7 @@ mod tests {
             .unwrap();
         drop(connection);
 
-        assert!(SqliteProjectRepository::open(&path).is_err());
+        assert!(SqliteStore::open(&path).is_err());
 
         let connection = Connection::open(&path).unwrap();
         let version: i64 = connection
@@ -463,7 +523,7 @@ mod tests {
             }
             assert!(matches!(
                 repository.list(),
-                Err(SqliteProjectRepositoryError::MalformedProject(_))
+                Err(SqliteStoreError::MalformedProject(_))
             ));
             repository
                 .connection
@@ -484,7 +544,7 @@ mod tests {
         }
         assert!(matches!(
             repository.list(),
-            Err(SqliteProjectRepositoryError::MalformedProject(_))
+            Err(SqliteStoreError::MalformedProject(_))
         ));
     }
 

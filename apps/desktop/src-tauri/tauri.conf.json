@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Tule",
+  "productName": "TULE",
   "version": "0.1.0",
   "identifier": "build.tule.desktop",
   "build": {
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "Tule",
+        "title": "TULE",
         "width": 1120,
         "height": 760,
         "minWidth": 760,

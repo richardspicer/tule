@@ -1,0 +1,61 @@
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  connectChatgpt,
+  disconnectChatgpt,
+  getConnectionStatus,
+  getProviderErrorCode,
+  ProviderError,
+} from "./provider";
+
+const invokeMock = vi.hoisted(() => vi.fn());
+
+vi.mock("@tauri-apps/api/core", () => ({
+  invoke: invokeMock,
+}));
+
+describe("provider platform", () => {
+  beforeEach(() => {
+    invokeMock.mockReset();
+  });
+
+  it("validates connection status shape", async () => {
+    invokeMock.mockResolvedValue({
+      state: "disconnected",
+      providerId: "openai-chatgpt-compat",
+      model: "gpt-5.5",
+    });
+
+    await expect(getConnectionStatus()).resolves.toEqual({
+      state: "disconnected",
+      providerId: "openai-chatgpt-compat",
+      model: "gpt-5.5",
+    });
+  });
+
+  it("maps connect and disconnect commands", async () => {
+    invokeMock.mockResolvedValue({
+      state: "connected",
+      providerId: "openai-chatgpt-compat",
+      model: "gpt-5.5",
+    });
+
+    await expect(connectChatgpt()).resolves.toMatchObject({ state: "connected" });
+    await expect(disconnectChatgpt()).resolves.toMatchObject({ state: "connected" });
+    expect(invokeMock).toHaveBeenCalledWith("connect_chatgpt");
+    expect(invokeMock).toHaveBeenCalledWith("disconnect_chatgpt");
+  });
+
+  it("maps allowlisted failures safely", async () => {
+    invokeMock.mockRejectedValue("session_busy");
+    await expect(connectChatgpt()).rejects.toBeInstanceOf(ProviderError);
+    await expect(connectChatgpt()).rejects.toMatchObject({ code: "session_busy" });
+    expect(getProviderErrorCode(new ProviderError("not_connected"))).toBe("not_connected");
+  });
+
+  it("rejects malformed status payloads", async () => {
+    invokeMock.mockResolvedValue({ state: "weird" });
+    await expect(getConnectionStatus()).rejects.toMatchObject({
+      code: "provider_unavailable",
+    });
+  });
+});

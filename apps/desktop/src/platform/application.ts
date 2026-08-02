@@ -20,7 +20,7 @@ export async function getApplicationInfo(): Promise<ApplicationInfo> {
   const response: unknown = await invoke("get_application_info");
 
   if (!isApplicationInfo(response)) {
-    throw new TypeError("Tule received an invalid application-info response.");
+    throw new TypeError("TULE received an invalid application-info response.");
   }
 
   return response;

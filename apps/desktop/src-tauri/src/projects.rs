@@ -7,7 +7,7 @@ use tule_core::{
     UpdateProjectInstructionsError,
 };
 
-use crate::sqlite::SqliteProjectRepository;
+use crate::sqlite::SqliteStore;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -37,20 +37,25 @@ pub(crate) enum ProjectCommandError {
 }
 
 pub(crate) enum ProjectStorageState {
-    Ready(Arc<SqliteProjectRepository>),
+    Ready(Arc<SqliteStore>),
     Unavailable,
 }
 
 impl ProjectStorageState {
-    pub(crate) fn ready(repository: SqliteProjectRepository) -> Self {
+    #[cfg(test)]
+    pub(crate) fn ready(repository: SqliteStore) -> Self {
         Self::Ready(Arc::new(repository))
+    }
+
+    pub(crate) fn ready_shared(repository: Arc<SqliteStore>) -> Self {
+        Self::Ready(repository)
     }
 
     pub(crate) fn unavailable() -> Self {
         Self::Unavailable
     }
 
-    fn repository(&self) -> Result<Arc<SqliteProjectRepository>, ProjectCommandError> {
+    fn repository(&self) -> Result<Arc<SqliteStore>, ProjectCommandError> {
         match self {
             Self::Ready(repository) => Ok(Arc::clone(repository)),
             Self::Unavailable => Err(ProjectCommandError::ProjectStorageUnavailable),
@@ -486,8 +491,7 @@ mod tests {
     #[test]
     fn ready_state_clones_the_single_repository_owner() {
         let directory = tempfile::tempdir().unwrap();
-        let repository =
-            SqliteProjectRepository::open(directory.path().join("state.sqlite3")).unwrap();
+        let repository = SqliteStore::open(directory.path().join("state.sqlite3")).unwrap();
         let state = ProjectStorageState::ready(repository);
 
         let first = state.repository().unwrap();

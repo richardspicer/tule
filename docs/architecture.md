@@ -36,6 +36,29 @@ Persistence and provider integrations should be introduced behind explicit Rust
 interfaces when needed. Their storage or transport details must not leak into
 domain behavior or React components.
 
+## Project Persistence
+
+The project model and its application operations live in `tule-core`. The core
+generates opaque UUID version 7 project identifiers, normalizes and validates
+display names, records creation time, and defines the repository interface used
+to create, list, and open projects. Project names are labels rather than keys,
+so duplicate display names are valid.
+
+The desktop host implements that repository with a single serialized SQLite
+connection. It resolves a fixed database filename beneath Tauri's application
+local data directory, enables foreign-key enforcement, and applies validated,
+embedded, append-only migrations before project commands can use the store.
+SQLite paths, connections, migrations, statements, and errors remain native
+implementation details.
+
+If path resolution, directory creation, database opening, or migration fails,
+the desktop shell still starts with project storage marked unavailable. The
+interface can only call the named `create_project`, `list_projects`, and
+`open_project` commands. Those commands run blocking persistence work away from
+the main thread and return minimal project records or one of four allowlisted
+error codes; they never expose the database path, raw SQL, or internal errors.
+No frontend capability is required for project persistence.
+
 ## Trust Boundary
 
 The webview is not a privileged execution environment. Native commands must

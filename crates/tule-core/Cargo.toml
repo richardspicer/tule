@@ -5,6 +5,9 @@ edition.workspace = true
 rust-version.workspace = true
 publish = false
 
+[dependencies]
+uuid = { version = "1", features = ["v7"] }
+
 [lints]
 workspace = true
 

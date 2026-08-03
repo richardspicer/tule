@@ -4,6 +4,7 @@ import {
   connectChatgpt,
   disconnectChatgpt,
   getConnectionStatus,
+  isStaleConnectCancellation,
   type ConnectionState,
 } from "../platform/provider";
 import {
@@ -104,6 +105,12 @@ export function SettingsWindow() {
     void listenConnectionStatusChanged((status) => {
       setConnectionState(status.state);
       setModel(status.model);
+      if (status.state !== "connecting") {
+        setCancelRequested(false);
+        setStatusMessage((current) =>
+          current === "Cancelling browser connection…" ? null : current,
+        );
+      }
     }).then((unlisten) => {
       if (disposed) {
         unlisten();
@@ -140,10 +147,14 @@ export function SettingsWindow() {
       const status = await connectChatgpt();
       setConnectionState(status.state);
       setModel(status.model);
+      setStatusMessage(null);
+      setErrorMessage(null);
     } catch (error: unknown) {
       if (getAgentErrorCode(error) === "cancelled") {
         setStatusMessage("Browser connection cancelled.");
+        setErrorMessage(null);
       } else {
+        setStatusMessage(null);
         setErrorMessage(getSafeAgentErrorMessage(error));
       }
       const status = await getConnectionStatus().catch(() => null);
@@ -170,6 +181,19 @@ export function SettingsWindow() {
     try {
       await cancelChatgptConnect();
     } catch (error: unknown) {
+      // Completion already won: reconcile to the terminal status and never show
+      // Agent-composer validation such as "Enter a valid message".
+      if (isStaleConnectCancellation(error)) {
+        const status = await getConnectionStatus().catch(() => null);
+        if (status !== null) {
+          setConnectionState(status.state);
+          setModel(status.model);
+        }
+        setCancelRequested(false);
+        setStatusMessage(null);
+        setErrorMessage(null);
+        return;
+      }
       setCancelRequested(false);
       setStatusMessage(null);
       setErrorMessage(getSafeAgentErrorMessage(error));

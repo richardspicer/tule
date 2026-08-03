@@ -116,6 +116,15 @@ export async function cancelChatgptConnect(): Promise<void> {
   await invokeProviderCommand("cancel_chatgpt_connect");
 }
 
+/**
+ * A late Cancel after the native connect operation already finished surfaces as
+ * `invalid_input`. Callers must reconcile to the authoritative connection status
+ * and must not present Agent-composer validation copy.
+ */
+export function isStaleConnectCancellation(error: unknown): boolean {
+  return getProviderErrorCode(error) === "invalid_input";
+}
+
 export async function disconnectChatgpt(): Promise<ConnectionStatus> {
   return validateConnectionStatusExport(await invokeProviderCommand("disconnect_chatgpt"));
 }

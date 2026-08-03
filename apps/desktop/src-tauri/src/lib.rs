@@ -74,7 +74,7 @@ fn emit_connection_status(app: &tauri::AppHandle, status: &ConnectionStatus) {
     let _ = app.emit(CONNECTION_STATUS_CHANGED_EVENT, status);
 }
 
-/// Selects the status that connect/cancel terminal paths emit without altering
+/// Selects the status that connect terminal paths emit without altering
 /// the original command result.
 fn terminal_status_for_emit(
     result: &Result<ConnectionStatus, PublicError>,
@@ -133,19 +133,17 @@ async fn connect_chatgpt(
 }
 
 #[tauri::command]
-fn cancel_chatgpt_connect(
-    app: tauri::AppHandle,
-    state: tauri::State<'_, AgentState>,
-) -> Result<(), PublicError> {
+fn cancel_chatgpt_connect(state: tauri::State<'_, AgentState>) -> Result<(), PublicError> {
     let Some(adapter) = state.chatgpt() else {
         return Err(PublicError::ProviderUnavailable);
     };
-    let result = adapter.cancel_connect();
-    // Emit current status after the cancel request settles, including late
-    // Cancel after completion, without masking the original safe error.
-    let status = current_connection_status(&state);
-    emit_connection_status(&app, &status);
-    result
+    // Request cancellation only. Do not sample or emit connection status here:
+    // a stale Connecting snapshot can race ahead of the in-flight connect
+    // command's terminal emission and strand windows that consume the event
+    // stream. connect_chatgpt emits the authoritative terminal status after it
+    // settles; late Cancel keeps its original safe error for frontend
+    // reconciliation.
+    adapter.cancel_connect()
 }
 
 #[tauri::command]
@@ -227,6 +225,35 @@ mod tests {
     use super::*;
     use provider::ConnectionState;
 
+    /// Cancel never emits connection status. Only the settled connect command
+    /// emits the authoritative terminal status, so a Connecting snapshot
+    /// sampled during Cancel cannot overtake success, cancellation, or failure.
+    fn connection_status_events_after_connect_cancel_race(
+        connect_terminal: ConnectionStatus,
+        cancel_sampled_while_connecting: ConnectionStatus,
+        cancel_emits_sampled_status: bool,
+    ) -> Vec<ConnectionStatus> {
+        let mut events = vec![connect_terminal];
+        if cancel_emits_sampled_status {
+            // Models the defective ordering: Cancel sampled Connecting, then
+            // emitted that snapshot after connect already published terminal.
+            events.push(cancel_sampled_while_connecting);
+        }
+        events
+    }
+
+    fn connecting_overtakes_terminal(events: &[ConnectionStatus]) -> bool {
+        let mut saw_terminal = false;
+        for status in events {
+            if status.state != ConnectionState::Connecting {
+                saw_terminal = true;
+            } else if saw_terminal {
+                return true;
+            }
+        }
+        false
+    }
+
     #[test]
     fn application_info_command_preserves_the_typed_core_shape() {
         let expected = tule_core::get_application_info();
@@ -267,5 +294,51 @@ mod tests {
             terminal_status_for_emit(&Err(PublicError::InvalidInput), connected.clone()),
             connected
         );
+    }
+
+    #[test]
+    fn cancel_status_emission_cannot_overtake_terminal_connect_events() {
+        let connecting = ConnectionStatus {
+            state: ConnectionState::Connecting,
+            provider_id: "openai-chatgpt-compat",
+            model: "gpt-5.5",
+        };
+        let terminals = [
+            ConnectionStatus {
+                state: ConnectionState::Connected,
+                provider_id: "openai-chatgpt-compat",
+                model: "gpt-5.5",
+            },
+            ConnectionStatus {
+                state: ConnectionState::Disconnected,
+                provider_id: "openai-chatgpt-compat",
+                model: "gpt-5.5",
+            },
+            ConnectionStatus {
+                state: ConnectionState::ReconnectRequired,
+                provider_id: "openai-chatgpt-compat",
+                model: "gpt-5.5",
+            },
+        ];
+
+        for terminal in terminals {
+            // Production policy: Cancel does not emit; connect emits the terminal.
+            let events = connection_status_events_after_connect_cancel_race(
+                terminal.clone(),
+                connecting.clone(),
+                false,
+            );
+            assert_eq!(events, vec![terminal.clone()]);
+            assert!(!connecting_overtakes_terminal(&events));
+
+            // Defective policy: Cancel emits a Connecting snapshot after the
+            // terminal event and strands event consumers.
+            let raced = connection_status_events_after_connect_cancel_race(
+                terminal,
+                connecting.clone(),
+                true,
+            );
+            assert!(connecting_overtakes_terminal(&raced));
+        }
     }
 }

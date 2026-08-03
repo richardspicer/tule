@@ -278,7 +278,13 @@ function App() {
           !window.confirm(closeWithUnsavedInstructionsMessage)
         ) {
           event.preventDefault();
+          return;
         }
+
+        // Prevent destroying only the main window while a hidden Settings
+        // singleton would keep the process alive.
+        event.preventDefault();
+        void exitApplication();
       })
       .then((removeListener) => {
         if (disposed) {

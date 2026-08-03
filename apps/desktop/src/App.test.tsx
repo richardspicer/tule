@@ -177,6 +177,58 @@ describe("App", () => {
     ).toBeInTheDocument();
   });
 
+  it("exits the whole application when an accepted main-window close occurs", async () => {
+    const user = userEvent.setup();
+    let closeHandler: NativeCloseRequestedHandler | undefined;
+    onCloseRequestedMock.mockImplementation((handler) => {
+      closeHandler = handler;
+      return Promise.resolve(unlistenCloseRequestedMock);
+    });
+
+    render(<App />);
+    await user.click(await screen.findByRole("button", { name: "Settings" }));
+    expect(openSettingsWindowMock).toHaveBeenCalled();
+
+    const preventDefault = vi.fn();
+    closeHandler?.({ preventDefault });
+    expect(preventDefault).toHaveBeenCalled();
+    expect(exitApplicationMock).toHaveBeenCalled();
+  });
+
+  it("keeps the main window open when unsaved instructions decline the close guard", async () => {
+    const user = userEvent.setup();
+    const project: Project = {
+      id: "11111111-1111-7111-8111-111111111111",
+      displayName: "Atlas",
+      instructions: "Saved guidance",
+    };
+    listProjectsMock.mockResolvedValue([project]);
+    openProjectMock.mockResolvedValue(project);
+    vi.spyOn(window, "confirm").mockReturnValue(false);
+    let closeHandler: NativeCloseRequestedHandler | undefined;
+    onCloseRequestedMock.mockImplementation((handler) => {
+      closeHandler = handler;
+      return Promise.resolve(unlistenCloseRequestedMock);
+    });
+
+    render(<App />);
+    await user.click(await screen.findByRole("button", { name: "Manage projects" }));
+    const atlasButtons = screen.getAllByRole("button", { name: /Atlas/ });
+    const atlasButton = atlasButtons[atlasButtons.length - 1];
+    if (atlasButton === undefined) {
+      throw new Error("expected an Atlas project button");
+    }
+    await user.click(atlasButton);
+    const editor = await screen.findByRole("textbox", { name: "Project instructions" });
+    await user.clear(editor);
+    await user.type(editor, "Changed guidance");
+
+    const preventDefault = vi.fn();
+    closeHandler?.({ preventDefault });
+    expect(preventDefault).toHaveBeenCalled();
+    expect(exitApplicationMock).not.toHaveBeenCalled();
+  });
+
   it("routes Settings gear and menu commands through the shared open path", async () => {
     const user = userEvent.setup();
     render(<App />);

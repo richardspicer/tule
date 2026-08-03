@@ -689,6 +689,17 @@ textarea:focus-visible {
   pointer-events: none;
 }
 
+.tooltip-anchor[data-tooltip-align="start"] .tooltip {
+  left: 0;
+  transform: none;
+}
+
+.tooltip-anchor[data-tooltip-align="end"] .tooltip {
+  left: auto;
+  right: 0;
+  transform: none;
+}
+
 .settings-window {
   display: grid;
   grid-template-columns: 180px minmax(0, 1fr);

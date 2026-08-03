@@ -1,7 +1,7 @@
 import { useState } from "react";
 import type { AppCommandId } from "../platform/commands";
 import { ApplicationMenu } from "./ApplicationMenu";
-import { MenuIcon, SettingsIcon } from "./icons";
+import { SettingsIcon } from "./icons";
 import { Tooltip } from "./Tooltip";
 
 interface ApplicationChromeProps {
@@ -13,27 +13,9 @@ export function ApplicationChrome({ onCommand }: ApplicationChromeProps) {
 
   return (
     <header className="application-chrome">
-      <ApplicationMenu
-        open={menuOpen}
-        onOpenChange={setMenuOpen}
-        onCommand={onCommand}
-        trigger={
-          <Tooltip label="Application menu">
-            <button
-              className="icon-button chrome-icon"
-              type="button"
-              aria-label="Application menu"
-              aria-haspopup="menu"
-              aria-expanded={menuOpen}
-              onClick={() => setMenuOpen((open) => !open)}
-            >
-              <MenuIcon />
-            </button>
-          </Tooltip>
-        }
-      />
+      <ApplicationMenu open={menuOpen} onOpenChange={setMenuOpen} onCommand={onCommand} />
 
-      <Tooltip label="Settings">
+      <Tooltip label="Settings" align="end">
         <button
           className="icon-button chrome-icon"
           type="button"

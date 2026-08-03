@@ -44,6 +44,13 @@ export function isEditableTarget(element: Element | null): boolean {
   return false;
 }
 
+function resolveEditTarget(preferred: Element | null | undefined): Element | null {
+  if (preferred !== undefined && preferred !== null && document.contains(preferred)) {
+    return preferred;
+  }
+  return document.activeElement;
+}
+
 function hasSelectableText(element: Element | null): boolean {
   if (isTextEntry(element)) {
     return element.value.length > 0;
@@ -62,8 +69,10 @@ export interface EditCommandAvailability {
   selectAll: boolean;
 }
 
-export function queryEditCommandAvailability(): EditCommandAvailability {
-  const active = document.activeElement;
+export function queryEditCommandAvailability(
+  preferredTarget?: Element | null,
+): EditCommandAvailability {
+  const active = resolveEditTarget(preferredTarget);
   const editable = isEditableTarget(active);
 
   if (!editable) {
@@ -97,13 +106,22 @@ function queryCommandEnabled(command: string): boolean {
   }
 }
 
-export function runEditCommand(command: AppCommandId): boolean {
+function focusEditTarget(target: Element | null): void {
+  if (target instanceof HTMLElement && document.activeElement !== target) {
+    target.focus();
+  }
+}
+
+export function runEditCommand(command: AppCommandId, preferredTarget?: Element | null): boolean {
   if (!editCommands.has(command)) {
     return false;
   }
 
-  const availability = queryEditCommandAvailability();
-  const active = document.activeElement;
+  const target = resolveEditTarget(preferredTarget);
+  focusEditTarget(target);
+
+  const availability = queryEditCommandAvailability(target);
+  const active = resolveEditTarget(preferredTarget);
 
   switch (command) {
     case "edit-undo":
@@ -136,6 +154,10 @@ function execCommand(command: string): boolean {
   } catch {
     return false;
   }
+}
+
+export function isEditCommand(command: AppCommandId): boolean {
+  return editCommands.has(command);
 }
 
 export function createCommandDispatcher(handler: AppCommandHandler): AppCommandHandler {

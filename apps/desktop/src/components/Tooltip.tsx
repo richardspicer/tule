@@ -1,17 +1,21 @@
 import { useId, useState, type ReactNode } from "react";
 
+export type TooltipAlign = "start" | "center" | "end";
+
 interface TooltipProps {
   label: string;
+  align?: TooltipAlign;
   children: ReactNode;
 }
 
-export function Tooltip({ label, children }: TooltipProps) {
+export function Tooltip({ label, align = "center", children }: TooltipProps) {
   const tooltipId = useId();
   const [visible, setVisible] = useState(false);
 
   return (
     <span
       className="tooltip-anchor"
+      data-tooltip-align={align}
       onMouseEnter={() => setVisible(true)}
       onMouseLeave={() => setVisible(false)}
       onFocusCapture={() => setVisible(true)}

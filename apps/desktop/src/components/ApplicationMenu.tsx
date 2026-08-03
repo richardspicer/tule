@@ -1,15 +1,19 @@
 import { useEffect, useId, useRef, useState } from "react";
 import {
+  isEditableTarget,
+  isEditCommand,
   queryEditCommandAvailability,
+  runEditCommand,
   type AppCommandId,
   type EditCommandAvailability,
 } from "../platform/commands";
+import { MenuIcon } from "./icons";
+import { Tooltip } from "./Tooltip";
 
 interface ApplicationMenuProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onCommand: (command: AppCommandId) => void;
-  trigger: React.ReactNode;
 }
 
 interface MenuItem {
@@ -69,13 +73,17 @@ function flattenItems(availability: EditCommandAvailability) {
   );
 }
 
-export function ApplicationMenu({ open, onOpenChange, onCommand, trigger }: ApplicationMenuProps) {
+export function ApplicationMenu({ open, onOpenChange, onCommand }: ApplicationMenuProps) {
   const menuId = useId();
   const rootRef = useRef<HTMLDivElement>(null);
+  const menuPanelRef = useRef<HTMLDivElement>(null);
   const onOpenChangeRef = useRef(onOpenChange);
   const onCommandRef = useRef(onCommand);
+  const lastEditableRef = useRef<Element | null>(null);
+  const editTargetRef = useRef<Element | null>(null);
+  const menuOpenRef = useRef(open);
+  const [availability, setAvailability] = useState(closedAvailability);
   const [activeIndex, setActiveIndex] = useState(0);
-  const availability = open ? queryEditCommandAvailability() : closedAvailability;
   const flatItems = flattenItems(availability);
 
   useEffect(() => {
@@ -84,22 +92,61 @@ export function ApplicationMenu({ open, onOpenChange, onCommand, trigger }: Appl
   }, [onOpenChange, onCommand]);
 
   useEffect(() => {
+    menuOpenRef.current = open;
+  }, [open]);
+
+  useEffect(() => {
+    function trackEditableFocus(event: FocusEvent) {
+      if (menuOpenRef.current) {
+        return;
+      }
+      const target = event.target;
+      if (target instanceof Element && isEditableTarget(target)) {
+        lastEditableRef.current = target;
+      }
+    }
+
+    document.addEventListener("focusin", trackEditableFocus);
+    return () => document.removeEventListener("focusin", trackEditableFocus);
+  }, []);
+
+  useEffect(() => {
     if (!open) {
       return;
     }
 
+    function closeMenu() {
+      editTargetRef.current = null;
+      setAvailability(closedAvailability);
+      onOpenChangeRef.current(false);
+    }
+
+    function dispatchMenuCommand(command: AppCommandId) {
+      if (isEditCommand(command)) {
+        runEditCommand(command, editTargetRef.current);
+        closeMenu();
+        return;
+      }
+      onCommandRef.current(command);
+      closeMenu();
+    }
+
     function onPointerDown(event: MouseEvent) {
       if (!rootRef.current?.contains(event.target as Node)) {
-        onOpenChangeRef.current(false);
+        closeMenu();
       }
     }
 
     function onKeyDown(event: KeyboardEvent) {
-      const items = flattenItems(queryEditCommandAvailability());
+      const items = flattenItems(queryEditCommandAvailability(editTargetRef.current));
 
       if (event.key === "Escape") {
         event.preventDefault();
-        onOpenChangeRef.current(false);
+        const restore = editTargetRef.current;
+        closeMenu();
+        if (restore instanceof HTMLElement) {
+          restore.focus();
+        }
         return;
       }
 
@@ -120,8 +167,7 @@ export function ApplicationMenu({ open, onOpenChange, onCommand, trigger }: Appl
         setActiveIndex((current) => {
           const item = items[current];
           if (item !== undefined && !item.disabled) {
-            onCommandRef.current(item.id);
-            onOpenChangeRef.current(false);
+            dispatchMenuCommand(item.id);
           }
           return current;
         });
@@ -136,11 +182,57 @@ export function ApplicationMenu({ open, onOpenChange, onCommand, trigger }: Appl
     };
   }, [open]);
 
+  useEffect(() => {
+    if (!open) {
+      return;
+    }
+    const items = menuPanelRef.current?.querySelectorAll<HTMLElement>('[role="menuitem"]');
+    items?.[activeIndex]?.focus();
+  }, [activeIndex, open]);
+
   return (
     <div className="application-menu" ref={rootRef}>
-      {trigger}
+      <Tooltip label="Application menu" align="start">
+        <button
+          className="icon-button chrome-icon"
+          type="button"
+          aria-label="Application menu"
+          aria-haspopup="menu"
+          aria-expanded={open}
+          aria-controls={open ? menuId : undefined}
+          onClick={() => {
+            if (open) {
+              editTargetRef.current = null;
+              setAvailability(closedAvailability);
+              onOpenChange(false);
+              return;
+            }
+
+            const active = document.activeElement;
+            const preserved =
+              active instanceof Element &&
+              isEditableTarget(active) &&
+              !rootRef.current?.contains(active)
+                ? active
+                : lastEditableRef.current;
+            const target = preserved !== null && document.contains(preserved) ? preserved : null;
+            editTargetRef.current = target;
+            setAvailability(queryEditCommandAvailability(target));
+            setActiveIndex(0);
+            onOpenChange(true);
+          }}
+        >
+          <MenuIcon />
+        </button>
+      </Tooltip>
       {open ? (
-        <div className="application-menu-panel" role="menu" id={menuId} aria-label="Application">
+        <div
+          ref={menuPanelRef}
+          className="application-menu-panel"
+          role="menu"
+          id={menuId}
+          aria-label="Application"
+        >
           {menuGroups.map((group) => (
             <div
               key={group.label}
@@ -161,11 +253,25 @@ export function ApplicationMenu({ open, onOpenChange, onCommand, trigger }: Appl
                     disabled={item.disabled}
                     tabIndex={flatIndex === activeIndex ? 0 : -1}
                     onMouseEnter={() => setActiveIndex(flatIndex)}
+                    onMouseDown={(event) => {
+                      // Keep the preserved editable field focused for truthful Edit actions.
+                      event.preventDefault();
+                    }}
                     onClick={() => {
-                      if (!item.disabled) {
-                        onCommand(item.id);
-                        onOpenChange(false);
+                      if (item.disabled) {
+                        return;
                       }
+                      if (isEditCommand(item.id)) {
+                        runEditCommand(item.id, editTargetRef.current);
+                        editTargetRef.current = null;
+                        setAvailability(closedAvailability);
+                        onOpenChange(false);
+                        return;
+                      }
+                      onCommand(item.id);
+                      editTargetRef.current = null;
+                      setAvailability(closedAvailability);
+                      onOpenChange(false);
                     }}
                   >
                     <span>{item.label}</span>

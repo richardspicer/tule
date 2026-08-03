@@ -1,6 +1,37 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { AgentWorkspace, COMPOSER_MAX_HEIGHT_PX, COMPOSER_MIN_HEIGHT_PX } from "./AgentWorkspace";
+import type { AgentTurn } from "../platform/agents";
+
+function stubTranscriptMetrics(
+  transcript: HTMLElement,
+  values: { scrollHeight: number; clientHeight: number; scrollTop: number },
+) {
+  Object.defineProperty(transcript, "scrollHeight", {
+    configurable: true,
+    get: () => values.scrollHeight,
+  });
+  Object.defineProperty(transcript, "clientHeight", {
+    configurable: true,
+    get: () => values.clientHeight,
+  });
+  Object.defineProperty(transcript, "scrollTop", {
+    configurable: true,
+    get: () => values.scrollTop,
+    set: (next: number) => {
+      values.scrollTop = next;
+    },
+  });
+}
+
+const baseTurn: AgentTurn = {
+  id: "t1",
+  ordinal: 1,
+  userText: "Hi",
+  agentText: "Hello",
+  state: "completed",
+  errorCode: null,
+};
 
 describe("AgentWorkspace", () => {
   it("blocks composer when disconnected and deep-links Connections settings", () => {
@@ -42,16 +73,7 @@ describe("AgentWorkspace", () => {
         projectId={null}
         projects={[]}
         modelLabel="GPT-5.5"
-        turns={[
-          {
-            id: "t1",
-            ordinal: 1,
-            userText: "Hi",
-            agentText: "Hello",
-            state: "completed",
-            errorCode: null,
-          },
-        ]}
+        turns={[baseTurn]}
         draft=""
         connected
         sending={false}
@@ -79,16 +101,7 @@ describe("AgentWorkspace", () => {
         projectId={null}
         projects={[{ id: "p1", displayName: "Research" }]}
         modelLabel="GPT-5.5"
-        turns={[
-          {
-            id: "t1",
-            ordinal: 1,
-            userText: "Hi",
-            agentText: "Hel",
-            state: "streaming",
-            errorCode: null,
-          },
-        ]}
+        turns={[{ ...baseTurn, state: "streaming", agentText: "Hel" }]}
         draft="Next"
         connected
         sending={false}
@@ -116,16 +129,7 @@ describe("AgentWorkspace", () => {
         projectId="p1"
         projects={[{ id: "p1", displayName: "Research" }]}
         modelLabel="GPT-5.5"
-        turns={[
-          {
-            id: "t1",
-            ordinal: 1,
-            userText: "Hi",
-            agentText: "Hello",
-            state: "streaming",
-            errorCode: null,
-          },
-        ]}
+        turns={[{ ...baseTurn, state: "streaming", agentText: "Hello" }]}
         draft=""
         connected
         sending
@@ -179,23 +183,105 @@ describe("AgentWorkspace", () => {
     );
   });
 
-  it("shows Jump to latest after deliberate upward scroll and keeps the reading position", () => {
-    render(
+  it("follows the bottom while streaming, pauses after upward scroll, jumps on request, and preserves position on completion", () => {
+    const metrics = { scrollHeight: 1000, clientHeight: 200, scrollTop: 800 };
+    const { rerender } = render(
       <AgentWorkspace
         title="Hello"
         projectId={null}
         projects={[]}
         modelLabel="GPT-5.5"
-        turns={[
-          {
-            id: "t1",
-            ordinal: 1,
-            userText: "Hi",
-            agentText: "Hello",
-            state: "completed",
-            errorCode: null,
-          },
-        ]}
+        turns={[{ ...baseTurn, state: "streaming", agentText: "Hello" }]}
+        draft=""
+        connected
+        sending
+        sendBlocked={false}
+        cancelRequested={false}
+        activeTurnId="t1"
+        errorMessage={null}
+        onDraftChange={vi.fn()}
+        onSend={vi.fn()}
+        onCancel={vi.fn()}
+        onProjectChange={vi.fn()}
+        onOpenConnectionsSettings={vi.fn()}
+      />,
+    );
+
+    const transcript = document.querySelector(".transcript");
+    expect(transcript).not.toBeNull();
+    stubTranscriptMetrics(transcript as HTMLElement, metrics);
+
+    // Bottom-follow while streaming continues.
+    metrics.scrollHeight = 1200;
+    rerender(
+      <AgentWorkspace
+        title="Hello"
+        projectId={null}
+        projects={[]}
+        modelLabel="GPT-5.5"
+        turns={[{ ...baseTurn, state: "streaming", agentText: "Hello there" }]}
+        draft=""
+        connected
+        sending
+        sendBlocked={false}
+        cancelRequested={false}
+        activeTurnId="t1"
+        errorMessage={null}
+        onDraftChange={vi.fn()}
+        onSend={vi.fn()}
+        onCancel={vi.fn()}
+        onProjectChange={vi.fn()}
+        onOpenConnectionsSettings={vi.fn()}
+      />,
+    );
+    expect(metrics.scrollTop).toBe(1200);
+
+    // Deliberate upward scroll pauses follow and exposes Jump to latest.
+    metrics.scrollTop = 100;
+    fireEvent.scroll(transcript!);
+    expect(screen.getByRole("button", { name: "Jump to latest" })).toBeInTheDocument();
+
+    metrics.scrollHeight = 1400;
+    rerender(
+      <AgentWorkspace
+        title="Hello"
+        projectId={null}
+        projects={[]}
+        modelLabel="GPT-5.5"
+        turns={[{ ...baseTurn, state: "streaming", agentText: "Hello there friend" }]}
+        draft=""
+        connected
+        sending
+        sendBlocked={false}
+        cancelRequested={false}
+        activeTurnId="t1"
+        errorMessage={null}
+        onDraftChange={vi.fn()}
+        onSend={vi.fn()}
+        onCancel={vi.fn()}
+        onProjectChange={vi.fn()}
+        onOpenConnectionsSettings={vi.fn()}
+      />,
+    );
+    expect(metrics.scrollTop).toBe(100);
+
+    // Jump to latest restores follow.
+    fireEvent.click(screen.getByRole("button", { name: "Jump to latest" }));
+    expect(metrics.scrollTop).toBe(1400);
+    expect(screen.queryByRole("button", { name: "Jump to latest" })).not.toBeInTheDocument();
+
+    // After another upward scroll, completion must not force the reading position.
+    metrics.scrollTop = 220;
+    fireEvent.scroll(transcript!);
+    expect(screen.getByRole("button", { name: "Jump to latest" })).toBeInTheDocument();
+
+    rerender(
+      <AgentWorkspace
+        title="Hello"
+        projectId={null}
+        projects={[]}
+        modelLabel="GPT-5.5"
+        turns={[{ ...baseTurn, state: "completed", agentText: "Hello there friend" }]}
         draft=""
         connected
         sending={false}
@@ -210,17 +296,7 @@ describe("AgentWorkspace", () => {
         onOpenConnectionsSettings={vi.fn()}
       />,
     );
-
-    const transcript = document.querySelector(".transcript");
-    expect(transcript).not.toBeNull();
-    Object.defineProperty(transcript, "scrollHeight", { configurable: true, value: 1000 });
-    Object.defineProperty(transcript, "clientHeight", { configurable: true, value: 200 });
-    Object.defineProperty(transcript, "scrollTop", {
-      configurable: true,
-      writable: true,
-      value: 0,
-    });
-    fireEvent.scroll(transcript!);
+    expect(metrics.scrollTop).toBe(220);
     expect(screen.getByRole("button", { name: "Jump to latest" })).toBeInTheDocument();
   });
 

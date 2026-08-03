@@ -12,7 +12,8 @@
   "app": {
     "windows": [
       {
-        "title": "TULE",
+        "label": "main",
+        "title": "",
         "width": 1120,
         "height": 760,
         "minWidth": 760,

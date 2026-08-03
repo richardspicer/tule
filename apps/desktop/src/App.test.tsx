@@ -4,7 +4,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
 import type { AgentSession, AgentSessionDetail, AgentStreamEvent } from "./platform/agents";
 import { ProjectStorageError, type Project } from "./platform/projects";
-import { ProviderError } from "./platform/provider";
 
 interface NativeCloseRequestedEvent {
   preventDefault: () => void;
@@ -14,42 +13,49 @@ type NativeCloseRequestedHandler = (event: NativeCloseRequestedEvent) => void;
 
 const {
   cancelAgentTurnMock,
-  cancelChatgptConnectMock,
-  connectChatgptMock,
   createProjectMock,
-  disconnectChatgptMock,
+  exitApplicationMock,
   getApplicationInfoMock,
   getAgentSessionMock,
   getConnectionStatusMock,
   listAgentSessionsMock,
   listProjectsMock,
+  listenAppearanceChangedMock,
+  listenConnectionStatusChangedMock,
+  loadThemePreferenceMock,
   onCloseRequestedMock,
   openProjectMock,
+  openSettingsWindowMock,
   sendAgentMessageMock,
   setAgentSessionProjectMock,
+  syncConnectionStatusMock,
   unlistenCloseRequestedMock,
   updateProjectInstructionsMock,
 } = vi.hoisted(() => ({
   cancelAgentTurnMock: vi.fn(),
-  cancelChatgptConnectMock: vi.fn(),
-  connectChatgptMock: vi.fn(),
   createProjectMock: vi.fn(),
-  disconnectChatgptMock: vi.fn(),
+  exitApplicationMock: vi.fn(),
   getApplicationInfoMock: vi.fn(),
   getAgentSessionMock: vi.fn(),
   getConnectionStatusMock: vi.fn(),
   listAgentSessionsMock: vi.fn(),
   listProjectsMock: vi.fn(),
+  listenAppearanceChangedMock: vi.fn(),
+  listenConnectionStatusChangedMock: vi.fn(),
+  loadThemePreferenceMock: vi.fn(),
   onCloseRequestedMock: vi.fn<(handler: NativeCloseRequestedHandler) => Promise<() => void>>(),
   openProjectMock: vi.fn(),
+  openSettingsWindowMock: vi.fn(),
   sendAgentMessageMock: vi.fn(),
   setAgentSessionProjectMock: vi.fn(),
+  syncConnectionStatusMock: vi.fn(),
   unlistenCloseRequestedMock: vi.fn(),
   updateProjectInstructionsMock: vi.fn(),
 }));
 
 vi.mock("@tauri-apps/api/window", () => ({
   getCurrentWindow: () => ({
+    label: "main",
     onCloseRequested: onCloseRequestedMock,
   }),
 }));
@@ -58,13 +64,28 @@ vi.mock("./platform/application", () => ({
   getApplicationInfo: getApplicationInfoMock,
 }));
 
+vi.mock("./platform/settings", () => ({
+  exitApplication: exitApplicationMock,
+  listenConnectionStatusChanged: listenConnectionStatusChangedMock,
+  listenSettingsNavigate: vi.fn(() => Promise.resolve(vi.fn())),
+  openSettingsWindow: openSettingsWindowMock,
+  refreshConnectionStatus: getConnectionStatusMock,
+  syncConnectionStatus: syncConnectionStatusMock,
+}));
+
+vi.mock("./theme", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./theme")>();
+  return {
+    ...actual,
+    loadThemePreference: loadThemePreferenceMock,
+    listenAppearanceChanged: listenAppearanceChangedMock,
+  };
+});
+
 vi.mock("./platform/provider", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./platform/provider")>();
   return {
     ...actual,
-    cancelChatgptConnect: cancelChatgptConnectMock,
-    connectChatgpt: connectChatgptMock,
-    disconnectChatgpt: disconnectChatgptMock,
     getConnectionStatus: getConnectionStatusMock,
   };
 });
@@ -101,21 +122,23 @@ describe("App", () => {
   beforeEach(() => {
     createProjectMock.mockReset();
     cancelAgentTurnMock.mockReset();
-    cancelChatgptConnectMock.mockReset();
+    exitApplicationMock.mockReset();
     getApplicationInfoMock.mockReset();
     getAgentSessionMock.mockReset();
     listProjectsMock.mockReset();
     openProjectMock.mockReset();
+    openSettingsWindowMock.mockReset();
     sendAgentMessageMock.mockReset();
     setAgentSessionProjectMock.mockReset();
+    syncConnectionStatusMock.mockReset();
     updateProjectInstructionsMock.mockReset();
     listAgentSessionsMock.mockReset();
     getConnectionStatusMock.mockReset();
-    connectChatgptMock.mockReset();
-    disconnectChatgptMock.mockReset();
+    loadThemePreferenceMock.mockReset();
+    listenAppearanceChangedMock.mockReset();
+    listenConnectionStatusChangedMock.mockReset();
     onCloseRequestedMock.mockReset();
     unlistenCloseRequestedMock.mockReset();
-    window.localStorage.clear();
 
     getApplicationInfoMock.mockResolvedValue({ name: "TULE", version: "0.1.0" });
     getConnectionStatusMock.mockResolvedValue({
@@ -123,40 +146,62 @@ describe("App", () => {
       providerId: "openai-chatgpt-compat",
       model: "gpt-5.5",
     });
+    loadThemePreferenceMock.mockResolvedValue("system");
+    listenAppearanceChangedMock.mockResolvedValue(vi.fn());
+    listenConnectionStatusChangedMock.mockResolvedValue(vi.fn());
+    openSettingsWindowMock.mockResolvedValue(undefined);
+    exitApplicationMock.mockResolvedValue(undefined);
+    syncConnectionStatusMock.mockResolvedValue({
+      state: "reconnect_required",
+      providerId: "openai-chatgpt-compat",
+      model: "gpt-5.5",
+    });
     listProjectsMock.mockResolvedValue([]);
     listAgentSessionsMock.mockResolvedValue([]);
     cancelAgentTurnMock.mockResolvedValue(undefined);
-    cancelChatgptConnectMock.mockResolvedValue(undefined);
     onCloseRequestedMock.mockResolvedValue(unlistenCloseRequestedMock);
   });
 
-  it("opens to the Agent shell with wordmark, sidebar hierarchy, and Settings gear", async () => {
+  it("opens to the Agent shell with empty-session wordmark, sidebar hierarchy, and global chrome", async () => {
     render(<App />);
 
     expect(await screen.findByRole("img", { name: "TULE" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "New session" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Projects" })).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "Projectless recents" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "No project" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Manage projects" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Application menu" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Settings" })).toBeInTheDocument();
     expect(
       screen.getByText("Connect ChatGPT in Settings to message the Agent."),
     ).toBeInTheDocument();
   });
 
-  it("opens Settings from the gear with experimental disclosure", async () => {
+  it("routes Settings gear and menu commands through the shared open path", async () => {
     const user = userEvent.setup();
     render(<App />);
 
     await user.click(await screen.findByRole("button", { name: "Settings" }));
-    expect(screen.getByRole("complementary", { name: "Workspace" })).toHaveAttribute("inert");
-    expect(document.querySelector("main")).toHaveAttribute("inert");
-    expect(
-      screen.getByText(
-        "Uses a compatibility sign-in path that is not an official TULE integration and may stop working.",
-      ),
-    ).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Connect in browser" })).toBeInTheDocument();
+    expect(openSettingsWindowMock).toHaveBeenCalledWith();
+
+    await user.click(screen.getByRole("button", { name: "Application menu" }));
+    await user.click(screen.getByRole("menuitem", { name: /Open Settings/i }));
+    expect(openSettingsWindowMock).toHaveBeenCalledTimes(2);
+
+    await user.click(screen.getByRole("button", { name: "Open Settings" }));
+    expect(openSettingsWindowMock).toHaveBeenCalledWith("connections");
+  });
+
+  it("exposes only implemented application menu groups", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "Application menu" }));
+    expect(screen.getByRole("group", { name: "File" })).toBeInTheDocument();
+    expect(screen.getByRole("group", { name: "Edit" })).toBeInTheDocument();
+    expect(screen.getByRole("group", { name: "Settings" })).toBeInTheDocument();
+    expect(screen.queryByRole("group", { name: "View" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("group", { name: "Help" })).not.toBeInTheDocument();
   });
 
   it("switches to Project manager and returns with Use with Agents", async () => {
@@ -183,17 +228,18 @@ describe("App", () => {
     expect(screen.getAllByText("Atlas").length).toBeGreaterThan(0);
   });
 
-  it("preserves project create validation", async () => {
+  it("opens New project creation in the detail region", async () => {
     const user = userEvent.setup();
     createProjectMock.mockRejectedValue(new ProjectStorageError("invalid_project_name"));
 
     render(<App />);
     await user.click(await screen.findByRole("button", { name: "Manage projects" }));
+    await user.click(screen.getByRole("button", { name: "New project" }));
     await user.click(screen.getByRole("button", { name: "Create project" }));
     expect(screen.getByText("Enter a project name.")).toBeInTheDocument();
   });
 
-  it("resumes the most recent persisted session", async () => {
+  it("resumes the most recent persisted session without empty-session wordmark", async () => {
     const session: AgentSession = {
       id: "22222222-2222-7222-8222-222222222222",
       title: "Existing session",
@@ -220,6 +266,7 @@ describe("App", () => {
     expect(await screen.findByRole("heading", { name: "Existing session" })).toBeInTheDocument();
     expect(screen.getByText("Earlier question")).toBeInTheDocument();
     expect(screen.getByText("Persisted answer")).toBeInTheDocument();
+    expect(screen.queryByRole("img", { name: "TULE" })).not.toBeInTheDocument();
   });
 
   it("does not let a stale startup detail overwrite New session", async () => {
@@ -432,11 +479,8 @@ describe("App", () => {
     await user.type(editor, "Changed guidance");
     expect(await screen.findByText("Unsaved changes")).toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: "Back to Agents" }));
-    expect(confirm).toHaveBeenCalledWith("Discard unsaved project instructions and continue?");
-    expect(screen.getByDisplayValue("Changed guidance")).toBeInTheDocument();
-
     await user.click(screen.getByRole("button", { name: "New session" }));
+    expect(confirm).toHaveBeenCalledWith("Discard unsaved project instructions and continue?");
     expect(screen.getByDisplayValue("Changed guidance")).toBeInTheDocument();
 
     confirm.mockReturnValue(true);
@@ -476,57 +520,13 @@ describe("App", () => {
 
     await waitFor(() => {
       expect(screen.getByRole("button", { name: "New session" })).toBeDisabled();
-      expect(screen.getByRole("button", { name: "Back to Agents" })).toBeDisabled();
+      expect(screen.getByRole("button", { name: "Manage projects" })).toBeDisabled();
       expect(screen.getByRole("button", { name: "Use with Agents" })).toBeDisabled();
     });
 
     resolveSave?.({ ...project, instructions: "Changed guidance" });
     await waitFor(() => expect(screen.getByText("Saved")).toBeInTheDocument());
     expect(screen.getByRole("button", { name: "New session" })).toBeEnabled();
-  });
-
-  it("cancels browser connection explicitly and reports the safe result", async () => {
-    const user = userEvent.setup();
-    let rejectConnect: ((error: ProviderError) => void) | undefined;
-    connectChatgptMock.mockReturnValue(
-      new Promise((_resolve, reject) => {
-        rejectConnect = reject;
-      }),
-    );
-    cancelChatgptConnectMock.mockImplementation(() => {
-      rejectConnect?.(new ProviderError("cancelled"));
-      return Promise.resolve();
-    });
-
-    render(<App />);
-    await user.click(await screen.findByRole("button", { name: "Settings" }));
-    await user.click(screen.getByRole("button", { name: "Connect in browser" }));
-    await user.click(await screen.findByRole("button", { name: "Cancel connection" }));
-
-    expect(cancelChatgptConnectMock).toHaveBeenCalledOnce();
-    expect(await screen.findByText("Browser connection cancelled.")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Connect in browser" })).toBeInTheDocument();
-  });
-
-  it("shows confirmed local credential removal after Disconnect", async () => {
-    const user = userEvent.setup();
-    getConnectionStatusMock.mockResolvedValue({
-      state: "connected",
-      providerId: "openai-chatgpt-compat",
-      model: "gpt-5.5",
-    });
-    disconnectChatgptMock.mockResolvedValue({
-      state: "disconnected",
-      providerId: "openai-chatgpt-compat",
-      model: "gpt-5.5",
-    });
-
-    render(<App />);
-    await user.click(await screen.findByRole("button", { name: "Settings" }));
-    await user.click(await screen.findByRole("button", { name: "Disconnect" }));
-
-    expect(disconnectChatgptMock).toHaveBeenCalledOnce();
-    expect(await screen.findByText("Removed from this device")).toBeInTheDocument();
   });
 
   it("moves the interface to Reconnect required after an authentication terminal", async () => {
@@ -558,10 +558,10 @@ describe("App", () => {
     const composer = await screen.findByRole("textbox", { name: "Message the Agent" });
     await user.type(composer, "Hello");
     await user.click(screen.getByRole("button", { name: "Send" }));
-    await user.click(screen.getByRole("button", { name: "Settings" }));
 
-    expect(await screen.findByText("Reconnect required")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Connect in browser" })).toBeInTheDocument();
+    await waitFor(() => expect(syncConnectionStatusMock).toHaveBeenCalled());
+    await user.click(screen.getByRole("button", { name: "Open Settings" }));
+    expect(openSettingsWindowMock).toHaveBeenCalledWith("connections");
   });
 
   it("queues an immediate cancel until the native Started event supplies the turn ID", async () => {
@@ -615,17 +615,9 @@ describe("App", () => {
     expect(screen.getByRole("button", { name: "New session" })).toBeEnabled();
   });
 
-  it("loads a saved appearance and clears it when System is selected", async () => {
-    const user = userEvent.setup();
-    window.localStorage.setItem("tule-theme", "dark");
-
+  it("loads native appearance preference on startup", async () => {
+    loadThemePreferenceMock.mockResolvedValue("dark");
     render(<App />);
-    await user.click(await screen.findByRole("button", { name: "Settings" }));
-    const appearance = screen.getByRole("combobox", { name: "Appearance" });
-    expect(appearance).toHaveValue("dark");
-    await user.selectOptions(appearance, "system");
-
-    expect(window.localStorage.getItem("tule-theme")).toBeNull();
-    expect(document.documentElement.dataset.theme).toBeUndefined();
+    await waitFor(() => expect(document.documentElement.dataset.theme).toBe("dark"));
   });
 });

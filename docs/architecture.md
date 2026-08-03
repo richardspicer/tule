@@ -80,6 +80,35 @@ it receives the updated bounded project record and no storage details. This
 does not add a frontend capability, rich-text interpretation, instruction
 history, or a generic project-settings surface.
 
+## Multi-Window Shell and Desktop Preferences
+
+The desktop host owns a main workspace window and one singleton modeless
+Settings window labeled `settings` with the native title **TULE — Settings**.
+The main window keeps the native title bar with blank visible title text; the
+application icon and accessibility identity remain. Both surfaces boot from the
+same frontend package and branch on the native window label.
+
+Settings opens or focuses through the typed `open_settings_window` command.
+Closing Settings hides the existing window instead of exiting the application.
+Optional category payloads (`connections` or `appearance`) travel on the
+`settings-navigate` event so contextual deep links share one Settings
+implementation. Appearance updates emit `appearance-changed`; authoritative
+non-secret connection status emits `connection-status-changed`. Event payloads
+contain only typed public values—never credentials, authorization URLs or codes,
+tokens, account identifiers, raw provider responses, SQLite paths, or internal
+errors.
+
+Appearance preference persistence lives in the desktop SQLite owner behind an
+explicit `appearance_preference` table and the typed
+`get_appearance_preference` / `set_appearance_preference` commands. Invalid or
+missing stored values resolve to `system`. Storage failure must not prevent the
+shell from opening and must not expose storage details across IPC. The webview
+applies theme immediately but does not own durable preference storage.
+
+Tauri capabilities grant event listen/unlisten and window destroy only to the
+named `main` and `settings` windows. The host does not expose generic window
+creation, filesystem, shell, SQL, or credential access to either webview.
+
 ## Trust Boundary
 
 The webview is not a privileged execution environment. Native commands must

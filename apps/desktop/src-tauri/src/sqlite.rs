@@ -17,12 +17,15 @@ use tule_core::{
     ProjectRepository, ProviderProfile,
 };
 
+use crate::preferences::AppearancePreference;
+
 pub(crate) const DATABASE_FILENAME: &str = "tule.sqlite3";
 
 const MIGRATION_SET: &[M<'static>] = &[
     M::up(include_str!("../migrations/0001_projects.sql")),
     M::up(include_str!("../migrations/0002_project_instructions.sql")),
     M::up(include_str!("../migrations/0003_agent_conversations.sql")),
+    M::up(include_str!("../migrations/0004_desktop_preferences.sql")),
 ];
 const MIGRATIONS: Migrations<'static> = Migrations::from_slice(MIGRATION_SET);
 
@@ -65,6 +68,38 @@ impl SqliteStore {
         let profile =
             ProviderProfile::built_in(PROVIDER_PROFILE_ID, PROVIDER_PROFILE_ID, MODEL_ID, now);
         <Self as tule_core::AgentRepository>::ensure_provider_profile(self, &profile)
+    }
+
+    pub(crate) fn get_appearance_preference(
+        &self,
+    ) -> Result<AppearancePreference, SqliteStoreError> {
+        let connection = self.connection()?;
+        let value = connection
+            .query_row(
+                "SELECT value FROM appearance_preference WHERE id = 1",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(SqliteStoreError::Database)?;
+
+        Ok(value.map_or(AppearancePreference::System, |stored| {
+            AppearancePreference::parse(&stored)
+        }))
+    }
+
+    pub(crate) fn set_appearance_preference(
+        &self,
+        preference: AppearancePreference,
+    ) -> Result<(), SqliteStoreError> {
+        self.connection()?
+            .execute(
+                "INSERT INTO appearance_preference (id, value) VALUES (1, ?1)
+                 ON CONFLICT(id) DO UPDATE SET value = excluded.value",
+                params![preference.as_str()],
+            )
+            .map_err(SqliteStoreError::Database)?;
+        Ok(())
     }
 }
 
@@ -320,7 +355,7 @@ mod tests {
             .unwrap()
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 3);
+        assert_eq!(version, 4);
         drop(repository);
 
         let reopened = open_repository(&path);
@@ -330,7 +365,7 @@ mod tests {
             .unwrap()
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 3);
+        assert_eq!(version, 4);
     }
 
     #[test]
@@ -362,7 +397,7 @@ mod tests {
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
 
-        assert_eq!(version, 3);
+        assert_eq!(version, 4);
         assert_eq!(projects.len(), 1);
         assert_eq!(projects[0].id().to_string(), id);
         assert_eq!(projects[0].name().as_str(), "Existing project");
@@ -399,7 +434,7 @@ mod tests {
             .unwrap()
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 3);
+        assert_eq!(version, 4);
     }
 
     #[test]
@@ -414,7 +449,7 @@ mod tests {
             )
             .unwrap();
         connection
-            .pragma_update(None, "user_version", 3_i64)
+            .pragma_update(None, "user_version", 4_i64)
             .unwrap();
         drop(connection);
 
@@ -427,8 +462,37 @@ mod tests {
         let sentinel: String = connection
             .query_row("SELECT value FROM future_sentinel", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 3);
+        assert_eq!(version, 4);
         assert_eq!(sentinel, "preserve me");
+    }
+
+    #[test]
+    fn appearance_preference_persists_and_missing_rows_resolve_to_system() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = open_repository(&database_path(&directory));
+
+        assert_eq!(
+            store.get_appearance_preference().unwrap(),
+            crate::preferences::AppearancePreference::System
+        );
+        store
+            .set_appearance_preference(crate::preferences::AppearancePreference::Dark)
+            .unwrap();
+        assert_eq!(
+            store.get_appearance_preference().unwrap(),
+            crate::preferences::AppearancePreference::Dark
+        );
+
+        {
+            let connection = store.connection.lock().unwrap();
+            connection
+                .execute("DELETE FROM appearance_preference", [])
+                .unwrap();
+        }
+        assert_eq!(
+            store.get_appearance_preference().unwrap(),
+            crate::preferences::AppearancePreference::System
+        );
     }
 
     #[test]

@@ -1,9 +1,5 @@
-const tuleWordmark = [
-  "▀▀▀▀█▀▀▀ ██    ██ ██      ██▀▀▀▀▀▀",
-  "   ██    ██    ██ ██      ██▄▄▄▄▄ ",
-  "   ██    ██    ██ ██      ██      ",
-  "   ██    ██▄▄▄▄▄█ ██▄▄▄▄▄ ██▄▄▄▄▄▄",
-].join("\n");
+import { PlusIcon, ProjectsIcon } from "./icons";
+import { Tooltip } from "./Tooltip";
 
 export interface SidebarSession {
   id: string;
@@ -21,7 +17,6 @@ interface WorkspaceSidebarProps {
   sessions: readonly SidebarSession[];
   activeSessionId: string | null;
   pendingProjectId: string | null;
-  inert: boolean;
   navigationDisabled: boolean;
   onNewSession: () => void;
   onSelectSession: (sessionId: string) => void;
@@ -34,7 +29,6 @@ export function WorkspaceSidebar({
   sessions,
   activeSessionId,
   pendingProjectId,
-  inert,
   navigationDisabled,
   onNewSession,
   onSelectSession,
@@ -44,91 +38,94 @@ export function WorkspaceSidebar({
   const projectless = sessions.filter((session) => session.projectId === null);
 
   return (
-    <aside className="workspace-sidebar" aria-label="Workspace" inert={inert ? true : undefined}>
-      <div className="wordmark" role="img" aria-label="TULE">
-        <pre className="wordmark-art" aria-hidden="true">
-          {tuleWordmark}
-        </pre>
+    <aside className="workspace-sidebar" aria-label="Workspace">
+      <div className="sidebar-toolbar">
+        <Tooltip label="New session">
+          <button
+            className="icon-button sidebar-icon"
+            type="button"
+            aria-label="New session"
+            disabled={navigationDisabled}
+            onClick={onNewSession}
+          >
+            <PlusIcon />
+          </button>
+        </Tooltip>
+        <Tooltip label="Manage projects">
+          <button
+            className="icon-button sidebar-icon"
+            type="button"
+            aria-label="Manage projects"
+            disabled={navigationDisabled}
+            onClick={onManageProjects}
+          >
+            <ProjectsIcon />
+          </button>
+        </Tooltip>
       </div>
 
-      <button
-        className="sidebar-action"
-        type="button"
-        disabled={navigationDisabled}
-        onClick={onNewSession}
-      >
-        New session
-      </button>
+      <div className="sidebar-scroll">
+        <div className="sidebar-section">
+          <h2 className="sidebar-heading">Projects</h2>
+          <ul className="sidebar-list">
+            {projects.map((project) => {
+              const related = sessions.filter((session) => session.projectId === project.id);
+              const projectSelected = pendingProjectId === project.id && activeSessionId === null;
 
-      <div className="sidebar-section">
-        <h2 className="sidebar-heading">Projects</h2>
-        <ul className="sidebar-list">
-          {projects.map((project) => {
-            const related = sessions.filter((session) => session.projectId === project.id);
-            const projectSelected = pendingProjectId === project.id && activeSessionId === null;
+              return (
+                <li key={project.id} className="sidebar-project-group">
+                  <button
+                    className={`sidebar-row${projectSelected ? " is-selected" : ""}`}
+                    type="button"
+                    disabled={navigationDisabled}
+                    onClick={() => onSelectProject(project.id)}
+                  >
+                    <span className="sidebar-row-label">{project.displayName}</span>
+                  </button>
+                  {related.length === 0 ? null : (
+                    <ul className="sidebar-sublist">
+                      {related.map((session) => (
+                        <li key={session.id}>
+                          <button
+                            className={`sidebar-row nested${activeSessionId === session.id ? " is-selected" : ""}`}
+                            type="button"
+                            disabled={navigationDisabled}
+                            onClick={() => onSelectSession(session.id)}
+                          >
+                            <span className="sidebar-row-label">{session.title}</span>
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </li>
+              );
+            })}
+          </ul>
+        </div>
 
-            return (
-              <li key={project.id} className="sidebar-project-group">
-                <button
-                  className={`sidebar-row${projectSelected ? " is-selected" : ""}`}
-                  type="button"
-                  disabled={navigationDisabled}
-                  onClick={() => onSelectProject(project.id)}
-                >
-                  <span className="sidebar-row-label">{project.displayName}</span>
-                </button>
-                {related.length === 0 ? null : (
-                  <ul className="sidebar-sublist">
-                    {related.map((session) => (
-                      <li key={session.id}>
-                        <button
-                          className={`sidebar-row nested${activeSessionId === session.id ? " is-selected" : ""}`}
-                          type="button"
-                          disabled={navigationDisabled}
-                          onClick={() => onSelectSession(session.id)}
-                        >
-                          <span className="sidebar-row-label">{session.title}</span>
-                        </button>
-                      </li>
-                    ))}
-                  </ul>
-                )}
-              </li>
-            );
-          })}
-        </ul>
+        <div className="sidebar-section">
+          <h2 className="sidebar-heading">No project</h2>
+          <ul className="sidebar-list">
+            {projectless.length === 0 ? (
+              <li className="sidebar-empty">No projectless sessions yet</li>
+            ) : (
+              projectless.map((session) => (
+                <li key={session.id}>
+                  <button
+                    className={`sidebar-row${activeSessionId === session.id ? " is-selected" : ""}`}
+                    type="button"
+                    disabled={navigationDisabled}
+                    onClick={() => onSelectSession(session.id)}
+                  >
+                    <span className="sidebar-row-label">{session.title}</span>
+                  </button>
+                </li>
+              ))
+            )}
+          </ul>
+        </div>
       </div>
-
-      <div className="sidebar-section">
-        <h2 className="sidebar-heading">Projectless recents</h2>
-        <ul className="sidebar-list">
-          {projectless.length === 0 ? (
-            <li className="sidebar-empty">No projectless sessions yet</li>
-          ) : (
-            projectless.map((session) => (
-              <li key={session.id}>
-                <button
-                  className={`sidebar-row${activeSessionId === session.id ? " is-selected" : ""}`}
-                  type="button"
-                  disabled={navigationDisabled}
-                  onClick={() => onSelectSession(session.id)}
-                >
-                  <span className="sidebar-row-label">{session.title}</span>
-                </button>
-              </li>
-            ))
-          )}
-        </ul>
-      </div>
-
-      <button
-        className="sidebar-action secondary"
-        type="button"
-        disabled={navigationDisabled}
-        onClick={onManageProjects}
-      >
-        Manage projects
-      </button>
     </aside>
   );
 }

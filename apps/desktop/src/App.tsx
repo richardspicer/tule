@@ -1,14 +1,13 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import "./App.css";
 import { AgentWorkspace } from "./components/AgentWorkspace";
+import { ApplicationChrome } from "./components/ApplicationChrome";
 import { ProjectManager } from "./components/ProjectManager";
-import { SettingsSheet } from "./components/SettingsSheet";
 import { WorkspaceSidebar } from "./components/WorkspaceSidebar";
 import type { ProjectListState } from "./components/ProjectList";
 import {
   cancelAgentTurn,
-  getAgentErrorCode,
   getAgentSession,
   getSafeAgentErrorMessage,
   listAgentSessions,
@@ -18,6 +17,7 @@ import {
   type AgentTurn,
 } from "./platform/agents";
 import { getApplicationInfo, type ApplicationInfo } from "./platform/application";
+import { createCommandDispatcher, type AppCommandId } from "./platform/commands";
 import {
   createProject,
   getProjectErrorCode,
@@ -26,14 +26,19 @@ import {
   type Project,
   updateProjectInstructions,
 } from "./platform/projects";
+import { getConnectionStatus, type ConnectionState } from "./platform/provider";
 import {
-  cancelChatgptConnect,
-  connectChatgpt,
-  disconnectChatgpt,
-  getConnectionStatus,
-  type ConnectionState,
-} from "./platform/provider";
-import { applyThemePreference, loadThemePreference, type ThemePreference } from "./theme";
+  exitApplication,
+  listenConnectionStatusChanged,
+  openSettingsWindow,
+  syncConnectionStatus,
+} from "./platform/settings";
+import {
+  applyThemePreference,
+  listenAppearanceChanged,
+  loadThemePreference,
+  type ThemePreference,
+} from "./theme";
 
 type MainView = "agent" | "projects";
 type ProjectOperation =
@@ -45,6 +50,7 @@ type ProjectOperation =
 const genericProjectErrorMessage = "Project storage is unavailable. Try again.";
 const startupProjectErrorMessage = "Project storage is unavailable. Restart TULE to try again.";
 const closeWithUnsavedInstructionsMessage = "Discard unsaved project instructions and close TULE?";
+const projectsCompactQuery = "(max-width: 820px)";
 
 function getSafeProjectErrorMessage(error: unknown): string {
   switch (getProjectErrorCode(error)) {
@@ -71,13 +77,8 @@ function mergeProject(projects: readonly Project[], project: Project): Project[]
 
 function App() {
   const [applicationInfo, setApplicationInfo] = useState<ApplicationInfo | null>(null);
-  const [theme, setTheme] = useState<ThemePreference>(loadThemePreference);
-  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [theme, setTheme] = useState<ThemePreference>("system");
   const [connectionState, setConnectionState] = useState<ConnectionState>("disconnected");
-  const [connectionBusy, setConnectionBusy] = useState(false);
-  const [connectCancelRequested, setConnectCancelRequested] = useState(false);
-  const [connectionStatusMessage, setConnectionStatusMessage] = useState<string | null>(null);
-  const [connectionErrorMessage, setConnectionErrorMessage] = useState<string | null>(null);
   const [mainView, setMainView] = useState<MainView>("agent");
   const [sessions, setSessions] = useState<AgentSession[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
@@ -100,13 +101,16 @@ function App() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [projectLoadState, setProjectLoadState] = useState<ProjectListState>("loading");
   const [selectedProject, setSelectedProject] = useState<Project | null>(null);
+  const [creatingProject, setCreatingProject] = useState(false);
   const [projectOperation, setProjectOperation] = useState<ProjectOperation>({ kind: "idle" });
   const [dirtyProjectInstructionsId, setDirtyProjectInstructionsId] = useState<string | null>(null);
   const dirtyProjectInstructionsIdRef = useRef<string | null>(null);
   const [projectName, setProjectName] = useState("");
   const [projectNameError, setProjectNameError] = useState<string | null>(null);
   const [projectError, setProjectError] = useState<string | null>(null);
-  const settingsButtonRef = useRef<HTMLButtonElement>(null);
+  const [projectsCompact, setProjectsCompact] = useState(
+    () => window.matchMedia(projectsCompactQuery).matches,
+  );
 
   const activeSession = sessions.find((session) => session.id === activeSessionId) ?? null;
   const contextProjectId = activeSession?.projectId ?? pendingProjectId;
@@ -116,6 +120,13 @@ function App() {
 
   useEffect(() => {
     let active = true;
+
+    void loadThemePreference().then((preference) => {
+      if (active) {
+        setTheme(preference);
+        applyThemePreference(preference);
+      }
+    });
 
     getApplicationInfo()
       .then((info) => {
@@ -129,6 +140,10 @@ function App() {
       active = false;
     };
   }, []);
+
+  useEffect(() => {
+    applyThemePreference(theme);
+  }, [theme]);
 
   useEffect(() => {
     let active = true;
@@ -148,6 +163,49 @@ function App() {
     return () => {
       active = false;
     };
+  }, []);
+
+  useEffect(() => {
+    let disposed = false;
+    const cleanups: (() => void)[] = [];
+
+    void listenAppearanceChanged((preference) => {
+      setTheme(preference);
+      applyThemePreference(preference);
+    }).then((unlisten) => {
+      if (disposed) {
+        unlisten();
+      } else {
+        cleanups.push(unlisten);
+      }
+    });
+
+    void listenConnectionStatusChanged((status) => {
+      setConnectionState(status.state);
+    }).then((unlisten) => {
+      if (disposed) {
+        unlisten();
+      } else {
+        cleanups.push(unlisten);
+      }
+    });
+
+    return () => {
+      disposed = true;
+      for (const cleanup of cleanups) {
+        cleanup();
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    const media = window.matchMedia(projectsCompactQuery);
+    function onChange() {
+      setProjectsCompact(media.matches);
+    }
+    onChange();
+    media.addEventListener("change", onChange);
+    return () => media.removeEventListener("change", onChange);
   }, []);
 
   useEffect(() => {
@@ -205,21 +263,9 @@ function App() {
     };
   }, []);
 
-  useEffect(() => {
-    applyThemePreference(theme);
-  }, [theme]);
-
   useLayoutEffect(() => {
     dirtyProjectInstructionsIdRef.current = dirtyProjectInstructionsId;
   }, [dirtyProjectInstructionsId]);
-
-  const handleOpenSettings = useCallback(() => {
-    setSettingsOpen(true);
-  }, []);
-
-  const handleCloseSettings = useCallback(() => {
-    setSettingsOpen(false);
-  }, []);
 
   useEffect(() => {
     let disposed = false;
@@ -232,7 +278,13 @@ function App() {
           !window.confirm(closeWithUnsavedInstructionsMessage)
         ) {
           event.preventDefault();
+          return;
         }
+
+        // Prevent destroying only the main window while a hidden Settings
+        // singleton would keep the process alive.
+        event.preventDefault();
+        void exitApplication();
       })
       .then((removeListener) => {
         if (disposed) {
@@ -381,12 +433,17 @@ function App() {
     setAgentError(null);
   }
 
-  function handleBackToAgents() {
+  function handleManageProjects() {
     if (!canNavigateAwayFromProjectManager()) {
       return;
     }
 
-    setMainView("agent");
+    setCreatingProject(false);
+    setMainView("projects");
+
+    if (contextProjectId !== null) {
+      void handleOpenProject(contextProjectId);
+    }
   }
 
   function clearAgentCancellation() {
@@ -475,6 +532,7 @@ function App() {
             );
             if (event.turn.errorCode === "authentication_required") {
               setConnectionState("reconnect_required");
+              void syncConnectionStatus().catch(() => undefined);
             }
             clearAgentCancellation();
             setActiveTurnId(null);
@@ -509,73 +567,6 @@ function App() {
     }
   }
 
-  async function handleConnect() {
-    setConnectionBusy(true);
-    setConnectCancelRequested(false);
-    setConnectionStatusMessage(null);
-    setConnectionErrorMessage(null);
-    setConnectionState("connecting");
-    try {
-      const status = await connectChatgpt();
-      setConnectionState(status.state);
-      setConnectionStatusMessage(null);
-    } catch (error: unknown) {
-      const errorCode = getAgentErrorCode(error);
-      if (errorCode === "cancelled") {
-        setConnectionStatusMessage("Browser connection cancelled.");
-      } else {
-        const message = getSafeAgentErrorMessage(error);
-        setConnectionErrorMessage(message);
-        setAgentError(message);
-      }
-      const status = await getConnectionStatus().catch(() => null);
-      if (status !== null) {
-        setConnectionState(status.state);
-      } else {
-        setConnectionState("disconnected");
-      }
-    } finally {
-      setConnectCancelRequested(false);
-      setConnectionBusy(false);
-    }
-  }
-
-  async function handleCancelConnect() {
-    if (connectionState !== "connecting" || connectCancelRequested) {
-      return;
-    }
-
-    setConnectCancelRequested(true);
-    setConnectionStatusMessage("Cancelling browser connection…");
-    setConnectionErrorMessage(null);
-    try {
-      await cancelChatgptConnect();
-    } catch (error: unknown) {
-      setConnectCancelRequested(false);
-      setConnectionStatusMessage(null);
-      setConnectionErrorMessage(getSafeAgentErrorMessage(error));
-    }
-  }
-
-  async function handleDisconnect() {
-    setConnectionBusy(true);
-    setConnectionStatusMessage(null);
-    setConnectionErrorMessage(null);
-    try {
-      const status = await disconnectChatgpt();
-      setConnectionState(status.state);
-      if (status.state === "disconnected") {
-        setConnectionStatusMessage("Removed from this device");
-      }
-    } catch (error: unknown) {
-      const message = getSafeAgentErrorMessage(error);
-      setConnectionErrorMessage(message);
-      setAgentError(message);
-    } finally {
-      setConnectionBusy(false);
-    }
-  }
-
   async function handleCreateProject() {
     if (projectOperation.kind !== "idle" || projectLoadState !== "ready") {
       return;
@@ -600,6 +591,7 @@ function App() {
       const project = await createProject(displayName);
       setProjects((currentProjects) => mergeProject(currentProjects, project));
       setSelectedProject(project);
+      setCreatingProject(false);
       setDirtyProjectInstructionsId(null);
       setProjectLoadState("ready");
       setProjectName("");
@@ -619,7 +611,7 @@ function App() {
       return;
     }
 
-    if (selectedProject?.id === projectId) {
+    if (selectedProject?.id === projectId && !creatingProject) {
       return;
     }
 
@@ -627,6 +619,7 @@ function App() {
       return;
     }
 
+    setCreatingProject(false);
     setProjectError(null);
     setProjectOperation({ kind: "opening", projectId });
 
@@ -717,92 +710,146 @@ function App() {
     }
   }
 
+  const dispatchCommand = useMemo(
+    () =>
+      createCommandDispatcher((command: AppCommandId) => {
+        switch (command) {
+          case "new-session":
+            handleNewSession();
+            return;
+          case "manage-projects":
+            handleManageProjects();
+            return;
+          case "exit":
+            if (
+              dirtyProjectInstructionsIdRef.current !== null &&
+              !window.confirm(closeWithUnsavedInstructionsMessage)
+            ) {
+              return;
+            }
+            void exitApplication();
+            return;
+          case "open-settings":
+            void openSettingsWindow();
+            return;
+          case "open-settings-providers":
+            void openSettingsWindow("providers");
+            return;
+          default:
+            return;
+        }
+      }),
+    // Handlers close over latest state intentionally for command routing.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [
+      dirtyProjectInstructionsId,
+      projectOperation.kind,
+      contextProjectId,
+      projects,
+      sessions,
+      activeSessionId,
+    ],
+  );
+
+  useEffect(() => {
+    function onKeyDown(event: KeyboardEvent) {
+      if ((event.ctrlKey || event.metaKey) && event.key === ",") {
+        event.preventDefault();
+        void openSettingsWindow();
+      }
+    }
+
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, []);
+
   const openingProjectId = projectOperation.kind === "opening" ? projectOperation.projectId : null;
   const projectActionsDisabled = projectOperation.kind !== "idle" || projectLoadState !== "ready";
   void applicationInfo;
 
   return (
-    <div className={`app-shell${settingsOpen ? " settings-open" : ""}`}>
-      <WorkspaceSidebar
-        projects={projects}
-        sessions={sessions}
-        activeSessionId={activeSessionId}
-        pendingProjectId={pendingProjectId}
-        inert={settingsOpen}
-        navigationDisabled={
-          sending || projectOperation.kind !== "idle" || sessionProjectChangePending
-        }
-        onNewSession={handleNewSession}
-        onSelectSession={(sessionId) => void handleSelectSession(sessionId)}
-        onSelectProject={handleSelectProject}
-        onManageProjects={() => {
-          if (canNavigateAwayFromProjectManager()) {
-            setMainView("projects");
-          }
+    <div className="app-shell">
+      <ApplicationChrome
+        onCommand={(command) => {
+          void dispatchCommand(command);
         }}
       />
+      <div className="app-body">
+        <WorkspaceSidebar
+          projects={projects}
+          sessions={sessions}
+          activeSessionId={activeSessionId}
+          pendingProjectId={pendingProjectId}
+          navigationDisabled={
+            sending || projectOperation.kind !== "idle" || sessionProjectChangePending
+          }
+          onNewSession={handleNewSession}
+          onSelectSession={(sessionId) => void handleSelectSession(sessionId)}
+          onSelectProject={handleSelectProject}
+          onManageProjects={handleManageProjects}
+        />
 
-      <main className="main-panel" inert={settingsOpen ? true : undefined}>
-        {mainView === "projects" ? (
-          <ProjectManager
-            projects={projects}
-            loadState={projectLoadState}
-            selectedProject={selectedProject}
-            projectName={projectName}
-            projectNameError={projectNameError}
-            projectError={projectError}
-            openingProjectId={openingProjectId}
-            actionsDisabled={projectActionsDisabled}
-            isCreating={projectOperation.kind === "creating"}
-            onProjectNameChange={updateProjectName}
-            onCreate={() => void handleCreateProject()}
-            onOpen={(projectId) => void handleOpenProject(projectId)}
-            onDirtyChange={handleProjectInstructionsDirtyChange}
-            onSaveInstructions={handleUpdateProjectInstructions}
-            onUseWithAgents={handleUseWithAgents}
-            onBackToAgents={handleBackToAgents}
-          />
-        ) : (
-          <AgentWorkspace
-            title={sessionTitle}
-            projectId={contextProjectId}
-            projects={projects}
-            modelLabel={modelLabel}
-            turns={turns}
-            draft={draft}
-            connected={connected}
-            sending={sending}
-            sendBlocked={sessionLoadPending || sessionProjectChangePending}
-            cancelRequested={cancelRequested}
-            activeTurnId={activeTurnId}
-            errorMessage={agentError}
-            onDraftChange={setDraft}
-            onSend={() => void handleSend()}
-            onCancel={handleCancel}
-            onProjectChange={(projectId) => void handleChangePersistedProject(projectId)}
-            onOpenSettings={handleOpenSettings}
-            settingsButtonRef={settingsButtonRef}
-          />
-        )}
-      </main>
-
-      <SettingsSheet
-        open={settingsOpen}
-        connectionState={connectionState}
-        model="gpt-5.5"
-        theme={theme}
-        busy={connectionBusy}
-        turnBusy={sending}
-        cancelRequested={connectCancelRequested}
-        statusMessage={connectionStatusMessage}
-        errorMessage={connectionErrorMessage}
-        onClose={handleCloseSettings}
-        onConnect={() => void handleConnect()}
-        onCancelConnect={() => void handleCancelConnect()}
-        onDisconnect={() => void handleDisconnect()}
-        onThemeChange={setTheme}
-        returnFocusRef={settingsButtonRef}
-      />
+        <main className="main-panel">
+          {mainView === "projects" ? (
+            <ProjectManager
+              projects={projects}
+              loadState={projectLoadState}
+              selectedProject={selectedProject}
+              projectName={projectName}
+              projectNameError={projectNameError}
+              projectError={projectError}
+              openingProjectId={openingProjectId}
+              actionsDisabled={projectActionsDisabled}
+              isCreating={projectOperation.kind === "creating"}
+              compact={projectsCompact}
+              creating={creatingProject}
+              onProjectNameChange={updateProjectName}
+              onCreate={() => void handleCreateProject()}
+              onOpen={(projectId) => void handleOpenProject(projectId)}
+              onDirtyChange={handleProjectInstructionsDirtyChange}
+              onSaveInstructions={handleUpdateProjectInstructions}
+              onUseWithAgents={handleUseWithAgents}
+              onClearSelection={() => {
+                if (!canDiscardUnsavedProjectInstructions()) {
+                  return;
+                }
+                setSelectedProject(null);
+                setCreatingProject(false);
+                setProjectName("");
+                setProjectNameError(null);
+              }}
+              onBeginCreate={() => {
+                if (!canDiscardUnsavedProjectInstructions()) {
+                  return;
+                }
+                setSelectedProject(null);
+                setCreatingProject(true);
+                setProjectNameError(null);
+              }}
+            />
+          ) : (
+            <AgentWorkspace
+              title={sessionTitle}
+              projectId={contextProjectId}
+              projects={projects}
+              modelLabel={modelLabel}
+              turns={turns}
+              draft={draft}
+              connected={connected}
+              sending={sending}
+              sendBlocked={sessionLoadPending || sessionProjectChangePending}
+              cancelRequested={cancelRequested}
+              activeTurnId={activeTurnId}
+              errorMessage={agentError}
+              onDraftChange={setDraft}
+              onSend={() => void handleSend()}
+              onCancel={handleCancel}
+              onProjectChange={(projectId) => void handleChangePersistedProject(projectId)}
+              onOpenProvidersSettings={() => void openSettingsWindow("providers")}
+            />
+          )}
+        </main>
+      </div>
     </div>
   );
 }

@@ -88,7 +88,7 @@ function isConnectionStatus(value: unknown): value is ConnectionStatus {
   );
 }
 
-function validateConnectionStatus(value: unknown): ConnectionStatus {
+export function validateConnectionStatusExport(value: unknown): ConnectionStatus {
   if (!isConnectionStatus(value)) {
     throw new ProviderError("provider_unavailable");
   }
@@ -105,11 +105,11 @@ async function invokeProviderCommand(command: string): Promise<unknown> {
 }
 
 export async function getConnectionStatus(): Promise<ConnectionStatus> {
-  return validateConnectionStatus(await invokeProviderCommand("connection_status"));
+  return validateConnectionStatusExport(await invokeProviderCommand("connection_status"));
 }
 
 export async function connectChatgpt(): Promise<ConnectionStatus> {
-  return validateConnectionStatus(await invokeProviderCommand("connect_chatgpt"));
+  return validateConnectionStatusExport(await invokeProviderCommand("connect_chatgpt"));
 }
 
 export async function cancelChatgptConnect(): Promise<void> {
@@ -117,5 +117,5 @@ export async function cancelChatgptConnect(): Promise<void> {
 }
 
 export async function disconnectChatgpt(): Promise<ConnectionStatus> {
-  return validateConnectionStatus(await invokeProviderCommand("disconnect_chatgpt"));
+  return validateConnectionStatusExport(await invokeProviderCommand("disconnect_chatgpt"));
 }

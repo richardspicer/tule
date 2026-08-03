@@ -1,8 +1,10 @@
 mod agents;
 mod credentials;
 mod openai_chatgpt;
+mod preferences;
 mod projects;
 mod provider;
+mod settings_window;
 mod sqlite;
 
 use std::{fs, sync::Arc};
@@ -13,13 +15,18 @@ use agents::{
 };
 use credentials::native_store;
 use openai_chatgpt::ChatGptAdapter;
+use preferences::{DesktopPreferenceState, get_appearance_preference, set_appearance_preference};
 use projects::{
     ProjectStorageState, create_project, list_projects, open_project, update_project_instructions,
 };
 use provider::{ConnectionStatus, PublicError};
+use settings_window::{
+    CONNECTION_STATUS_CHANGED_EVENT, SettingsLaunchState, exit_application, open_settings_window,
+    take_settings_launch_category,
+};
 use sqlite::{DATABASE_FILENAME, SqliteStore};
 use std::sync::Arc as StdArc;
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 use tauri_plugin_opener::OpenerExt;
 use tule_core::AgentRepository;
 
@@ -56,12 +63,30 @@ fn initialize_store<R: tauri::Runtime>(app: &tauri::App<R>) -> Option<Arc<Sqlite
         .map(Arc::new)
 }
 
-#[tauri::command]
-fn connection_status(state: tauri::State<'_, AgentState>) -> ConnectionStatus {
+fn current_connection_status(state: &AgentState) -> ConnectionStatus {
     state.chatgpt().map_or_else(
         || state.provider.connection_status(),
         |adapter| adapter.connection_status_with_store(state.store.as_ref()),
     )
+}
+
+fn emit_connection_status(app: &tauri::AppHandle, status: &ConnectionStatus) {
+    let _ = app.emit(CONNECTION_STATUS_CHANGED_EVENT, status);
+}
+
+#[tauri::command]
+fn connection_status(state: tauri::State<'_, AgentState>) -> ConnectionStatus {
+    current_connection_status(&state)
+}
+
+#[tauri::command]
+fn sync_connection_status(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AgentState>,
+) -> ConnectionStatus {
+    let status = current_connection_status(&state);
+    emit_connection_status(&app, &status);
+    status
 }
 
 /// Connection setup is intentionally native-only. The frontend is never given
@@ -73,29 +98,42 @@ async fn connect_chatgpt(
 ) -> Result<ConnectionStatus, PublicError> {
     let _operation = state.try_operation()?;
     let Some(adapter) = state.chatgpt() else {
-        return Ok(state.provider.connection_status());
+        let status = state.provider.connection_status();
+        emit_connection_status(&app, &status);
+        return Ok(status);
     };
     let store = StdArc::clone(&state.store);
-    adapter
+    let opener = app.clone();
+    let status = adapter
         .connect_in_browser(store, move |url| {
-            app.opener()
+            opener
+                .opener()
                 .open_url(url, None::<&str>)
                 .map_err(|_| PublicError::ProviderUnavailable)?;
             Ok(())
         })
-        .await
+        .await?;
+    emit_connection_status(&app, &status);
+    Ok(status)
 }
 
 #[tauri::command]
-fn cancel_chatgpt_connect(state: tauri::State<'_, AgentState>) -> Result<(), PublicError> {
+fn cancel_chatgpt_connect(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AgentState>,
+) -> Result<(), PublicError> {
     let Some(adapter) = state.chatgpt() else {
         return Err(PublicError::ProviderUnavailable);
     };
-    adapter.cancel_connect()
+    adapter.cancel_connect()?;
+    let status = current_connection_status(&state);
+    emit_connection_status(&app, &status);
+    Ok(())
 }
 
 #[tauri::command]
 async fn disconnect_chatgpt(
+    app: tauri::AppHandle,
     state: tauri::State<'_, AgentState>,
 ) -> Result<ConnectionStatus, PublicError> {
     let _operation = state.try_operation()?;
@@ -107,9 +145,13 @@ async fn disconnect_chatgpt(
         return Err(PublicError::SessionBusy);
     }
     let Some(adapter) = state.chatgpt() else {
-        return Ok(state.provider.connection_status());
+        let status = state.provider.connection_status();
+        emit_connection_status(&app, &status);
+        return Ok(status);
     };
-    adapter.disconnect(state.store.as_ref())
+    let status = adapter.disconnect(state.store.as_ref())?;
+    emit_connection_status(&app, &status);
+    Ok(status)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -117,8 +159,14 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
+            if let Some(main) = app.get_webview_window("main") {
+                let _ = main.set_title("");
+            }
+            app.manage(SettingsLaunchState::default());
+
             let Some(store) = initialize_store(app) else {
                 app.manage(ProjectStorageState::unavailable());
+                app.manage(DesktopPreferenceState::unavailable());
                 return Ok(());
             };
             tule_core::interrupt_inflight_turns(store.as_ref()).map_err(|_| {
@@ -127,6 +175,7 @@ pub fn run() {
             let chatgpt = Arc::new(ChatGptAdapter::new(native_store()));
             let provider: Arc<dyn provider::ProviderAdapter> = Arc::clone(&chatgpt) as _;
             app.manage(ProjectStorageState::ready_shared(Arc::clone(&store)));
+            app.manage(DesktopPreferenceState::ready_shared(Arc::clone(&store)));
             app.manage(AgentState::new(store, provider, Some(chatgpt)));
             Ok(())
         })
@@ -142,9 +191,15 @@ pub fn run() {
             cancel_agent_turn,
             set_agent_session_project,
             connection_status,
+            sync_connection_status,
             connect_chatgpt,
             cancel_chatgpt_connect,
-            disconnect_chatgpt
+            disconnect_chatgpt,
+            get_appearance_preference,
+            set_appearance_preference,
+            open_settings_window,
+            take_settings_launch_category,
+            exit_application
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

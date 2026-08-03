@@ -9,14 +9,18 @@ use std::{
 };
 
 use serde::Serialize;
-use tauri::{State, ipc::Channel};
+use tauri::{AppHandle, Emitter, State, ipc::Channel};
 use tokio_util::sync::CancellationToken;
 use tule_core::{
     AgentRepository, AgentSession, AgentSessionId, AgentTurn, ProjectId, ProjectRepository,
 };
 
 use crate::{
-    provider::{ProviderAdapter, ProviderEvent, PublicError},
+    provider::{
+        PROVIDER_MODEL_CATALOG_CHANGED_EVENT, PROVIDER_MODEL_SELECTION_CHANGED_EVENT,
+        ProviderAdapter, ProviderEvent, PublicError, build_selection_response,
+        build_stale_catalog_response, clear_selected_default_if_matches,
+    },
     sqlite::SqliteStore,
 };
 
@@ -301,6 +305,7 @@ pub(crate) async fn get_agent_session(
 
 #[tauri::command(rename_all = "camelCase")]
 pub(crate) async fn send_agent_message(
+    app: AppHandle,
     session_id: Option<String>,
     user_text: String,
     project_id: Option<String>,
@@ -423,6 +428,7 @@ pub(crate) async fn send_agent_message(
     let terminal_meta_cb = Arc::clone(&terminal_meta);
     let output_limit_terminal = Arc::new(Mutex::new(None::<AgentTurn>));
     let output_limit_terminal_cb = Arc::clone(&output_limit_terminal);
+    let rejected_model_id = prepared.session.model_id().to_owned();
     let result = state
         .provider
         .stream(
@@ -478,6 +484,7 @@ pub(crate) async fn send_agent_message(
             }),
         )
         .await;
+    let model_rejected = matches!(result, Err(PublicError::ModelUnavailable));
     let (completed, response_id, input_tokens, output_tokens) = terminal_meta
         .lock()
         .map(|guard| (guard.0, guard.1.clone(), guard.2, guard.3))
@@ -499,12 +506,42 @@ pub(crate) async fn send_agent_message(
             cancelled: token.is_cancelled(),
         },
     )?;
+    if model_rejected {
+        let adapter = state.chatgpt();
+        recover_after_model_rejection(&app, adapter.as_deref(), store.as_ref(), &rejected_model_id)
+            .await;
+    }
     channel
         .send(AgentStreamEvent::Terminal {
             turn: terminal.into(),
         })
         .map_err(|_| PublicError::ProviderUnavailable)?;
     Ok(())
+}
+
+async fn recover_after_model_rejection(
+    app: &AppHandle,
+    adapter: Option<&crate::openai_chatgpt::ChatGptAdapter>,
+    store: &SqliteStore,
+    rejected_model_id: &str,
+) {
+    if let Some(adapter) = adapter {
+        match adapter.refresh_model_catalog(store, true).await {
+            Ok(catalog) => {
+                let _ = app.emit(PROVIDER_MODEL_CATALOG_CHANGED_EVENT, &catalog);
+            }
+            Err(_) => {
+                if let Ok(stale) = build_stale_catalog_response(store) {
+                    let _ = app.emit(PROVIDER_MODEL_CATALOG_CHANGED_EVENT, &stale);
+                }
+            }
+        }
+    }
+    let selection = clear_selected_default_if_matches(store, rejected_model_id)
+        .or_else(|_| build_selection_response(store));
+    if let Ok(selection) = selection {
+        let _ = app.emit(PROVIDER_MODEL_SELECTION_CHANGED_EVENT, &selection);
+    }
 }
 
 #[tauri::command(rename_all = "camelCase")]

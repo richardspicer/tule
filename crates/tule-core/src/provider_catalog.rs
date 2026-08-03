@@ -29,6 +29,10 @@ pub struct CatalogCandidate {
     pub visibility: String,
     /// Declared input modalities when present.
     pub input_modalities: Option<Vec<String>>,
+    /// Provider tool-mode metadata used only for native filtering.
+    pub tool_mode: Option<String>,
+    /// Whether the provider requires the Responses Lite contract TULE does not implement.
+    pub use_responses_lite: bool,
     /// Provider sort priority (lower first).
     pub sort_order: i32,
     /// Provider-indicated default when present.
@@ -157,6 +161,16 @@ pub fn is_usable_catalog_candidate(candidate: &CatalogCandidate) -> bool {
             return false;
         }
     }
+    if candidate.use_responses_lite {
+        return false;
+    }
+    if candidate
+        .tool_mode
+        .as_deref()
+        .is_some_and(|mode| mode.eq_ignore_ascii_case("code_mode_only"))
+    {
+        return false;
+    }
     true
 }
 
@@ -268,6 +282,8 @@ mod tests {
             description: Some("safe".to_owned()),
             visibility: visibility.to_owned(),
             input_modalities: Some(vec!["text".to_owned()]),
+            tool_mode: None,
+            use_responses_lite: false,
             sort_order: 10,
             is_provider_default: false,
         }
@@ -284,6 +300,8 @@ mod tests {
                 description: None,
                 visibility: "list".to_owned(),
                 input_modalities: Some(vec!["text".to_owned()]),
+                tool_mode: None,
+                use_responses_lite: false,
                 sort_order: 1,
                 is_provider_default: false,
             },
@@ -293,6 +311,8 @@ mod tests {
                 description: None,
                 visibility: "list".to_owned(),
                 input_modalities: Some(vec!["image".to_owned()]),
+                tool_mode: None,
+                use_responses_lite: false,
                 sort_order: 2,
                 is_provider_default: false,
             },
@@ -302,8 +322,43 @@ mod tests {
                 description: None,
                 visibility: "list".to_owned(),
                 input_modalities: None,
+                tool_mode: None,
+                use_responses_lite: false,
                 sort_order: 3,
                 is_provider_default: true,
+            },
+            CatalogCandidate {
+                model_id: "tool-only".to_owned(),
+                display_name: "Tool only".to_owned(),
+                description: None,
+                visibility: "list".to_owned(),
+                input_modalities: Some(vec!["text".to_owned()]),
+                tool_mode: Some("code_mode_only".to_owned()),
+                use_responses_lite: false,
+                sort_order: 4,
+                is_provider_default: false,
+            },
+            CatalogCandidate {
+                model_id: "lite".to_owned(),
+                display_name: "Lite".to_owned(),
+                description: None,
+                visibility: "list".to_owned(),
+                input_modalities: Some(vec!["text".to_owned()]),
+                tool_mode: None,
+                use_responses_lite: true,
+                sort_order: 5,
+                is_provider_default: false,
+            },
+            CatalogCandidate {
+                model_id: "unknown-fields".to_owned(),
+                display_name: "Ordinary".to_owned(),
+                description: Some("safe".to_owned()),
+                visibility: "list".to_owned(),
+                input_modalities: Some(vec!["text".to_owned()]),
+                tool_mode: Some("default".to_owned()),
+                use_responses_lite: false,
+                sort_order: 0,
+                is_provider_default: false,
             },
         ]);
 
@@ -312,15 +367,34 @@ mod tests {
                 .iter()
                 .map(|entry| entry.model_id.as_str())
                 .collect::<Vec<_>>(),
-            vec!["api-false", "gpt-visible"]
+            vec!["unknown-fields", "api-false", "gpt-visible"]
         );
-        assert!(entries[0].is_provider_default);
+        assert!(entries[1].is_provider_default);
     }
 
     #[test]
     fn supported_in_api_is_not_an_exclusion_signal() {
         // Absence of modalities defaults to text-capable; visibility list wins.
+        // supported_in_api is intentionally not part of CatalogCandidate filtering.
         assert!(is_usable_catalog_candidate(&candidate("spark", "list")));
+    }
+
+    #[test]
+    fn excludes_tool_only_and_responses_lite_candidates() {
+        let tool_only = CatalogCandidate {
+            tool_mode: Some("code_mode_only".to_owned()),
+            ..candidate("tool", "list")
+        };
+        let lite = CatalogCandidate {
+            use_responses_lite: true,
+            ..candidate("lite", "list")
+        };
+        assert!(!is_usable_catalog_candidate(&tool_only));
+        assert!(!is_usable_catalog_candidate(&lite));
+        assert!(is_usable_catalog_candidate(&candidate(
+            "ordinary-text",
+            "list"
+        )));
     }
 
     #[test]

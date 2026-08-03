@@ -5,14 +5,18 @@ use std::{future::Future, pin::Pin};
 use serde::Serialize;
 use tokio_util::sync::CancellationToken;
 use tule_core::{
-    AgentRepository, PROVIDER_PROFILE_ID, SelectedDefaultResolution, catalog_freshness,
-    model_id_in_catalog, resolve_selected_default, validate_model_id,
+    PROVIDER_PROFILE_ID, SelectedDefaultResolution, catalog_freshness, model_id_in_catalog,
+    resolve_selected_default, validate_model_id,
 };
 
 use crate::sqlite::SqliteStore;
 
 pub(crate) const PROVIDER_MODEL_CATALOG_CHANGED_EVENT: &str = "provider-model-catalog-changed";
 pub(crate) const PROVIDER_MODEL_SELECTION_CHANGED_EVENT: &str = "provider-model-selection-changed";
+
+/// Stored selected-default marker that forces an explicit new choice without
+/// falling back to the built-in catalog default.
+const REQUIRES_EXPLICIT_CHOICE: &str = "__requires_choice__";
 
 /// Every error which may cross the native IPC boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -124,6 +128,15 @@ fn unix_now_ms() -> Result<i64, PublicError> {
         .map_err(|_| PublicError::AgentStorageUnavailable)
 }
 
+/// Marks a persisted catalog as visibly stale for failure/recovery surfaces.
+pub(crate) fn build_stale_catalog_response(
+    store: &SqliteStore,
+) -> Result<ProviderModelCatalogResponse, PublicError> {
+    let mut response = build_catalog_response(store)?;
+    response.freshness = "stale".to_owned();
+    Ok(response)
+}
+
 pub(crate) fn build_catalog_response(
     store: &SqliteStore,
 ) -> Result<ProviderModelCatalogResponse, PublicError> {
@@ -170,6 +183,13 @@ pub(crate) fn build_selection_response(
         .map_err(|_| PublicError::AgentStorageUnavailable)?
         .map(|snapshot| snapshot.entries)
         .unwrap_or_default();
+    if selection.selected_model_id.as_deref() == Some(REQUIRES_EXPLICIT_CHOICE) {
+        return Ok(ProviderModelSelectionResponse {
+            provider_id: PROVIDER_PROFILE_ID.to_owned(),
+            selected_model_id: None,
+            requires_selection: !entries.is_empty(),
+        });
+    }
     let resolution = resolve_selected_default(selection.selected_model_id.as_deref(), &entries);
     match resolution {
         SelectedDefaultResolution::Available(model_id) => Ok(ProviderModelSelectionResponse {
@@ -181,7 +201,9 @@ pub(crate) fn build_selection_response(
             let requires_selection = !entries.is_empty() || selection.selected_model_id.is_some();
             Ok(ProviderModelSelectionResponse {
                 provider_id: PROVIDER_PROFILE_ID.to_owned(),
-                selected_model_id: selection.selected_model_id,
+                selected_model_id: selection
+                    .selected_model_id
+                    .filter(|model_id| model_id != REQUIRES_EXPLICIT_CHOICE),
                 requires_selection,
             })
         }
@@ -206,16 +228,32 @@ pub(crate) fn persist_model_selection(
         return Err(PublicError::ModelUnavailable);
     }
     let now = unix_now_ms()?;
+    // Selected-default persistence is authoritative and separate from profile
+    // display metadata (`visible_model_id`).
     store
         .set_model_selection(PROVIDER_PROFILE_ID, Some(&model_id), now)
         .map_err(|_| PublicError::AgentStorageUnavailable)?;
-    if let Some(mut profile) = store
-        .get_provider_profile(PROVIDER_PROFILE_ID)
-        .map_err(|_| PublicError::AgentStorageUnavailable)?
+    build_selection_response(store)
+}
+
+/// Clears the selected default when it matches a rejected model id.
+///
+/// Writes an explicit requires-choice marker so the built-in catalog default
+/// cannot silently reappear after rejection.
+pub(crate) fn clear_selected_default_if_matches(
+    store: &SqliteStore,
+    rejected_model_id: &str,
+) -> Result<ProviderModelSelectionResponse, PublicError> {
+    let selection = store
+        .get_model_selection(PROVIDER_PROFILE_ID)
+        .map_err(|_| PublicError::AgentStorageUnavailable)?;
+    let resolved = build_selection_response(store)?;
+    if resolved.selected_model_id.as_deref() == Some(rejected_model_id)
+        || selection.selected_model_id.as_deref() == Some(rejected_model_id)
     {
-        profile.set_visible_model_id(model_id, now);
+        let now = unix_now_ms()?;
         store
-            .update_provider_profile(&profile)
+            .set_model_selection(PROVIDER_PROFILE_ID, Some(REQUIRES_EXPLICIT_CHOICE), now)
             .map_err(|_| PublicError::AgentStorageUnavailable)?;
     }
     build_selection_response(store)
@@ -294,6 +332,8 @@ impl ProviderAdapter for FakeProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sqlite::{SqliteStore, StoredCatalogState};
+    use tule_core::{AgentRepository, ModelCatalogEntry};
 
     #[test]
     fn public_errors_serialize_without_internal_detail() {
@@ -301,5 +341,102 @@ mod tests {
             serde_json::to_string(&PublicError::UnsupportedProviderOutput).unwrap(),
             "\"unsupported_provider_output\""
         );
+    }
+
+    fn tempfile_dir() -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "tule-provider-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    #[test]
+    fn selected_default_write_is_atomic_and_separate_from_display_metadata() {
+        let dir = tempfile_dir();
+        let store = SqliteStore::open(dir.join("selection.sqlite3")).unwrap();
+        let before = store
+            .get_provider_profile(PROVIDER_PROFILE_ID)
+            .unwrap()
+            .unwrap()
+            .visible_model_id()
+            .to_owned();
+        store
+            .replace_catalog_snapshot(
+                PROVIDER_PROFILE_ID,
+                &StoredCatalogState {
+                    credential_generation: 0,
+                    compatibility_revision: "1.0.0".into(),
+                    etag: None,
+                    retrieved_at_unix_ms: 1,
+                    updated_at_unix_ms: 1,
+                },
+                &[ModelCatalogEntry {
+                    model_id: "other-model".into(),
+                    display_name: "Other".into(),
+                    description: None,
+                    sort_order: 1,
+                    is_provider_default: false,
+                }],
+            )
+            .unwrap();
+
+        let selection = persist_model_selection(&store, "other-model").unwrap();
+        assert_eq!(selection.selected_model_id.as_deref(), Some("other-model"));
+        assert_eq!(
+            store
+                .get_provider_profile(PROVIDER_PROFILE_ID)
+                .unwrap()
+                .unwrap()
+                .visible_model_id(),
+            before
+        );
+
+        store.set_fail_model_selection_write(true);
+        assert_eq!(
+            persist_model_selection(&store, "other-model"),
+            Err(PublicError::AgentStorageUnavailable)
+        );
+        assert_eq!(
+            store
+                .get_model_selection(PROVIDER_PROFILE_ID)
+                .unwrap()
+                .selected_model_id
+                .as_deref(),
+            Some("other-model")
+        );
+    }
+
+    #[test]
+    fn clear_selected_default_requires_new_choice() {
+        let dir = tempfile_dir();
+        let store = SqliteStore::open(dir.join("clear-selection.sqlite3")).unwrap();
+        store
+            .replace_catalog_snapshot(
+                PROVIDER_PROFILE_ID,
+                &StoredCatalogState {
+                    credential_generation: 0,
+                    compatibility_revision: "1.0.0".into(),
+                    etag: None,
+                    retrieved_at_unix_ms: 1,
+                    updated_at_unix_ms: 1,
+                },
+                &[ModelCatalogEntry {
+                    model_id: "gpt-5.5".into(),
+                    display_name: "GPT-5.5".into(),
+                    description: None,
+                    sort_order: 1,
+                    is_provider_default: true,
+                }],
+            )
+            .unwrap();
+        persist_model_selection(&store, "gpt-5.5").unwrap();
+        let cleared = clear_selected_default_if_matches(&store, "gpt-5.5").unwrap();
+        assert!(cleared.selected_model_id.is_none());
+        assert!(cleared.requires_selection);
     }
 }

@@ -57,18 +57,25 @@ generation—never the raw account identifier—with retrieval time, ETag, and
 catalog-compatibility revision. A five-minute TTL marks freshness; failures show
 last-known catalog as stale rather than substituting hard-coded or public lists.
 An authenticated success with no usable models is a bounded catalog failure and
-does not erase the last validated snapshot. Connection-status commands remain
-separate from catalog and selected-default commands and events.
+does not erase the last validated snapshot; the refresh command still surfaces
+the bounded error rather than reporting stale success. Catalog retrieval refreshes
+an expired access token under the shared provider gate, and credential-generation
+invalidation fails closed on account change or disconnect. Capability filtering
+excludes tool-only and Responses Lite models without persisting those fields.
+Connection-status commands remain separate from catalog and selected-default
+commands and events.
 
-A profile selected-model default persists independently of connection lifecycle.
-A new unsent Agent session may accept that default or another catalog model; the
-first valid send freezes the chosen provider-profile and model identifiers onto
-the durable session and every later turn. Persisted sessions expose a
-non-editable model label and require a new session to change models. Existing
-`gpt-5.5` provenance is preserved. Model rejection surfaces as
-`model_unavailable` without silent fallback or retry under another model. Tools,
-connectors, filesystem access, autonomous retries, and active-session model
-switching are out of scope for this slice.
+A profile selected-model default persists independently of connection lifecycle
+and of fixed profile display metadata. A new unsent Agent session may accept that
+default or another catalog model; the first valid send freezes the chosen
+provider-profile and model identifiers onto the durable session and every later
+turn. Persisted sessions expose a non-editable model label and require a new
+session to change models. Existing `gpt-5.5` provenance is preserved. Allowlisted
+model rejection surfaces as `model_unavailable`, refreshes or stales the catalog,
+clears a rejected default, and requires a new-session choice without silent
+fallback or retry under another model. Tools, connectors, filesystem access,
+autonomous retries, and active-session model switching are out of scope for this
+slice.
 
 ## Project Persistence
 

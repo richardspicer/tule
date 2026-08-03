@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
 import type { AgentSession, AgentSessionDetail, AgentStreamEvent } from "./platform/agents";
 import { ProjectStorageError, type Project } from "./platform/projects";
+import type { ProviderModelCatalog } from "./platform/provider";
 
 interface NativeCloseRequestedEvent {
   preventDefault: () => void;
@@ -546,6 +547,92 @@ describe("App", () => {
     await waitFor(() => expect(context).toHaveValue(""));
     expect(confirm).toHaveBeenLastCalledWith("Use No project for future messages in this session?");
     expect(setAgentSessionProjectMock).toHaveBeenLastCalledWith(session.id, null);
+  });
+
+  it("blocks Send on a new session without a valid catalog model", async () => {
+    const user = userEvent.setup();
+    getConnectionStatusMock.mockResolvedValue({
+      state: "connected",
+      providerId: "openai-chatgpt-compat",
+      model: "gpt-5.5",
+    });
+    getProviderModelCatalogMock.mockResolvedValue({
+      providerId: "openai-chatgpt-compat",
+      models: [],
+      freshness: "stale",
+      retrievedAtUnixMs: null,
+      compatibilityRevision: null,
+    });
+    getProviderModelSelectionMock.mockResolvedValue({
+      providerId: "openai-chatgpt-compat",
+      selectedModelId: null,
+      requiresSelection: true,
+    });
+
+    render(<App />);
+    const composer = await screen.findByRole("textbox", { name: "Message the Agent" });
+    await user.type(composer, "Question");
+    expect(screen.getByRole("button", { name: "Send" })).toBeDisabled();
+    expect(
+      screen.getByText("Choose a model before sending the first message."),
+    ).toBeInTheDocument();
+    fireEvent.keyDown(composer, { key: "Enter", shiftKey: false });
+    expect(sendAgentMessageMock).not.toHaveBeenCalled();
+  });
+
+  it("reconciles a pending new-session model when the catalog changes", async () => {
+    let emitCatalog: ((catalog: ProviderModelCatalog) => void) | undefined;
+    listenProviderModelCatalogChangedMock.mockImplementation(
+      (handler: (catalog: ProviderModelCatalog) => void) => {
+        emitCatalog = handler;
+        return Promise.resolve(vi.fn());
+      },
+    );
+    getConnectionStatusMock.mockResolvedValue({
+      state: "connected",
+      providerId: "openai-chatgpt-compat",
+      model: "gpt-5.5",
+    });
+    getProviderModelCatalogMock.mockResolvedValue({
+      providerId: "openai-chatgpt-compat",
+      models: [
+        {
+          id: "gpt-5.5",
+          displayName: "GPT-5.5",
+          description: null,
+          isProviderDefault: true,
+        },
+      ],
+      freshness: "current",
+      retrievedAtUnixMs: 1,
+      compatibilityRevision: "1.0.0",
+    });
+
+    render(<App />);
+    expect(await screen.findByRole("option", { name: "GPT-5.5" })).toBeInTheDocument();
+
+    emitCatalog?.({
+      providerId: "openai-chatgpt-compat",
+      models: [
+        {
+          id: "other-model",
+          displayName: "Other",
+          description: null,
+          isProviderDefault: false,
+        },
+      ],
+      freshness: "current",
+      retrievedAtUnixMs: 2,
+      compatibilityRevision: "1.0.0",
+    });
+
+    await waitFor(() => {
+      expect(screen.queryByRole("option", { name: "GPT-5.5" })).not.toBeInTheDocument();
+      expect(
+        screen.getByText("Choose a model before sending the first message."),
+      ).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Send" })).toBeDisabled();
+    });
   });
 
   it("blocks Send until a prospective Project change is committed", async () => {

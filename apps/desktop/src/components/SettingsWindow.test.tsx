@@ -120,6 +120,79 @@ describe("SettingsWindow", () => {
     listenProviderModelSelectionChangedMock.mockResolvedValue(vi.fn());
     listenSettingsNavigateMock.mockResolvedValue(vi.fn());
     cancelChatgptConnectMock.mockResolvedValue(undefined);
+    refreshProviderModelCatalogMock.mockResolvedValue({
+      providerId: "openai-chatgpt-compat",
+      models: [],
+      freshness: "stale",
+      retrievedAtUnixMs: null,
+      compatibilityRevision: null,
+    });
+  });
+
+  it("keeps Refresh models available when connected with an empty catalog", async () => {
+    getConnectionStatusMock.mockResolvedValue({
+      state: "connected",
+      providerId: "openai-chatgpt-compat",
+      model: "gpt-5.5",
+    });
+    refreshProviderModelCatalogMock.mockRejectedValue(new ProviderError("provider_unavailable"));
+    getProviderModelCatalogMock.mockResolvedValue({
+      providerId: "openai-chatgpt-compat",
+      models: [],
+      freshness: "stale",
+      retrievedAtUnixMs: null,
+      compatibilityRevision: null,
+    });
+
+    render(<SettingsWindow />);
+    expect(await screen.findByRole("button", { name: "Refresh models" })).toBeInTheDocument();
+    expect(
+      await screen.findByText(
+        "No usable models are available yet. Refresh to recover the catalog.",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("recovers the catalog after an initial refresh failure", async () => {
+    const user = userEvent.setup();
+    getConnectionStatusMock.mockResolvedValue({
+      state: "connected",
+      providerId: "openai-chatgpt-compat",
+      model: "gpt-5.5",
+    });
+    refreshProviderModelCatalogMock
+      .mockRejectedValueOnce(new ProviderError("provider_unavailable"))
+      .mockResolvedValueOnce({
+        providerId: "openai-chatgpt-compat",
+        models: [
+          {
+            id: "gpt-5.5",
+            displayName: "GPT-5.5",
+            description: null,
+            isProviderDefault: true,
+          },
+        ],
+        freshness: "current",
+        retrievedAtUnixMs: 10,
+        compatibilityRevision: "1.0.0",
+      });
+    getProviderModelCatalogMock.mockResolvedValue({
+      providerId: "openai-chatgpt-compat",
+      models: [],
+      freshness: "stale",
+      retrievedAtUnixMs: null,
+      compatibilityRevision: null,
+    });
+    getProviderModelSelectionMock.mockResolvedValue({
+      providerId: "openai-chatgpt-compat",
+      selectedModelId: null,
+      requiresSelection: true,
+    });
+
+    render(<SettingsWindow />);
+    await user.click(await screen.findByRole("button", { name: "Refresh models" }));
+    expect(await screen.findByLabelText("Default model for new sessions")).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "GPT-5.5" })).toBeInTheDocument();
   });
 
   it("renders Providers and Appearance categories only", async () => {

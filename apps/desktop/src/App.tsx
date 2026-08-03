@@ -129,13 +129,21 @@ function App() {
   const contextProjectId = activeSession?.projectId ?? pendingProjectId;
   const sessionTitle = activeSession?.title ?? "New session";
   const modelLocked = activeSession !== null;
-  const sessionModelId =
-    activeSession?.modelId ?? pendingModelId ?? selection?.selectedModelId ?? null;
+  const catalogModels = catalog?.models ?? [];
+  const catalogHasModel = (modelId: string | null | undefined): modelId is string =>
+    typeof modelId === "string" && catalogModels.some((model) => model.id === modelId);
+  const sessionModelId = modelLocked
+    ? (activeSession?.modelId ?? null)
+    : catalogHasModel(pendingModelId)
+      ? pendingModelId
+      : catalogHasModel(selection?.selectedModelId)
+        ? selection.selectedModelId
+        : null;
   const modelLabel =
-    sessionModelId === null
-      ? "Choose a model"
-      : formatModelLabel(sessionModelId, catalog?.models ?? []);
+    sessionModelId === null ? "Choose a model" : formatModelLabel(sessionModelId, catalogModels);
   const connected = connectionState === "connected";
+  const hasValidNewSessionModel = catalogHasModel(sessionModelId);
+  const newSessionNeedsModel = !modelLocked && !hasValidNewSessionModel;
 
   useEffect(() => {
     let active = true;
@@ -167,10 +175,32 @@ function App() {
   useEffect(() => {
     let active = true;
 
-    getConnectionStatus()
-      .then((status) => {
-        if (active) {
-          setConnectionState(status.state);
+    void Promise.all([getConnectionStatus(), getProviderModelSelection()])
+      .then(async ([status, nextSelection]) => {
+        if (!active) {
+          return;
+        }
+        setConnectionState(status.state);
+        setSelection(nextSelection);
+        try {
+          const nextCatalog = await getProviderModelCatalog();
+          if (!active) {
+            return;
+          }
+          setCatalog(nextCatalog);
+          const selected =
+            nextSelection.selectedModelId !== null &&
+            nextCatalog.models.some((model) => model.id === nextSelection.selectedModelId)
+              ? nextSelection.selectedModelId
+              : null;
+          setPendingModelId((current) => {
+            if (current !== null && nextCatalog.models.some((model) => model.id === current)) {
+              return current;
+            }
+            return selected;
+          });
+        } catch {
+          setPendingModelId(null);
         }
       })
       .catch(() => {
@@ -178,17 +208,6 @@ function App() {
           setConnectionState("unavailable_in_this_build");
         }
       });
-
-    void Promise.all([getProviderModelCatalog(), getProviderModelSelection()])
-      .then(([nextCatalog, nextSelection]) => {
-        if (!active) {
-          return;
-        }
-        setCatalog(nextCatalog);
-        setSelection(nextSelection);
-        setPendingModelId((current) => current ?? nextSelection.selectedModelId);
-      })
-      .catch(() => undefined);
 
     return () => {
       active = false;
@@ -212,6 +231,12 @@ function App() {
 
     void listenProviderModelCatalogChanged((next) => {
       setCatalog(next);
+      setPendingModelId((current) => {
+        if (current !== null && next.models.some((model) => model.id === current)) {
+          return current;
+        }
+        return null;
+      });
     }).then((unlisten) => {
       if (disposed) {
         unlisten();
@@ -222,7 +247,13 @@ function App() {
 
     void listenProviderModelSelectionChanged((next) => {
       setSelection(next);
-      setPendingModelId((current) => current ?? next.selectedModelId);
+      setPendingModelId((current) => {
+        if (next.selectedModelId === null && next.requiresSelection) {
+          // Cleared default (for example after model rejection) requires a new choice.
+          return null;
+        }
+        return current ?? next.selectedModelId;
+      });
     }).then((unlisten) => {
       if (disposed) {
         unlisten();
@@ -524,7 +555,8 @@ function App() {
       sendingRef.current ||
       sessionLoadPendingRef.current ||
       sessionProjectChangePendingRef.current ||
-      draft.trim().length === 0
+      draft.trim().length === 0 ||
+      (!modelLocked && !hasValidNewSessionModel)
     ) {
       return;
     }
@@ -896,10 +928,17 @@ function App() {
               draft={draft}
               connected={connected}
               sending={sending}
-              sendBlocked={sessionLoadPending || sessionProjectChangePending}
+              sendBlocked={
+                sessionLoadPending || sessionProjectChangePending || newSessionNeedsModel
+              }
               cancelRequested={cancelRequested}
               activeTurnId={activeTurnId}
-              errorMessage={agentError}
+              errorMessage={
+                agentError ??
+                (newSessionNeedsModel && connected
+                  ? "Choose a model before sending the first message."
+                  : null)
+              }
               onDraftChange={setDraft}
               onSend={() => void handleSend()}
               onCancel={handleCancel}

@@ -36,6 +36,10 @@ const MIGRATIONS: Migrations<'static> = Migrations::from_slice(MIGRATION_SET);
 /// The single, synchronized SQLite owner used by all desktop repositories.
 pub(crate) struct SqliteStore {
     connection: Mutex<Connection>,
+    #[cfg(test)]
+    fail_catalog_invalidation: std::sync::atomic::AtomicBool,
+    #[cfg(test)]
+    fail_model_selection_write: std::sync::atomic::AtomicBool,
 }
 
 impl SqliteStore {
@@ -51,10 +55,26 @@ impl SqliteStore {
 
         let store = Self {
             connection: Mutex::new(connection),
+            #[cfg(test)]
+            fail_catalog_invalidation: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            fail_model_selection_write: std::sync::atomic::AtomicBool::new(false),
         };
         store.ensure_builtin_provider_profile()?;
         store.ensure_builtin_model_selection()?;
         Ok(store)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_fail_catalog_invalidation(&self, fail: bool) {
+        self.fail_catalog_invalidation
+            .store(fail, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_fail_model_selection_write(&self, fail: bool) {
+        self.fail_model_selection_write
+            .store(fail, std::sync::atomic::Ordering::SeqCst);
     }
 
     pub(super) fn connection(&self) -> Result<MutexGuard<'_, Connection>, SqliteStoreError> {

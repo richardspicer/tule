@@ -22,7 +22,8 @@ use projects::{
 use provider::{
     ConnectionStatus, PROVIDER_MODEL_CATALOG_CHANGED_EVENT, PROVIDER_MODEL_SELECTION_CHANGED_EVENT,
     ProviderModelCatalogResponse, ProviderModelSelectionResponse, PublicError,
-    build_catalog_response, build_selection_response, persist_model_selection,
+    build_catalog_response, build_selection_response, build_stale_catalog_response,
+    persist_model_selection,
 };
 use settings_window::{
     CONNECTION_STATUS_CHANGED_EVENT, SettingsLaunchState, exit_application, open_settings_window,
@@ -88,6 +89,15 @@ fn emit_selection_status(app: &tauri::AppHandle, selection: &ProviderModelSelect
 
 fn emit_model_surfaces(app: &tauri::AppHandle, store: &SqliteStore) {
     if let Ok(catalog) = build_catalog_response(store) {
+        emit_catalog_status(app, &catalog);
+    }
+    if let Ok(selection) = build_selection_response(store) {
+        emit_selection_status(app, &selection);
+    }
+}
+
+fn emit_stale_model_surfaces(app: &tauri::AppHandle, store: &SqliteStore) {
+    if let Ok(catalog) = build_stale_catalog_response(store) {
         emit_catalog_status(app, &catalog);
     }
     if let Ok(selection) = build_selection_response(store) {
@@ -179,13 +189,18 @@ async fn connect_chatgpt(
         .is_ok_and(|status| status.state == provider::ConnectionState::Connected)
         && let Some(adapter) = state.chatgpt()
     {
-        if let Ok(catalog) = adapter
+        match adapter
             .refresh_model_catalog(state.store.as_ref(), true)
             .await
         {
-            emit_catalog_status(&app, &catalog);
+            Ok(catalog) => {
+                emit_catalog_status(&app, &catalog);
+                if let Ok(selection) = build_selection_response(state.store.as_ref()) {
+                    emit_selection_status(&app, &selection);
+                }
+            }
+            Err(_) => emit_stale_model_surfaces(&app, state.store.as_ref()),
         }
-        emit_model_surfaces(&app, state.store.as_ref());
     }
     settled
 }
@@ -227,8 +242,45 @@ async fn disconnect_chatgpt(
 
 #[tauri::command(rename_all = "camelCase")]
 async fn get_provider_model_catalog(
+    app: tauri::AppHandle,
     state: tauri::State<'_, AgentState>,
 ) -> Result<ProviderModelCatalogResponse, PublicError> {
+    if let Some(adapter) = state.chatgpt() {
+        let connected = matches!(
+            adapter
+                .connection_status_with_store(state.store.as_ref())
+                .state,
+            provider::ConnectionState::Connected
+        );
+        if connected
+            && adapter
+                .catalog_needs_refresh(state.store.as_ref())
+                .unwrap_or(true)
+        {
+            match adapter
+                .refresh_model_catalog(state.store.as_ref(), false)
+                .await
+            {
+                Ok(catalog) => {
+                    emit_catalog_status(&app, &catalog);
+                    if let Ok(selection) = build_selection_response(state.store.as_ref()) {
+                        emit_selection_status(&app, &selection);
+                    }
+                    return Ok(catalog);
+                }
+                Err(error) => {
+                    emit_stale_model_surfaces(&app, state.store.as_ref());
+                    if let Ok(stale) = build_stale_catalog_response(state.store.as_ref())
+                        && !stale.models.is_empty()
+                    {
+                        // Last-known remains visible; recovery stays available via refresh.
+                        return Ok(stale);
+                    }
+                    return Err(error);
+                }
+            }
+        }
+    }
     let store = StdArc::clone(&state.store);
     tauri::async_runtime::spawn_blocking(move || build_catalog_response(store.as_ref()))
         .await
@@ -241,14 +293,22 @@ async fn refresh_provider_model_catalog(
     state: tauri::State<'_, AgentState>,
 ) -> Result<ProviderModelCatalogResponse, PublicError> {
     let adapter = state.chatgpt().ok_or(PublicError::ProviderUnavailable)?;
-    let catalog = adapter
+    match adapter
         .refresh_model_catalog(state.store.as_ref(), true)
-        .await?;
-    emit_catalog_status(&app, &catalog);
-    if let Ok(selection) = build_selection_response(state.store.as_ref()) {
-        emit_selection_status(&app, &selection);
+        .await
+    {
+        Ok(catalog) => {
+            emit_catalog_status(&app, &catalog);
+            if let Ok(selection) = build_selection_response(state.store.as_ref()) {
+                emit_selection_status(&app, &selection);
+            }
+            Ok(catalog)
+        }
+        Err(error) => {
+            emit_stale_model_surfaces(&app, state.store.as_ref());
+            Err(error)
+        }
     }
-    Ok(catalog)
 }
 
 #[tauri::command(rename_all = "camelCase")]

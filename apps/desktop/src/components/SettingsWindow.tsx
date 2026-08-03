@@ -92,10 +92,30 @@ export function SettingsWindow() {
       }
     });
 
-    void getConnectionStatus()
-      .then((status) => {
-        if (active) {
-          setConnectionState(status.state);
+    void Promise.all([getConnectionStatus(), getProviderModelSelection()])
+      .then(async ([status, nextSelection]) => {
+        if (!active) {
+          return;
+        }
+        setConnectionState(status.state);
+        setSelection(nextSelection);
+        try {
+          // Connected installs refresh missing/stale catalogs via get; force
+          // refresh recovers from an initial empty failure path.
+          const nextCatalog =
+            status.state === "connected"
+              ? await refreshProviderModelCatalog().catch(async (error: unknown) => {
+                  if (active) {
+                    setErrorMessage(getSafeAgentErrorMessage(error));
+                  }
+                  return getProviderModelCatalog();
+                })
+              : await getProviderModelCatalog();
+          if (active) {
+            setCatalog(nextCatalog);
+          }
+        } catch {
+          /* bounded load failure leaves empty catalog; Refresh remains available */
         }
       })
       .catch(() => {
@@ -103,15 +123,6 @@ export function SettingsWindow() {
           setConnectionState("unavailable_in_this_build");
         }
       });
-
-    void Promise.all([getProviderModelCatalog(), getProviderModelSelection()])
-      .then(([nextCatalog, nextSelection]) => {
-        if (active) {
-          setCatalog(nextCatalog);
-          setSelection(nextSelection);
-        }
-      })
-      .catch(() => undefined);
 
     return () => {
       active = false;
@@ -140,6 +151,26 @@ export function SettingsWindow() {
         setStatusMessage((current) =>
           current === "Cancelling browser connection…" ? null : current,
         );
+      }
+      if (status.state === "connected") {
+        void refreshProviderModelCatalog()
+          .then(async (nextCatalog) => {
+            setCatalog(nextCatalog);
+            setSelection(await getProviderModelSelection());
+          })
+          .catch(async (error: unknown) => {
+            setErrorMessage(getSafeAgentErrorMessage(error));
+            const [nextCatalog, nextSelection] = await Promise.all([
+              getProviderModelCatalog().catch(() => null),
+              getProviderModelSelection().catch(() => null),
+            ]);
+            if (nextCatalog !== null) {
+              setCatalog(nextCatalog);
+            }
+            if (nextSelection !== null) {
+              setSelection(nextSelection);
+            }
+          });
       }
     }).then((unlisten) => {
       if (disposed) {
@@ -285,6 +316,16 @@ export function SettingsWindow() {
       setSelection(await getProviderModelSelection());
     } catch (error: unknown) {
       setErrorMessage(getSafeAgentErrorMessage(error));
+      const [nextCatalog, nextSelection] = await Promise.all([
+        getProviderModelCatalog().catch(() => null),
+        getProviderModelSelection().catch(() => null),
+      ]);
+      if (nextCatalog !== null) {
+        setCatalog(nextCatalog);
+      }
+      if (nextSelection !== null) {
+        setSelection(nextSelection);
+      }
     } finally {
       setBusy(false);
     }
@@ -317,6 +358,7 @@ export function SettingsWindow() {
   const canConnect = connectionState === "disconnected" || connectionState === "reconnect_required";
   const canDisconnect = connectionState === "connected";
   const canSelectModel = connectionState === "connected" && (catalog?.models.length ?? 0) > 0;
+  const canRefreshModels = connectionState === "connected";
 
   return (
     <div className="settings-window" aria-labelledby={titleId}>
@@ -376,7 +418,7 @@ export function SettingsWindow() {
                   disabled={busy}
                   onChange={(event) => void handleDefaultModelChange(event.currentTarget.value)}
                 >
-                  {selection?.requiresSelection ? (
+                  {selection?.requiresSelection || selectedModelId === "" ? (
                     <option value="" disabled>
                       Choose a model
                     </option>
@@ -387,15 +429,21 @@ export function SettingsWindow() {
                     </option>
                   ))}
                 </select>
-                <button
-                  className="secondary-action"
-                  type="button"
-                  disabled={busy}
-                  onClick={() => void handleRefreshCatalog()}
-                >
-                  Refresh models
-                </button>
               </>
+            ) : canRefreshModels ? (
+              <p className="settings-disclosure">
+                No usable models are available yet. Refresh to recover the catalog.
+              </p>
+            ) : null}
+            {canRefreshModels ? (
+              <button
+                className="secondary-action"
+                type="button"
+                disabled={busy}
+                onClick={() => void handleRefreshCatalog()}
+              >
+                Refresh models
+              </button>
             ) : null}
             {connecting ? (
               <button

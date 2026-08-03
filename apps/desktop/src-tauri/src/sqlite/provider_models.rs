@@ -64,6 +64,13 @@ impl SqliteStore {
         selected_model_id: Option<&str>,
         updated_at_unix_ms: i64,
     ) -> Result<(), SqliteStoreError> {
+        #[cfg(test)]
+        if self
+            .fail_model_selection_write
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(SqliteStoreError::Database(rusqlite::Error::InvalidQuery));
+        }
         self.connection()?
             .execute(
                 "INSERT INTO provider_model_selection (
@@ -203,6 +210,13 @@ impl SqliteStore {
         provider_profile_id: &str,
         updated_at_unix_ms: i64,
     ) -> Result<i64, SqliteStoreError> {
+        #[cfg(test)]
+        if self
+            .fail_catalog_invalidation
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(SqliteStoreError::Database(rusqlite::Error::InvalidQuery));
+        }
         let mut connection = self.connection()?;
         let transaction = connection
             .transaction()

@@ -4,6 +4,7 @@ import {
   loadThemePreference,
   parseThemePreference,
   saveThemePreference,
+  ThemePersistenceError,
 } from "./theme";
 
 const { invokeMock } = vi.hoisted(() => ({
@@ -48,5 +49,11 @@ describe("theme preference facade", () => {
     await expect(saveThemePreference("dark")).resolves.toBe("dark");
     expect(invokeMock).toHaveBeenCalledWith("set_appearance_preference", { value: "dark" });
     expect(document.documentElement.dataset.theme).toBe("dark");
+  });
+
+  it("applies appearance immediately but reports persistence failure safely", async () => {
+    invokeMock.mockRejectedValueOnce(new Error("preference_storage_unavailable"));
+    await expect(saveThemePreference("light")).rejects.toBeInstanceOf(ThemePersistenceError);
+    expect(document.documentElement.dataset.theme).toBe("light");
   });
 });

@@ -20,7 +20,10 @@ use projects::{
     ProjectStorageState, create_project, list_projects, open_project, update_project_instructions,
 };
 use provider::{ConnectionStatus, PublicError};
-use settings_window::{CONNECTION_STATUS_CHANGED_EVENT, exit_application, open_settings_window};
+use settings_window::{
+    CONNECTION_STATUS_CHANGED_EVENT, SettingsLaunchState, exit_application, open_settings_window,
+    take_settings_launch_category,
+};
 use sqlite::{DATABASE_FILENAME, SqliteStore};
 use std::sync::Arc as StdArc;
 use tauri::{Emitter, Manager};
@@ -159,6 +162,7 @@ pub fn run() {
             if let Some(main) = app.get_webview_window("main") {
                 let _ = main.set_title("");
             }
+            app.manage(SettingsLaunchState::default());
 
             let Some(store) = initialize_store(app) else {
                 app.manage(ProjectStorageState::unavailable());
@@ -194,6 +198,7 @@ pub fn run() {
             get_appearance_preference,
             set_appearance_preference,
             open_settings_window,
+            take_settings_launch_category,
             exit_application
         ])
         .run(tauri::generate_context!())

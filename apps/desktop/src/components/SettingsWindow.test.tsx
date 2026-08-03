@@ -14,6 +14,7 @@ const {
   listenSettingsNavigateMock,
   loadThemePreferenceMock,
   saveThemePreferenceMock,
+  takeSettingsLaunchCategoryMock,
 } = vi.hoisted(() => ({
   cancelChatgptConnectMock: vi.fn(),
   connectChatgptMock: vi.fn(),
@@ -24,6 +25,7 @@ const {
   listenSettingsNavigateMock: vi.fn(),
   loadThemePreferenceMock: vi.fn(),
   saveThemePreferenceMock: vi.fn(),
+  takeSettingsLaunchCategoryMock: vi.fn(),
 }));
 
 vi.mock("../platform/provider", async (importOriginal) => {
@@ -40,6 +42,7 @@ vi.mock("../platform/provider", async (importOriginal) => {
 vi.mock("../platform/settings", () => ({
   listenConnectionStatusChanged: listenConnectionStatusChangedMock,
   listenSettingsNavigate: listenSettingsNavigateMock,
+  takeSettingsLaunchCategory: takeSettingsLaunchCategoryMock,
 }));
 
 vi.mock("../theme", async (importOriginal) => {
@@ -63,6 +66,7 @@ describe("SettingsWindow", () => {
     listenSettingsNavigateMock.mockReset();
     loadThemePreferenceMock.mockReset();
     saveThemePreferenceMock.mockReset();
+    takeSettingsLaunchCategoryMock.mockReset();
 
     getConnectionStatusMock.mockResolvedValue({
       state: "disconnected",
@@ -73,6 +77,7 @@ describe("SettingsWindow", () => {
     saveThemePreferenceMock.mockImplementation((theme: "system" | "light" | "dark") =>
       Promise.resolve(theme),
     );
+    takeSettingsLaunchCategoryMock.mockResolvedValue(null);
     listenAppearanceChangedMock.mockResolvedValue(vi.fn());
     listenConnectionStatusChangedMock.mockResolvedValue(vi.fn());
     listenSettingsNavigateMock.mockResolvedValue(vi.fn());

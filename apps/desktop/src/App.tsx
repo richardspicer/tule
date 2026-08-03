@@ -715,6 +715,12 @@ function App() {
             handleManageProjects();
             return;
           case "exit":
+            if (
+              dirtyProjectInstructionsIdRef.current !== null &&
+              !window.confirm(closeWithUnsavedInstructionsMessage)
+            ) {
+              return;
+            }
             void exitApplication();
             return;
           case "open-settings":

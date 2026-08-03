@@ -9,6 +9,7 @@ import {
 import {
   listenConnectionStatusChanged,
   listenSettingsNavigate,
+  takeSettingsLaunchCategory,
   type SettingsCategory,
 } from "../platform/settings";
 import { getAgentErrorCode, getSafeAgentErrorMessage } from "../platform/agents";
@@ -17,6 +18,7 @@ import {
   listenAppearanceChanged,
   loadThemePreference,
   saveThemePreference,
+  ThemePersistenceError,
   type ThemePreference,
 } from "../theme";
 
@@ -45,10 +47,19 @@ export function SettingsWindow() {
   const [cancelRequested, setCancelRequested] = useState(false);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [appearanceError, setAppearanceError] = useState<string | null>(null);
   const displayModel = model === "gpt-5.5" ? "GPT-5.5" : model;
 
   useEffect(() => {
     let active = true;
+
+    void takeSettingsLaunchCategory()
+      .then((launchCategory) => {
+        if (active && launchCategory !== null) {
+          setCategory(launchCategory);
+        }
+      })
+      .catch(() => undefined);
 
     void loadThemePreference().then((preference) => {
       if (active) {
@@ -186,7 +197,14 @@ export function SettingsWindow() {
   async function handleThemeChange(next: ThemePreference) {
     setTheme(next);
     applyThemePreference(next);
-    await saveThemePreference(next);
+    setAppearanceError(null);
+    try {
+      await saveThemePreference(next);
+    } catch (error: unknown) {
+      setAppearanceError(
+        error instanceof ThemePersistenceError ? error.message : "Appearance could not be saved.",
+      );
+    }
   }
 
   const connecting = connectionState === "connecting";
@@ -303,6 +321,11 @@ export function SettingsWindow() {
               <option value="light">Light</option>
               <option value="dark">Dark</option>
             </select>
+            {appearanceError === null ? null : (
+              <p className="field-error" role="alert">
+                {appearanceError}
+              </p>
+            )}
           </section>
         )}
       </div>

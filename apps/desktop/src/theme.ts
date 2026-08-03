@@ -31,15 +31,20 @@ export async function loadThemePreference(): Promise<ThemePreference> {
   }
 }
 
+export class ThemePersistenceError extends Error {
+  constructor() {
+    super("Appearance could not be saved.");
+    this.name = "ThemePersistenceError";
+  }
+}
+
 export async function saveThemePreference(theme: ThemePreference): Promise<ThemePreference> {
+  applyThemePreference(theme);
   try {
     const response: unknown = await invoke("set_appearance_preference", { value: theme });
-    const resolved = parseThemePreference(response);
-    applyThemePreference(resolved);
-    return resolved;
+    return parseThemePreference(response);
   } catch {
-    applyThemePreference(theme);
-    return theme;
+    throw new ThemePersistenceError();
   }
 }
 

@@ -35,6 +35,12 @@ impl AppearancePreference {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum PreferenceCommandError {
+    PreferenceStorageUnavailable,
+}
+
 pub(crate) enum DesktopPreferenceState {
     Ready(Arc<SqliteStore>),
     Unavailable,
@@ -72,17 +78,22 @@ pub(crate) fn set_appearance_preference(
     app: AppHandle,
     state: State<'_, DesktopPreferenceState>,
     value: AppearancePreference,
-) -> AppearancePreference {
-    if let Some(store) = state.store() {
-        let _ = store.set_appearance_preference(value);
-    }
+) -> Result<AppearancePreference, PreferenceCommandError> {
+    let Some(store) = state.store() else {
+        let _ = app.emit(APPEARANCE_CHANGED_EVENT, value);
+        return Err(PreferenceCommandError::PreferenceStorageUnavailable);
+    };
+
+    store
+        .set_appearance_preference(value)
+        .map_err(|_| PreferenceCommandError::PreferenceStorageUnavailable)?;
     let _ = app.emit(APPEARANCE_CHANGED_EVENT, value);
-    value
+    Ok(value)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::AppearancePreference;
+    use super::{AppearancePreference, PreferenceCommandError};
 
     #[test]
     fn invalid_appearance_values_resolve_to_system() {
@@ -112,5 +123,12 @@ mod tests {
     fn appearance_serializes_as_camel_case_enum_strings() {
         let json = serde_json::to_value(AppearancePreference::Dark).unwrap();
         assert_eq!(json, serde_json::json!("dark"));
+    }
+
+    #[test]
+    fn preference_storage_error_is_bounded() {
+        let json =
+            serde_json::to_value(PreferenceCommandError::PreferenceStorageUnavailable).unwrap();
+        assert_eq!(json, serde_json::json!("preference_storage_unavailable"));
     }
 }

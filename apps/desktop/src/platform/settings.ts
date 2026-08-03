@@ -16,6 +16,14 @@ export async function openSettingsWindow(category?: SettingsCategory): Promise<v
   await invoke("open_settings_window", { category: category ?? null });
 }
 
+export async function takeSettingsLaunchCategory(): Promise<SettingsCategory | null> {
+  const response: unknown = await invoke("take_settings_launch_category");
+  if (response === "connections" || response === "appearance") {
+    return response;
+  }
+  return null;
+}
+
 export async function exitApplication(): Promise<void> {
   await invoke("exit_application");
 }

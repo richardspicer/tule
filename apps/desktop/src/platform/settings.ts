@@ -18,7 +18,7 @@ export async function openSettingsWindow(category?: SettingsCategory): Promise<v
 
 export async function takeSettingsLaunchCategory(): Promise<SettingsCategory | null> {
   const response: unknown = await invoke("take_settings_launch_category");
-  if (response === "connections" || response === "appearance") {
+  if (response === "providers" || response === "appearance") {
     return response;
   }
   return null;
@@ -41,7 +41,7 @@ export async function listenSettingsNavigate(
   onNavigate: (category: SettingsCategory) => void,
 ): Promise<UnlistenFn> {
   return listen<unknown>(settingsNavigateEvent, (event) => {
-    if (event.payload === "connections" || event.payload === "appearance") {
+    if (event.payload === "providers" || event.payload === "appearance") {
       onNavigate(event.payload);
     }
   });

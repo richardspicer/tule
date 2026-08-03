@@ -241,7 +241,7 @@ describe("App", () => {
     expect(openSettingsWindowMock).toHaveBeenCalledTimes(2);
 
     await user.click(screen.getByRole("button", { name: "Open Settings" }));
-    expect(openSettingsWindowMock).toHaveBeenCalledWith("connections");
+    expect(openSettingsWindowMock).toHaveBeenCalledWith("providers");
   });
 
   it("exposes only implemented application menu groups", async () => {
@@ -613,7 +613,7 @@ describe("App", () => {
 
     await waitFor(() => expect(syncConnectionStatusMock).toHaveBeenCalled());
     await user.click(screen.getByRole("button", { name: "Open Settings" }));
-    expect(openSettingsWindowMock).toHaveBeenCalledWith("connections");
+    expect(openSettingsWindowMock).toHaveBeenCalledWith("providers");
   });
 
   it("queues an immediate cancel until the native Started event supplies the turn ID", async () => {

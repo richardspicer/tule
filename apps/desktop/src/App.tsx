@@ -732,8 +732,8 @@ function App() {
           case "open-settings":
             void openSettingsWindow();
             return;
-          case "open-settings-connections":
-            void openSettingsWindow("connections");
+          case "open-settings-providers":
+            void openSettingsWindow("providers");
             return;
           default:
             return;
@@ -845,7 +845,7 @@ function App() {
               onSend={() => void handleSend()}
               onCancel={handleCancel}
               onProjectChange={(projectId) => void handleChangePersistedProject(projectId)}
-              onOpenConnectionsSettings={() => void openSettingsWindow("connections")}
+              onOpenProvidersSettings={() => void openSettingsWindow("providers")}
             />
           )}
         </main>

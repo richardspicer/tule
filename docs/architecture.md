@@ -90,13 +90,14 @@ same frontend package and branch on the native window label.
 
 Settings opens or focuses through the typed `open_settings_window` command.
 Closing Settings hides the existing window instead of exiting the application.
-Optional category payloads (`connections` or `appearance`) travel on the
+Optional category payloads (`providers` or `appearance`) travel on the
 `settings-navigate` event so contextual deep links share one Settings
-implementation. Appearance updates emit `appearance-changed`; authoritative
-non-secret connection status emits `connection-status-changed`. Event payloads
-contain only typed public values—never credentials, authorization URLs or codes,
-tokens, account identifiers, raw provider responses, SQLite paths, or internal
-errors.
+implementation. A normal reopen after Settings was hidden starts on Providers;
+refocusing a visible Settings window preserves its selected category.
+Appearance updates emit `appearance-changed`; authoritative non-secret
+connection status emits `connection-status-changed`. Event payloads contain only
+typed public values—never credentials, authorization URLs or codes, tokens,
+account identifiers, raw provider responses, SQLite paths, or internal errors.
 
 Appearance preference persistence lives in the desktop SQLite owner behind an
 explicit `appearance_preference` table and the typed

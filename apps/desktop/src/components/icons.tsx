@@ -20,13 +20,28 @@ export function SettingsIcon({ className }: IconProps) {
   return (
     <svg className={className} viewBox="0 0 16 16" width="16" height="16" aria-hidden="true">
       <path
-        d="M6.5 2.5h3l.4 1.4a4.5 4.5 0 0 1 1.1.6l1.4-.4 1.5 1.5-.4 1.4c.2.3.4.7.6 1.1l1.4.4v3l-1.4.4a4.5 4.5 0 0 1-.6 1.1l.4 1.4-1.5 1.5-1.4-.4a4.5 4.5 0 0 1-1.1.6l-.4 1.4h-3l-.4-1.4a4.5 4.5 0 0 1-1.1-.6l-1.4.4-1.5-1.5.4-1.4a4.5 4.5 0 0 1-.6-1.1L2.5 9.5v-3l1.4-.4c.2-.4.4-.8.6-1.1l-.4-1.4 1.5-1.5 1.4.4c.3-.2.7-.4 1.1-.6L6.5 2.5Z"
+        d="M6.35 1.75h3.3l.35 1.7c.42.14.8.34 1.14.6l1.55-.55 1.65 1.65-.55 1.55c.26.34.46.72.6 1.14l1.7.35v3.3l-1.7.35c-.14.42-.34.8-.6 1.14l.55 1.55-1.65 1.65-1.55-.55a4.6 4.6 0 0 1-1.14.6l-.35 1.7h-3.3l-.35-1.7a4.6 4.6 0 0 1-1.14-.6l-1.55.55-1.65-1.65.55-1.55a4.6 4.6 0 0 1-.6-1.14l-1.7-.35v-3.3l1.7-.35c.14-.42.34-.8.6-1.14l-.55-1.55L4.01 3.5l1.55.55c.34-.26.72-.46 1.14-.6l.35-1.7Z"
         fill="none"
         stroke="currentColor"
-        strokeWidth="1.2"
+        strokeWidth="1.5"
         strokeLinejoin="round"
       />
-      <circle cx="8" cy="8" r="2" fill="none" stroke="currentColor" strokeWidth="1.2" />
+      <circle cx="8" cy="8" r="2" fill="none" stroke="currentColor" strokeWidth="1.5" />
+    </svg>
+  );
+}
+
+export function JumpToLatestIcon({ className }: IconProps) {
+  return (
+    <svg className={className} viewBox="0 0 16 16" width="16" height="16" aria-hidden="true">
+      <path
+        d="M8 3.25v8.5M4.75 8.5 8 11.75 11.25 8.5"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.5"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
     </svg>
   );
 }

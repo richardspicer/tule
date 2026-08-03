@@ -10,8 +10,8 @@ describe("application command routing", () => {
   it("routes non-edit commands through one dispatcher", async () => {
     const handler = vi.fn();
     const dispatch = createCommandDispatcher(handler);
-    await dispatch("open-settings-connections");
-    expect(handler).toHaveBeenCalledWith("open-settings-connections");
+    await dispatch("open-settings-providers");
+    expect(handler).toHaveBeenCalledWith("open-settings-providers");
   });
 
   it("keeps edit commands focus-aware and truthful", () => {

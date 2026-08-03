@@ -34,8 +34,8 @@ const baseTurn: AgentTurn = {
 };
 
 describe("AgentWorkspace", () => {
-  it("blocks composer when disconnected and deep-links Connections settings", () => {
-    const onOpenConnectionsSettings = vi.fn();
+  it("blocks composer when disconnected and deep-links Providers settings", () => {
+    const onOpenProvidersSettings = vi.fn();
     render(
       <AgentWorkspace
         title="New session"
@@ -54,7 +54,7 @@ describe("AgentWorkspace", () => {
         onSend={vi.fn()}
         onCancel={vi.fn()}
         onProjectChange={vi.fn()}
-        onOpenConnectionsSettings={onOpenConnectionsSettings}
+        onOpenProvidersSettings={onOpenProvidersSettings}
       />,
     );
 
@@ -63,7 +63,7 @@ describe("AgentWorkspace", () => {
       screen.getByText("Connect ChatGPT in Settings to message the Agent."),
     ).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Open Settings" }));
-    expect(onOpenConnectionsSettings).toHaveBeenCalled();
+    expect(onOpenProvidersSettings).toHaveBeenCalled();
   });
 
   it("hides the empty-session wordmark once a turn exists", () => {
@@ -85,7 +85,7 @@ describe("AgentWorkspace", () => {
         onSend={vi.fn()}
         onCancel={vi.fn()}
         onProjectChange={vi.fn()}
-        onOpenConnectionsSettings={vi.fn()}
+        onOpenProvidersSettings={vi.fn()}
       />,
     );
 
@@ -113,7 +113,7 @@ describe("AgentWorkspace", () => {
         onSend={onSend}
         onCancel={onCancel}
         onProjectChange={vi.fn()}
-        onOpenConnectionsSettings={vi.fn()}
+        onOpenProvidersSettings={vi.fn()}
       />,
     );
 
@@ -141,7 +141,7 @@ describe("AgentWorkspace", () => {
         onSend={onSend}
         onCancel={onCancel}
         onProjectChange={vi.fn()}
-        onOpenConnectionsSettings={vi.fn()}
+        onOpenProvidersSettings={vi.fn()}
       />,
     );
 
@@ -172,7 +172,7 @@ describe("AgentWorkspace", () => {
         onSend={vi.fn()}
         onCancel={vi.fn()}
         onProjectChange={vi.fn()}
-        onOpenConnectionsSettings={vi.fn()}
+        onOpenProvidersSettings={vi.fn()}
       />,
     );
 
@@ -203,7 +203,7 @@ describe("AgentWorkspace", () => {
         onSend={vi.fn()}
         onCancel={vi.fn()}
         onProjectChange={vi.fn()}
-        onOpenConnectionsSettings={vi.fn()}
+        onOpenProvidersSettings={vi.fn()}
       />,
     );
 
@@ -231,7 +231,7 @@ describe("AgentWorkspace", () => {
         onSend={vi.fn()}
         onCancel={vi.fn()}
         onProjectChange={vi.fn()}
-        onOpenConnectionsSettings={vi.fn()}
+        onOpenProvidersSettings={vi.fn()}
       />,
     );
     expect(metrics.scrollTop).toBe(1200);
@@ -239,7 +239,11 @@ describe("AgentWorkspace", () => {
     // Deliberate upward scroll pauses follow and exposes Jump to latest.
     metrics.scrollTop = 100;
     fireEvent.scroll(transcript!);
-    expect(screen.getByRole("button", { name: "Jump to latest" })).toBeInTheDocument();
+    const jump = screen.getByRole("button", { name: "Jump to latest" });
+    expect(jump).toBeInTheDocument();
+    expect(jump.textContent?.trim()).toBe("");
+    fireEvent.mouseEnter(jump.parentElement!);
+    expect(screen.getByRole("tooltip")).toHaveTextContent("Jump to latest");
 
     metrics.scrollHeight = 1400;
     rerender(
@@ -260,7 +264,7 @@ describe("AgentWorkspace", () => {
         onSend={vi.fn()}
         onCancel={vi.fn()}
         onProjectChange={vi.fn()}
-        onOpenConnectionsSettings={vi.fn()}
+        onOpenProvidersSettings={vi.fn()}
       />,
     );
     expect(metrics.scrollTop).toBe(100);
@@ -293,7 +297,7 @@ describe("AgentWorkspace", () => {
         onSend={vi.fn()}
         onCancel={vi.fn()}
         onProjectChange={vi.fn()}
-        onOpenConnectionsSettings={vi.fn()}
+        onOpenProvidersSettings={vi.fn()}
       />,
     );
     expect(metrics.scrollTop).toBe(220);
@@ -332,7 +336,7 @@ describe("AgentWorkspace", () => {
         onSend={vi.fn()}
         onCancel={vi.fn()}
         onProjectChange={onProjectChange}
-        onOpenConnectionsSettings={vi.fn()}
+        onOpenProvidersSettings={vi.fn()}
       />,
     );
 

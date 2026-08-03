@@ -9,9 +9,9 @@ export type AppCommandId =
   | "edit-paste"
   | "edit-select-all"
   | "open-settings"
-  | "open-settings-connections";
+  | "open-settings-providers";
 
-export type SettingsCategory = "connections" | "appearance";
+export type SettingsCategory = "providers" | "appearance";
 
 export type AppCommandHandler = (command: AppCommandId) => void | Promise<void>;
 

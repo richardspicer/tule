@@ -9,6 +9,8 @@ import {
   type UIEvent,
 } from "react";
 import { getSafeAgentErrorMessageForCode, type AgentTurn } from "../platform/agents";
+import { JumpToLatestIcon } from "./icons";
+import { Tooltip } from "./Tooltip";
 import { TuleWordmark } from "./TuleWordmark";
 
 /** Compact initial composer height in CSS pixels. */
@@ -38,7 +40,7 @@ interface AgentWorkspaceProps {
   onSend: () => void;
   onCancel: () => void;
   onProjectChange: (projectId: string | null) => void;
-  onOpenConnectionsSettings: () => void;
+  onOpenProvidersSettings: () => void;
 }
 
 function turnStateLabel(state: string): string | null {
@@ -78,7 +80,7 @@ export function AgentWorkspace({
   onSend,
   onCancel,
   onProjectChange,
-  onOpenConnectionsSettings,
+  onOpenProvidersSettings,
 }: AgentWorkspaceProps) {
   const titleId = useId();
   const transcriptRef = useRef<HTMLDivElement>(null);
@@ -242,9 +244,18 @@ export function AgentWorkspace({
           </div>
         </div>
         {showJumpToLatest ? (
-          <button className="jump-to-latest" type="button" onClick={jumpToLatest}>
-            Jump to latest
-          </button>
+          <div className="jump-to-latest">
+            <Tooltip label="Jump to latest" align="end">
+              <button
+                className="icon-button jump-to-latest-button"
+                type="button"
+                aria-label="Jump to latest"
+                onClick={jumpToLatest}
+              >
+                <JumpToLatestIcon />
+              </button>
+            </Tooltip>
+          </div>
         ) : null}
       </div>
 
@@ -293,11 +304,7 @@ export function AgentWorkspace({
           ) : (
             <div className="composer-unavailable">
               <p>Connect ChatGPT in Settings to message the Agent.</p>
-              <button
-                className="secondary-action"
-                type="button"
-                onClick={onOpenConnectionsSettings}
-              >
+              <button className="secondary-action" type="button" onClick={onOpenProvidersSettings}>
                 Open Settings
               </button>
             </div>

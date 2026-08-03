@@ -84,11 +84,15 @@ describe("SettingsWindow", () => {
     cancelChatgptConnectMock.mockResolvedValue(undefined);
   });
 
-  it("renders Connections and Appearance categories only", async () => {
+  it("renders Providers and Appearance categories only", async () => {
     render(<SettingsWindow />);
     const nav = await screen.findByRole("navigation", { name: "Settings categories" });
-    expect(within(nav).getByRole("button", { name: "Connections" })).toBeInTheDocument();
+    expect(within(nav).getByRole("button", { name: "Providers" })).toBeInTheDocument();
     expect(within(nav).getByRole("button", { name: "Appearance" })).toBeInTheDocument();
+    expect(within(nav).getByRole("button", { name: "Providers" })).toHaveAttribute(
+      "aria-current",
+      "page",
+    );
     expect(screen.queryByRole("button", { name: "Close" })).not.toBeInTheDocument();
     expect(
       screen.getByText(
@@ -97,10 +101,39 @@ describe("SettingsWindow", () => {
     ).toBeInTheDocument();
   });
 
-  it("selects Connections from a settings navigate event", async () => {
-    let navigate: ((category: "connections" | "appearance") => void) | undefined;
+  it("starts on Providers for a normal launch and follows reopen navigation", async () => {
+    let navigate: ((category: "providers" | "appearance") => void) | undefined;
     listenSettingsNavigateMock.mockImplementation(
-      (handler: (category: "connections" | "appearance") => void) => {
+      (handler: (category: "providers" | "appearance") => void) => {
+        navigate = handler;
+        return Promise.resolve(vi.fn());
+      },
+    );
+
+    const user = userEvent.setup();
+    render(<SettingsWindow />);
+    const nav = await screen.findByRole("navigation", { name: "Settings categories" });
+    expect(within(nav).getByRole("button", { name: "Providers" })).toHaveAttribute(
+      "aria-current",
+      "page",
+    );
+
+    await user.click(within(nav).getByRole("button", { name: "Appearance" }));
+    expect(screen.getByRole("combobox", { name: "Appearance" })).toBeInTheDocument();
+
+    // Reopen-after-hidden semantics emit Providers.
+    navigate?.("providers");
+    expect(await screen.findByRole("button", { name: "Connect in browser" })).toBeInTheDocument();
+    expect(within(nav).getByRole("button", { name: "Providers" })).toHaveAttribute(
+      "aria-current",
+      "page",
+    );
+  });
+
+  it("selects Providers from a contextual settings navigate event", async () => {
+    let navigate: ((category: "providers" | "appearance") => void) | undefined;
+    listenSettingsNavigateMock.mockImplementation(
+      (handler: (category: "providers" | "appearance") => void) => {
         navigate = handler;
         return Promise.resolve(vi.fn());
       },
@@ -112,8 +145,16 @@ describe("SettingsWindow", () => {
     await user.click(within(nav).getByRole("button", { name: "Appearance" }));
     expect(screen.getByRole("combobox", { name: "Appearance" })).toBeInTheDocument();
 
-    navigate?.("connections");
+    navigate?.("providers");
     expect(await screen.findByRole("button", { name: "Connect in browser" })).toBeInTheDocument();
+  });
+
+  it("honors an Appearance launch category without changing Connect labeling", async () => {
+    takeSettingsLaunchCategoryMock.mockResolvedValue("appearance");
+    render(<SettingsWindow />);
+    expect(await screen.findByRole("combobox", { name: "Appearance" })).toBeInTheDocument();
+    const nav = screen.getByRole("navigation", { name: "Settings categories" });
+    expect(within(nav).getByRole("button", { name: "Providers" })).toBeInTheDocument();
   });
 
   it("cancels browser connection and reports the safe result", async () => {
@@ -137,7 +178,7 @@ describe("SettingsWindow", () => {
     expect(await screen.findByText("Browser connection cancelled.")).toBeInTheDocument();
   });
 
-  it("persists appearance through the native facade", async () => {
+  it("persists appearance through the typed preference path", async () => {
     const user = userEvent.setup();
     loadThemePreferenceMock.mockResolvedValue("dark");
     render(<SettingsWindow />);

@@ -483,14 +483,13 @@ textarea:focus-visible {
 
 .jump-to-latest {
   position: absolute;
-  right: 16px;
+  right: 10px;
   bottom: 12px;
-  min-height: var(--control-min);
-  border: 1px solid var(--divider);
-  border-radius: var(--radius);
+  z-index: 1;
+}
+
+.jump-to-latest-button {
   background: var(--panel);
-  padding: 0 12px;
-  cursor: pointer;
 }
 
 .workspace-error,

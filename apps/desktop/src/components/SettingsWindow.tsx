@@ -39,7 +39,7 @@ function connectionLabel(state: ConnectionState): string {
 
 export function SettingsWindow() {
   const titleId = useId();
-  const [category, setCategory] = useState<SettingsCategory>("connections");
+  const [category, setCategory] = useState<SettingsCategory>("providers");
   const [theme, setTheme] = useState<ThemePreference>("system");
   const [connectionState, setConnectionState] = useState<ConnectionState>("disconnected");
   const [model, setModel] = useState("gpt-5.5");
@@ -218,12 +218,12 @@ export function SettingsWindow() {
       </h1>
       <nav className="settings-nav" aria-label="Settings categories">
         <button
-          className={`settings-nav-item${category === "connections" ? " is-selected" : ""}`}
+          className={`settings-nav-item${category === "providers" ? " is-selected" : ""}`}
           type="button"
-          aria-current={category === "connections" ? "page" : undefined}
-          onClick={() => setCategory("connections")}
+          aria-current={category === "providers" ? "page" : undefined}
+          onClick={() => setCategory("providers")}
         >
-          Connections
+          Providers
         </button>
         <button
           className={`settings-nav-item${category === "appearance" ? " is-selected" : ""}`}
@@ -236,7 +236,7 @@ export function SettingsWindow() {
       </nav>
 
       <div className="settings-content">
-        {category === "connections" ? (
+        {category === "providers" ? (
           <section className="settings-section" aria-labelledby="provider-settings-title">
             <h2 id="provider-settings-title">ChatGPT subscription</h2>
             <p className="settings-label-row">

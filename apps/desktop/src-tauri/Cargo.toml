@@ -23,7 +23,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-base64 = "0.23"
+base64 = { version = "0.23", default-features = false, features = ["std"] }
 eventsource-stream = "0.2"
 futures-util = "0.3"
 keyring-core = "1"

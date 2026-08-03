@@ -167,6 +167,30 @@ impl ChatGptAdapter {
         *self.test_transport.lock().expect("lock") = Some(transport);
     }
 
+    /// Test-only helper that completes the browser callback against the bound
+    /// redirect using the production query parser.
+    #[cfg(test)]
+    pub(crate) async fn connect_in_browser_with_test_callback(
+        &self,
+        store: Arc<SqliteStore>,
+        code: &str,
+    ) -> Result<ConnectionStatus, PublicError> {
+        let code = code.to_owned();
+        self.connect_in_browser(store, move |url| {
+            let query = url.split_once('?').map(|(_, query)| query).expect("query");
+            let params = parse_query(query).expect("authorization query");
+            let state = params.get("state").expect("state").clone();
+            let redirect = params.get("redirect_uri").expect("redirect_uri").clone();
+            let callback = format!("{redirect}?state={state}&code={code}");
+            tokio::spawn(async move {
+                let response = reqwest::get(callback).await.expect("callback request");
+                assert!(response.status().is_success());
+            });
+            Ok(())
+        })
+        .await
+    }
+
     pub(crate) async fn connect_in_browser(
         &self,
         store: Arc<SqliteStore>,
@@ -1371,6 +1395,19 @@ pub(crate) struct TokenValues {
     preserve_refresh: bool,
 }
 
+#[cfg(test)]
+impl TokenValues {
+    pub(crate) fn for_test(access: &str, refresh: &str, account: &str) -> Self {
+        Self {
+            access: access.into(),
+            refresh: refresh.into(),
+            account: account.into(),
+            expires_at_unix_ms: Some(i64::MAX / 2),
+            preserve_refresh: false,
+        }
+    }
+}
+
 impl TokenValues {
     fn zeroize(&mut self) {
         self.access.zeroize();
@@ -2560,20 +2597,8 @@ mod tests {
         code: &str,
     ) -> ConnectionStatus {
         let _guard = CONNECT_TEST_LOCK.lock().await;
-        let code = code.to_owned();
         adapter
-            .connect_in_browser(store, move |url| {
-                let query = url.split_once('?').map(|(_, query)| query).expect("query");
-                let params = parse_query(query).expect("authorization query");
-                let state = params.get("state").expect("state").clone();
-                let redirect = params.get("redirect_uri").expect("redirect_uri").clone();
-                let callback = format!("{redirect}?state={state}&code={code}");
-                tokio::spawn(async move {
-                    let response = reqwest::get(callback).await.expect("callback request");
-                    assert!(response.status().is_success());
-                });
-                Ok(())
-            })
+            .connect_in_browser_with_test_callback(store, code)
             .await
             .expect("browser connect should succeed")
     }

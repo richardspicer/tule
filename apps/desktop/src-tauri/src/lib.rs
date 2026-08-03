@@ -74,6 +74,18 @@ fn emit_connection_status(app: &tauri::AppHandle, status: &ConnectionStatus) {
     let _ = app.emit(CONNECTION_STATUS_CHANGED_EVENT, status);
 }
 
+/// Selects the status that connect/cancel terminal paths emit without altering
+/// the original command result.
+fn terminal_status_for_emit(
+    result: &Result<ConnectionStatus, PublicError>,
+    status_on_error: ConnectionStatus,
+) -> ConnectionStatus {
+    match result {
+        Ok(status) => status.clone(),
+        Err(_) => status_on_error,
+    }
+}
+
 #[tauri::command]
 fn connection_status(state: tauri::State<'_, AgentState>) -> ConnectionStatus {
     current_connection_status(&state)
@@ -104,7 +116,7 @@ async fn connect_chatgpt(
     };
     let store = StdArc::clone(&state.store);
     let opener = app.clone();
-    let status = adapter
+    let result = adapter
         .connect_in_browser(store, move |url| {
             opener
                 .opener()
@@ -112,9 +124,12 @@ async fn connect_chatgpt(
                 .map_err(|_| PublicError::ProviderUnavailable)?;
             Ok(())
         })
-        .await?;
+        .await;
+    // Emit the authoritative terminal status on success and failure without
+    // replacing the original command error.
+    let status = terminal_status_for_emit(&result, current_connection_status(&state));
     emit_connection_status(&app, &status);
-    Ok(status)
+    result
 }
 
 #[tauri::command]
@@ -125,10 +140,12 @@ fn cancel_chatgpt_connect(
     let Some(adapter) = state.chatgpt() else {
         return Err(PublicError::ProviderUnavailable);
     };
-    adapter.cancel_connect()?;
+    let result = adapter.cancel_connect();
+    // Emit current status after the cancel request settles, including late
+    // Cancel after completion, without masking the original safe error.
     let status = current_connection_status(&state);
     emit_connection_status(&app, &status);
-    Ok(())
+    result
 }
 
 #[tauri::command]
@@ -208,6 +225,7 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use provider::ConnectionState;
 
     #[test]
     fn application_info_command_preserves_the_typed_core_shape() {
@@ -221,6 +239,33 @@ mod tests {
                 "name": expected.name,
                 "version": expected.version,
             })
+        );
+    }
+
+    #[test]
+    fn terminal_status_emit_preserves_success_and_uses_authoritative_error_status() {
+        let connected = ConnectionStatus {
+            state: ConnectionState::Connected,
+            provider_id: "openai-chatgpt-compat",
+            model: "gpt-5.5",
+        };
+        let disconnected = ConnectionStatus {
+            state: ConnectionState::Disconnected,
+            provider_id: "openai-chatgpt-compat",
+            model: "gpt-5.5",
+        };
+
+        assert_eq!(
+            terminal_status_for_emit(&Ok(connected.clone()), disconnected.clone()),
+            connected
+        );
+        assert_eq!(
+            terminal_status_for_emit(&Err(PublicError::Cancelled), disconnected.clone()),
+            disconnected
+        );
+        assert_eq!(
+            terminal_status_for_emit(&Err(PublicError::InvalidInput), connected.clone()),
+            connected
         );
     }
 }

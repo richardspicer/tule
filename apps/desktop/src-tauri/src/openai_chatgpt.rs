@@ -202,15 +202,16 @@ impl ChatGptAdapter {
             }
         };
         let result = self
-            .connect_in_browser_inner(store, open_url, &cancel)
+            .connect_in_browser_inner(Arc::clone(&store), open_url, &cancel)
             .await;
         drop(operation);
         let cleanup = self.clear_connect_cancel(&cancel);
+        // Clear the transient connecting lifecycle before sampling terminal status.
         self.connecting.store(false, Ordering::SeqCst);
         match (result, cleanup) {
-            (Ok(status), Ok(())) => Ok(status),
+            (Ok(()), Ok(())) => Ok(self.connection_status_with_store(store.as_ref())),
             (Err(error), _) => Err(error),
-            (Ok(_), Err(error)) => Err(error),
+            (Ok(()), Err(error)) => Err(error),
         }
     }
 
@@ -219,7 +220,7 @@ impl ChatGptAdapter {
         store: Arc<SqliteStore>,
         open_url: impl FnOnce(&str) -> Result<(), PublicError>,
         cancel: &Arc<CancellationToken>,
-    ) -> Result<ConnectionStatus, PublicError> {
+    ) -> Result<(), PublicError> {
         let (pkce_challenge, pkce_verifier) = PkceCodeChallenge::new_random_sha256();
         let csrf = CsrfToken::new_random();
         let (listener, redirect_uri) = tokio::select! {
@@ -265,7 +266,7 @@ impl ChatGptAdapter {
             }
             TokenBundle::InvalidGrant => return Err(PublicError::AuthenticationRequired),
         }
-        Ok(self.connection_status_with_store(store.as_ref()))
+        Ok(())
     }
 
     pub(crate) fn cancel_connect(&self) -> Result<(), PublicError> {
@@ -1650,6 +1651,79 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn successful_browser_connect_returns_connected_after_clearing_connecting() {
+        struct SuccessExchange;
+        impl TestTransport for SuccessExchange {
+            fn exchange_token(
+                &self,
+                _: &str,
+                _: &str,
+                _: &str,
+                _: &str,
+            ) -> Result<TokenBundle, PublicError> {
+                Ok(TokenBundle::Success(token_values(
+                    "access", "refresh", "account", false,
+                )))
+            }
+            fn refresh_token(&self, _: &str, _: &str) -> Result<TokenBundle, PublicError> {
+                unreachable!()
+            }
+            fn inference(
+                &self,
+                _: &str,
+                _: &HeaderMap,
+                _: &str,
+            ) -> Result<MockInference, PublicError> {
+                unreachable!()
+            }
+        }
+
+        let fake = Arc::new(FakeCredentialStore::default());
+        let adapter = ChatGptAdapter::new(fake.clone());
+        adapter.set_test_transport(Arc::new(SuccessExchange));
+        let dir = unique_connect_tempfile_dir("success");
+        let store = Arc::new(SqliteStore::open(dir.path().join("tule.sqlite3")).unwrap());
+
+        let status = complete_browser_connect(&adapter, Arc::clone(&store), "ok-code").await;
+        assert_eq!(status.state, ConnectionState::Connected);
+        assert!(!adapter.connecting.load(Ordering::SeqCst));
+        assert!(adapter.connect_cancel.lock().unwrap().is_none());
+        // Completion already won; late Cancel must not claim cancellation.
+        assert_eq!(adapter.cancel_connect(), Err(PublicError::InvalidInput));
+        assert_eq!(
+            adapter.connection_status_with_store(store.as_ref()).state,
+            ConnectionState::Connected
+        );
+        for kind in ALL_CREDENTIAL_KINDS {
+            assert!(fake.peek(CREDENTIAL_HANDLE, kind).is_some());
+        }
+    }
+
+    #[tokio::test]
+    async fn active_browser_connect_cancellation_returns_cancelled_without_credentials() {
+        let _guard = CONNECT_TEST_LOCK.lock().await;
+        let fake = Arc::new(FakeCredentialStore::default());
+        let adapter = Arc::new(ChatGptAdapter::new(fake.clone()));
+        let dir = unique_connect_tempfile_dir("cancel");
+        let store = Arc::new(SqliteStore::open(dir.path().join("tule.sqlite3")).unwrap());
+        let cancel_adapter = Arc::clone(&adapter);
+
+        let result = adapter
+            .connect_in_browser(store, move |_url| cancel_adapter.cancel_connect())
+            .await;
+        assert_eq!(result, Err(PublicError::Cancelled));
+        assert!(!adapter.connecting.load(Ordering::SeqCst));
+        assert!(adapter.connect_cancel.lock().unwrap().is_none());
+        assert_eq!(
+            adapter.connection_status().state,
+            ConnectionState::Disconnected
+        );
+        for kind in ALL_CREDENTIAL_KINDS {
+            assert_eq!(fake.peek(CREDENTIAL_HANDLE, kind), None);
+        }
+    }
+
+    #[tokio::test]
     async fn cancellation_during_token_exchange_does_not_persist_credentials() {
         struct CancelExchange(CancellationToken);
         impl TestTransport for CancelExchange {
@@ -2468,6 +2542,40 @@ mod tests {
             "https://chatgpt.com/backend-api/codex/responses"
         );
         assert!(!SCOPES.contains("api.connectors"));
+    }
+
+    // Fixed callback ports cannot be shared across parallel browser-connect tests.
+    static CONNECT_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    fn unique_connect_tempfile_dir(label: &str) -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .prefix(&format!("tule-openai-connect-{label}-"))
+            .tempdir()
+            .expect("tempdir")
+    }
+
+    async fn complete_browser_connect(
+        adapter: &ChatGptAdapter,
+        store: Arc<SqliteStore>,
+        code: &str,
+    ) -> ConnectionStatus {
+        let _guard = CONNECT_TEST_LOCK.lock().await;
+        let code = code.to_owned();
+        adapter
+            .connect_in_browser(store, move |url| {
+                let query = url.split_once('?').map(|(_, query)| query).expect("query");
+                let params = parse_query(query).expect("authorization query");
+                let state = params.get("state").expect("state").clone();
+                let redirect = params.get("redirect_uri").expect("redirect_uri").clone();
+                let callback = format!("{redirect}?state={state}&code={code}");
+                tokio::spawn(async move {
+                    let response = reqwest::get(callback).await.expect("callback request");
+                    assert!(response.status().is_success());
+                });
+                Ok(())
+            })
+            .await
+            .expect("browser connect should succeed")
     }
 
     fn token_values(

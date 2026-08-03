@@ -22,6 +22,13 @@ These instructions apply to the entire repository.
 - Run formatting, static checks, tests, and the desktop build appropriate to the changed scope.
 - Keep dependencies minimal and justify new privileged Tauri capabilities.
 
+## Public Change History
+
+- Keep pull-request titles and descriptions and commit subjects and bodies concise, product-facing, and understandable without repository knowledge.
+- Never include implementation file names, directory paths, migration file names, machine-local paths, or private planning-artifact names in pull-request or commit prose.
+- Describe changes through behavior, intent, user or developer impact, architectural or trust boundaries, and verification outcomes.
+- Keep detailed implementation inventories in private planning and review records rather than public change history.
+
 ## Change Boundaries
 
 - Do not add the Agent Harness, Hermes integration, ACP, plugins, publishing automation, or package-registry releases to the initial foundation.

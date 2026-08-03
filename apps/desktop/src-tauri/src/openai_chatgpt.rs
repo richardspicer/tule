@@ -27,16 +27,20 @@ use tokio::{
     net::TcpListener,
     time::timeout,
 };
-use tule_core::{AgentRepository, PROVIDER_PROFILE_ID, ProviderProfile};
+use tule_core::{
+    AgentRepository, CATALOG_TTL_MS, CatalogCandidate, PROVIDER_PROFILE_ID, ProviderProfile,
+    catalog_freshness, select_usable_catalog_entries,
+};
 use zeroize::Zeroize;
 
 use crate::{
     credentials::{CredentialKind, CredentialStore, CredentialStoreError},
     provider::{
         ConnectionState, ConnectionStatus, ProviderAdapter, ProviderEvent, ProviderEventSink,
-        ProviderFuture, ProviderRequest, PublicError,
+        ProviderFuture, ProviderModelCatalogResponse, ProviderRequest, PublicError,
+        build_catalog_response,
     },
-    sqlite::SqliteStore,
+    sqlite::{SqliteStore, StoredCatalogState},
 };
 use tokio_util::sync::CancellationToken;
 
@@ -46,8 +50,14 @@ pub(crate) const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 pub(crate) const AUTH_URL: &str = "https://auth.openai.com/oauth/authorize";
 pub(crate) const TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
 pub(crate) const INFERENCE_URL: &str = "https://chatgpt.com/backend-api/codex/responses";
+/// TULE-owned catalog-compatibility revision for the authenticated models endpoint.
+pub(crate) const CATALOG_COMPATIBILITY_REVISION: &str = "1.0.0";
+pub(crate) const MODELS_URL: &str =
+    "https://chatgpt.com/backend-api/codex/models?client_version=1.0.0";
 pub(crate) const SCOPES: &str = "openid profile email offline_access";
 pub(crate) const CREDENTIAL_HANDLE: &str = "openai-chatgpt-compat-v1";
+#[cfg(not(test))]
+const MAX_CATALOG_BODY: usize = 512 * 1024;
 const PRIMARY_CALLBACK_PORT: u16 = 1455;
 const FALLBACK_CALLBACK_PORT: u16 = 1457;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(300);
@@ -329,6 +339,172 @@ impl ChatGptAdapter {
         self.remove_credentials_and_metadata(store, true)?;
         self.reconnect_required.store(false, Ordering::SeqCst);
         Ok(self.connection_status_with_store(store))
+    }
+
+    /// Returns the persisted catalog, refreshing when forced, stale, or missing.
+    pub(crate) async fn refresh_model_catalog(
+        &self,
+        store: &SqliteStore,
+        force: bool,
+    ) -> Result<ProviderModelCatalogResponse, PublicError> {
+        let _operation = self.profile_lock.lock().await;
+        match self.connection_status_with_store(store).state {
+            ConnectionState::Connected => {}
+            ConnectionState::ReconnectRequired => {
+                return Err(PublicError::AuthenticationRequired);
+            }
+            ConnectionState::UnavailableInThisBuild => {
+                return Err(PublicError::ProviderUnavailable);
+            }
+            _ => return Err(PublicError::NotConnected),
+        }
+
+        let now = unix_now_ms().map_err(|_| PublicError::AgentStorageUnavailable)?;
+        let snapshot = store
+            .get_catalog_snapshot(PROVIDER_PROFILE_ID)
+            .map_err(|_| PublicError::AgentStorageUnavailable)?;
+        if !force
+            && let Some(snapshot) = snapshot.as_ref()
+            && catalog_freshness(snapshot.state.retrieved_at_unix_ms, now)
+                == tule_core::CatalogFreshness::Current
+            && snapshot.state.compatibility_revision == CATALOG_COMPATIBILITY_REVISION
+        {
+            return build_catalog_response(store);
+        }
+
+        let etag = snapshot.as_ref().and_then(|item| item.state.etag.clone());
+        let generation = store
+            .current_credential_generation(PROVIDER_PROFILE_ID)
+            .map_err(|_| PublicError::AgentStorageUnavailable)?;
+        let (mut access, mut account) = self.read_access_and_account()?;
+        let headers = match build_catalog_headers(&access, &account, etag.as_deref()) {
+            Ok(headers) => headers,
+            Err(error) => {
+                access.zeroize();
+                account.zeroize();
+                return Err(error);
+            }
+        };
+
+        #[cfg(test)]
+        let fetch_result: Result<ModelsFetchResult, PublicError> = {
+            let transport = self.test_transport.lock().expect("lock").clone();
+            if let Some(transport) = transport {
+                let mock = transport.models(MODELS_URL, &headers, etag.as_deref());
+                access.zeroize();
+                account.zeroize();
+                mock.map(ModelsFetchResult::from)
+            } else {
+                access.zeroize();
+                account.zeroize();
+                Err(PublicError::ProviderUnavailable)
+            }
+        };
+        #[cfg(not(test))]
+        let fetch_result = {
+            let result = self.fetch_models_http(headers).await;
+            access.zeroize();
+            account.zeroize();
+            result
+        };
+
+        match fetch_result {
+            Ok(ModelsFetchResult::NotModified {
+                etag: response_etag,
+            }) => {
+                store
+                    .touch_catalog_retrieval(
+                        PROVIDER_PROFILE_ID,
+                        now,
+                        now,
+                        response_etag.as_deref().or(etag.as_deref()),
+                    )
+                    .map_err(|_| PublicError::AgentStorageUnavailable)?;
+                build_catalog_response(store)
+            }
+            Ok(ModelsFetchResult::Models {
+                body,
+                etag: response_etag,
+            }) => {
+                let entries = parse_catalog_body(&body)?;
+                if entries.is_empty() {
+                    // Authenticated empty usable catalog is a contract failure; keep last-known.
+                    return if snapshot.is_some() {
+                        let mut response = build_catalog_response(store)?;
+                        response.freshness = "stale".to_owned();
+                        Ok(response)
+                    } else {
+                        Err(PublicError::ProviderUnavailable)
+                    };
+                }
+                store
+                    .replace_catalog_snapshot(
+                        PROVIDER_PROFILE_ID,
+                        &StoredCatalogState {
+                            credential_generation: generation,
+                            compatibility_revision: CATALOG_COMPATIBILITY_REVISION.to_owned(),
+                            etag: response_etag,
+                            retrieved_at_unix_ms: now,
+                            updated_at_unix_ms: now,
+                        },
+                        &entries,
+                    )
+                    .map_err(|_| PublicError::AgentStorageUnavailable)?;
+                let _ = CATALOG_TTL_MS;
+                build_catalog_response(store)
+            }
+            Ok(ModelsFetchResult::Status(401)) => Err(PublicError::AuthenticationRequired),
+            Ok(ModelsFetchResult::Status(403)) => Err(PublicError::EntitlementUnavailable),
+            Ok(ModelsFetchResult::Status(429)) => Err(PublicError::RateLimited),
+            Ok(ModelsFetchResult::Status(_)) | Err(PublicError::ProviderUnavailable) => {
+                if let Ok(mut response) = build_catalog_response(store)
+                    && !response.models.is_empty()
+                {
+                    response.freshness = "stale".to_owned();
+                    return Ok(response);
+                }
+                Err(PublicError::ProviderUnavailable)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    #[cfg(not(test))]
+    async fn fetch_models_http(
+        &self,
+        headers: HeaderMap,
+    ) -> Result<ModelsFetchResult, PublicError> {
+        let response = self
+            .client
+            .get(MODELS_URL)
+            .headers(headers)
+            .send()
+            .await
+            .map_err(|_| PublicError::ProviderUnavailable)?;
+        let status = response.status();
+        let etag = response
+            .headers()
+            .get(reqwest::header::ETAG)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
+        if status == StatusCode::NOT_MODIFIED {
+            return Ok(ModelsFetchResult::NotModified { etag });
+        }
+        if status == StatusCode::UNAUTHORIZED {
+            return Ok(ModelsFetchResult::Status(401));
+        }
+        if status == StatusCode::FORBIDDEN {
+            return Ok(ModelsFetchResult::Status(403));
+        }
+        if status == StatusCode::TOO_MANY_REQUESTS {
+            return Ok(ModelsFetchResult::Status(429));
+        }
+        if !status.is_success() {
+            return Ok(ModelsFetchResult::Status(status.as_u16()));
+        }
+        let body = read_bounded_response_body(response, MAX_CATALOG_BODY).await?;
+        let body = String::from_utf8(body).map_err(|_| PublicError::ProviderUnavailable)?;
+        Ok(ModelsFetchResult::Models { body, etag })
     }
 
     async fn exchange_token(
@@ -632,7 +808,12 @@ impl ChatGptAdapter {
         if let Some(slot) = connect_commit_guard.as_mut() {
             slot.take();
         }
+        let previous_account = snapshot.value(CredentialKind::AccountId);
+        let account_changed = previous_account != Some(token.account.as_bytes());
         token.zeroize();
+        if account_changed {
+            let _ = store.invalidate_catalog_for_credential_change(PROVIDER_PROFILE_ID, now);
+        }
         self.reconnect_required.store(false, Ordering::SeqCst);
         Ok(())
     }
@@ -747,6 +928,7 @@ impl ChatGptAdapter {
             }
             return Err(PublicError::AgentStorageUnavailable);
         }
+        let _ = store.invalidate_catalog_for_credential_change(PROVIDER_PROFILE_ID, now);
         Ok(())
     }
 
@@ -892,6 +1074,7 @@ impl ProviderAdapter for ChatGptAdapter {
                 }
                 StatusCode::FORBIDDEN => return Err(PublicError::EntitlementUnavailable),
                 StatusCode::TOO_MANY_REQUESTS => return Err(PublicError::RateLimited),
+                StatusCode::BAD_REQUEST => return Err(PublicError::ModelUnavailable),
                 status if !status.is_success() => return Err(PublicError::ProviderUnavailable),
                 _ => {}
             }
@@ -910,6 +1093,7 @@ async fn emit_mock_inference(
         MockInference::Status(401) => Err(PublicError::AuthenticationRequired),
         MockInference::Status(403) => Err(PublicError::EntitlementUnavailable),
         MockInference::Status(429) => Err(PublicError::RateLimited),
+        MockInference::Status(400) => Err(PublicError::ModelUnavailable),
         MockInference::Status(_) => Err(PublicError::ProviderUnavailable),
         MockInference::Events(events) => {
             for event in events {
@@ -1493,6 +1677,97 @@ const fn decode_hex(value: u8) -> Option<u8> {
     }
 }
 
+#[derive(Debug, Clone)]
+enum ModelsFetchResult {
+    NotModified { etag: Option<String> },
+    Models { body: String, etag: Option<String> },
+    Status(u16),
+}
+
+fn build_catalog_headers(
+    access: &str,
+    account: &str,
+    etag: Option<&str>,
+) -> Result<HeaderMap, PublicError> {
+    let mut headers = HeaderMap::with_capacity(6);
+    let authorization = HeaderValue::from_str(&format!("Bearer {access}"))
+        .map_err(|_| PublicError::AuthenticationRequired)?;
+    let account =
+        HeaderValue::from_str(account).map_err(|_| PublicError::AuthenticationRequired)?;
+    headers.insert(AUTHORIZATION, authorization);
+    headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
+    headers.insert(
+        HeaderName::from_static("originator"),
+        HeaderValue::from_static("tule"),
+    );
+    headers.insert(USER_AGENT, HeaderValue::from_static("tule-desktop/0.1.0"));
+    headers.insert(HeaderName::from_static("chatgpt-account-id"), account);
+    if let Some(etag) = etag {
+        let value = HeaderValue::from_str(etag).map_err(|_| PublicError::ProviderUnavailable)?;
+        headers.insert(reqwest::header::IF_NONE_MATCH, value);
+    }
+    Ok(headers)
+}
+
+fn parse_catalog_body(body: &str) -> Result<Vec<tule_core::ModelCatalogEntry>, PublicError> {
+    let value: Value = serde_json::from_str(body).map_err(|_| PublicError::ProviderUnavailable)?;
+    let models = value
+        .get("models")
+        .and_then(Value::as_array)
+        .ok_or(PublicError::ProviderUnavailable)?;
+    let mut candidates = Vec::with_capacity(models.len());
+    for item in models {
+        let Some(object) = item.as_object() else {
+            continue;
+        };
+        let Some(model_id) = object.get("slug").and_then(Value::as_str) else {
+            continue;
+        };
+        let display_name = object
+            .get("display_name")
+            .and_then(Value::as_str)
+            .unwrap_or(model_id);
+        let description = object
+            .get("description")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        let visibility = object
+            .get("visibility")
+            .and_then(Value::as_str)
+            .unwrap_or("list")
+            .to_owned();
+        let input_modalities = object.get("input_modalities").and_then(|value| {
+            value.as_array().map(|items| {
+                items
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>()
+            })
+        });
+        let sort_order = object
+            .get("priority")
+            .and_then(Value::as_i64)
+            .unwrap_or(10_000) as i32;
+        let is_provider_default = object
+            .get("is_default")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        // supported_in_api is intentionally ignored for exclusion.
+        let _ = object.get("supported_in_api");
+        candidates.push(CatalogCandidate {
+            model_id: model_id.to_owned(),
+            display_name: display_name.to_owned(),
+            description,
+            visibility,
+            input_modalities,
+            sort_order,
+            is_provider_default,
+        });
+    }
+    Ok(select_usable_catalog_entries(candidates))
+}
+
 #[cfg(test)]
 #[derive(Debug, Clone)]
 pub(crate) enum MockInference {
@@ -1500,6 +1775,26 @@ pub(crate) enum MockInference {
     Sse(String),
     Status(u16),
     WaitForCancellation,
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub(crate) enum MockModelsResponse {
+    NotModified { etag: Option<String> },
+    Models { body: String, etag: Option<String> },
+    Status(u16),
+}
+
+#[cfg(test)]
+impl From<MockModelsResponse> for ModelsFetchResult {
+    fn from(value: MockModelsResponse) -> Self {
+        match value {
+            MockModelsResponse::NotModified { etag } => Self::NotModified { etag },
+            MockModelsResponse::Models { body, etag } => Self::Models { body, etag },
+            MockModelsResponse::Status(status) => Self::Status(status),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1518,6 +1813,15 @@ pub(crate) trait TestTransport: Send + Sync {
         headers: &HeaderMap,
         body: &str,
     ) -> Result<MockInference, PublicError>;
+    fn models(
+        &self,
+        models_url: &str,
+        headers: &HeaderMap,
+        etag: Option<&str>,
+    ) -> Result<MockModelsResponse, PublicError> {
+        let _ = (models_url, headers, etag);
+        Err(PublicError::ProviderUnavailable)
+    }
 }
 
 #[cfg(test)]
@@ -1535,6 +1839,11 @@ mod tests {
         assert_eq!(
             INFERENCE_URL,
             "https://chatgpt.com/backend-api/codex/responses"
+        );
+        assert_eq!(CATALOG_COMPATIBILITY_REVISION, "1.0.0");
+        assert_eq!(
+            MODELS_URL,
+            "https://chatgpt.com/backend-api/codex/models?client_version=1.0.0"
         );
         assert_eq!(SCOPES, "openid profile email offline_access");
         let url =
@@ -2732,5 +3041,185 @@ mod tests {
         ));
         std::fs::create_dir_all(&path).unwrap();
         path
+    }
+
+    #[test]
+    fn catalog_parser_allowlists_ordered_text_models_and_ignores_supported_in_api() {
+        let body = r#"{
+          "models": [
+            {
+              "slug": "hidden",
+              "display_name": "Hidden",
+              "visibility": "hide",
+              "priority": 1,
+              "supported_in_api": true,
+              "input_modalities": ["text"]
+            },
+            {
+              "slug": "image-only",
+              "display_name": "Image",
+              "visibility": "list",
+              "priority": 2,
+              "supported_in_api": true,
+              "input_modalities": ["image"]
+            },
+            {
+              "slug": "spark",
+              "display_name": "Spark",
+              "description": "subscription",
+              "visibility": "list",
+              "priority": 20,
+              "supported_in_api": false,
+              "input_modalities": ["text"]
+            },
+            {
+              "slug": "gpt-5.5",
+              "display_name": "GPT-5.5",
+              "visibility": "list",
+              "priority": 10,
+              "supported_in_api": true,
+              "is_default": true
+            }
+          ]
+        }"#;
+        let entries = parse_catalog_body(body).unwrap();
+        assert_eq!(
+            entries
+                .iter()
+                .map(|entry| entry.model_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["gpt-5.5", "spark"]
+        );
+        assert!(entries[0].is_provider_default);
+        assert_eq!(entries[1].description.as_deref(), Some("subscription"));
+    }
+
+    #[test]
+    fn authenticated_empty_usable_catalog_is_an_error() {
+        let body = r#"{"models":[{"slug":"hidden","display_name":"Hidden","visibility":"hide"}]}"#;
+        let entries = parse_catalog_body(body).unwrap();
+        assert!(entries.is_empty());
+    }
+
+    #[tokio::test]
+    async fn catalog_refresh_uses_etag_and_marks_stale_on_failure() {
+        use std::sync::atomic::AtomicUsize;
+
+        let fake = Arc::new(FakeCredentialStore::default());
+        seed_connected(&fake);
+        let adapter = ChatGptAdapter::new(fake);
+        let dir = tempfile_dir();
+        let store = SqliteStore::open(dir.join("catalog.sqlite3")).unwrap();
+        mark_profile_connected(&store, Some(i64::MAX / 2));
+        let body = r#"{
+          "models": [
+            {
+              "slug": "gpt-5.5",
+              "display_name": "GPT-5.5",
+              "visibility": "list",
+              "priority": 1,
+              "supported_in_api": false
+            },
+            {
+              "slug": "other",
+              "display_name": "Other",
+              "visibility": "list",
+              "priority": 2
+            }
+          ]
+        }"#;
+        struct CatalogTransport {
+            body: String,
+            calls: Arc<AtomicUsize>,
+        }
+        impl TestTransport for CatalogTransport {
+            fn exchange_token(
+                &self,
+                _: &str,
+                _: &str,
+                _: &str,
+                _: &str,
+            ) -> Result<TokenBundle, PublicError> {
+                unreachable!()
+            }
+            fn refresh_token(&self, _: &str, _: &str) -> Result<TokenBundle, PublicError> {
+                unreachable!()
+            }
+            fn inference(
+                &self,
+                _: &str,
+                _: &HeaderMap,
+                _: &str,
+            ) -> Result<MockInference, PublicError> {
+                unreachable!()
+            }
+            fn models(
+                &self,
+                url: &str,
+                headers: &HeaderMap,
+                etag: Option<&str>,
+            ) -> Result<MockModelsResponse, PublicError> {
+                assert_eq!(url, MODELS_URL);
+                assert_eq!(headers.get("originator").unwrap(), "tule");
+                assert!(headers.get("chatgpt-account-id").is_some());
+                let call = self.calls.fetch_add(1, Ordering::SeqCst);
+                if call == 0 {
+                    assert!(etag.is_none());
+                    return Ok(MockModelsResponse::Models {
+                        body: self.body.clone(),
+                        etag: Some("\"v1\"".into()),
+                    });
+                }
+                if call == 1 {
+                    assert_eq!(etag, Some("\"v1\""));
+                    return Ok(MockModelsResponse::NotModified {
+                        etag: Some("\"v1\"".into()),
+                    });
+                }
+                Err(PublicError::ProviderUnavailable)
+            }
+        }
+        let calls = Arc::new(AtomicUsize::new(0));
+        adapter.set_test_transport(Arc::new(CatalogTransport {
+            body: body.into(),
+            calls: Arc::clone(&calls),
+        }));
+
+        let first = adapter.refresh_model_catalog(&store, true).await.unwrap();
+        assert_eq!(first.models.len(), 2);
+        assert_eq!(first.freshness, "current");
+        assert_eq!(first.compatibility_revision.as_deref(), Some("1.0.0"));
+
+        let second = adapter.refresh_model_catalog(&store, true).await.unwrap();
+        assert_eq!(second.models.len(), 2);
+        assert_eq!(second.freshness, "current");
+
+        let failed = adapter.refresh_model_catalog(&store, true).await.unwrap();
+        assert_eq!(failed.models.len(), 2);
+        assert_eq!(failed.freshness, "stale");
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+
+        let generation_before = store
+            .current_credential_generation(PROVIDER_PROFILE_ID)
+            .unwrap();
+        adapter.disconnect(&store).unwrap();
+        let generation_after = store
+            .current_credential_generation(PROVIDER_PROFILE_ID)
+            .unwrap();
+        assert!(generation_after > generation_before);
+        assert!(
+            store
+                .get_catalog_snapshot(PROVIDER_PROFILE_ID)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            store
+                .get_model_selection(PROVIDER_PROFILE_ID)
+                .unwrap()
+                .selected_model_id
+                .as_deref(),
+            Some("gpt-5.5")
+        );
     }
 }

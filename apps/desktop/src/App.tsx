@@ -26,7 +26,17 @@ import {
   type Project,
   updateProjectInstructions,
 } from "./platform/projects";
-import { getConnectionStatus, type ConnectionState } from "./platform/provider";
+import {
+  formatModelLabel,
+  getConnectionStatus,
+  getProviderModelCatalog,
+  getProviderModelSelection,
+  listenProviderModelCatalogChanged,
+  listenProviderModelSelectionChanged,
+  type ConnectionState,
+  type ProviderModelCatalog,
+  type ProviderModelSelection,
+} from "./platform/provider";
 import {
   exitApplication,
   listenConnectionStatusChanged,
@@ -111,11 +121,20 @@ function App() {
   const [projectsCompact, setProjectsCompact] = useState(
     () => window.matchMedia(projectsCompactQuery).matches,
   );
+  const [catalog, setCatalog] = useState<ProviderModelCatalog | null>(null);
+  const [selection, setSelection] = useState<ProviderModelSelection | null>(null);
+  const [pendingModelId, setPendingModelId] = useState<string | null>(null);
 
   const activeSession = sessions.find((session) => session.id === activeSessionId) ?? null;
   const contextProjectId = activeSession?.projectId ?? pendingProjectId;
   const sessionTitle = activeSession?.title ?? "New session";
-  const modelLabel = "GPT-5.5";
+  const modelLocked = activeSession !== null;
+  const sessionModelId =
+    activeSession?.modelId ?? pendingModelId ?? selection?.selectedModelId ?? null;
+  const modelLabel =
+    sessionModelId === null
+      ? "Choose a model"
+      : formatModelLabel(sessionModelId, catalog?.models ?? []);
   const connected = connectionState === "connected";
 
   useEffect(() => {
@@ -160,6 +179,17 @@ function App() {
         }
       });
 
+    void Promise.all([getProviderModelCatalog(), getProviderModelSelection()])
+      .then(([nextCatalog, nextSelection]) => {
+        if (!active) {
+          return;
+        }
+        setCatalog(nextCatalog);
+        setSelection(nextSelection);
+        setPendingModelId((current) => current ?? nextSelection.selectedModelId);
+      })
+      .catch(() => undefined);
+
     return () => {
       active = false;
     };
@@ -172,6 +202,27 @@ function App() {
     void listenAppearanceChanged((preference) => {
       setTheme(preference);
       applyThemePreference(preference);
+    }).then((unlisten) => {
+      if (disposed) {
+        unlisten();
+      } else {
+        cleanups.push(unlisten);
+      }
+    });
+
+    void listenProviderModelCatalogChanged((next) => {
+      setCatalog(next);
+    }).then((unlisten) => {
+      if (disposed) {
+        unlisten();
+      } else {
+        cleanups.push(unlisten);
+      }
+    });
+
+    void listenProviderModelSelectionChanged((next) => {
+      setSelection(next);
+      setPendingModelId((current) => current ?? next.selectedModelId);
     }).then((unlisten) => {
       if (disposed) {
         unlisten();
@@ -374,6 +425,7 @@ function App() {
     setMainView("agent");
     setActiveSessionId(null);
     setPendingProjectId(null);
+    setPendingModelId(selection?.selectedModelId ?? null);
     setTurns([]);
     setDraft("");
     setAgentError(null);
@@ -500,6 +552,7 @@ function App() {
         sessionId: activeSessionId,
         userText,
         projectId: contextProjectId,
+        modelId: activeSessionId === null ? sessionModelId : null,
         onEvent: (event) => {
           if (event.kind === "started") {
             nativeActiveTurnIdRef.current = event.turn_id;
@@ -833,6 +886,12 @@ function App() {
               projectId={contextProjectId}
               projects={projects}
               modelLabel={modelLabel}
+              modelOptions={(catalog?.models ?? []).map((model) => ({
+                id: model.id,
+                displayName: model.displayName,
+              }))}
+              selectedModelId={sessionModelId}
+              modelLocked={modelLocked}
               turns={turns}
               draft={draft}
               connected={connected}
@@ -845,6 +904,7 @@ function App() {
               onSend={() => void handleSend()}
               onCancel={handleCancel}
               onProjectChange={(projectId) => void handleChangePersistedProject(projectId)}
+              onModelChange={setPendingModelId}
               onOpenProvidersSettings={() => void openSettingsWindow("providers")}
             />
           )}

@@ -18,10 +18,14 @@ const {
   getApplicationInfoMock,
   getAgentSessionMock,
   getConnectionStatusMock,
+  getProviderModelCatalogMock,
+  getProviderModelSelectionMock,
   listAgentSessionsMock,
   listProjectsMock,
   listenAppearanceChangedMock,
   listenConnectionStatusChangedMock,
+  listenProviderModelCatalogChangedMock,
+  listenProviderModelSelectionChangedMock,
   loadThemePreferenceMock,
   onCloseRequestedMock,
   openProjectMock,
@@ -38,10 +42,14 @@ const {
   getApplicationInfoMock: vi.fn(),
   getAgentSessionMock: vi.fn(),
   getConnectionStatusMock: vi.fn(),
+  getProviderModelCatalogMock: vi.fn(),
+  getProviderModelSelectionMock: vi.fn(),
   listAgentSessionsMock: vi.fn(),
   listProjectsMock: vi.fn(),
   listenAppearanceChangedMock: vi.fn(),
   listenConnectionStatusChangedMock: vi.fn(),
+  listenProviderModelCatalogChangedMock: vi.fn(),
+  listenProviderModelSelectionChangedMock: vi.fn(),
   loadThemePreferenceMock: vi.fn(),
   onCloseRequestedMock: vi.fn<(handler: NativeCloseRequestedHandler) => Promise<() => void>>(),
   openProjectMock: vi.fn(),
@@ -87,6 +95,10 @@ vi.mock("./platform/provider", async (importOriginal) => {
   return {
     ...actual,
     getConnectionStatus: getConnectionStatusMock,
+    getProviderModelCatalog: getProviderModelCatalogMock,
+    getProviderModelSelection: getProviderModelSelectionMock,
+    listenProviderModelCatalogChanged: listenProviderModelCatalogChangedMock,
+    listenProviderModelSelectionChanged: listenProviderModelSelectionChangedMock,
   };
 });
 
@@ -134,9 +146,13 @@ describe("App", () => {
     updateProjectInstructionsMock.mockReset();
     listAgentSessionsMock.mockReset();
     getConnectionStatusMock.mockReset();
+    getProviderModelCatalogMock.mockReset();
+    getProviderModelSelectionMock.mockReset();
     loadThemePreferenceMock.mockReset();
     listenAppearanceChangedMock.mockReset();
     listenConnectionStatusChangedMock.mockReset();
+    listenProviderModelCatalogChangedMock.mockReset();
+    listenProviderModelSelectionChangedMock.mockReset();
     onCloseRequestedMock.mockReset();
     unlistenCloseRequestedMock.mockReset();
 
@@ -146,9 +162,30 @@ describe("App", () => {
       providerId: "openai-chatgpt-compat",
       model: "gpt-5.5",
     });
+    getProviderModelCatalogMock.mockResolvedValue({
+      providerId: "openai-chatgpt-compat",
+      models: [
+        {
+          id: "gpt-5.5",
+          displayName: "GPT-5.5",
+          description: null,
+          isProviderDefault: true,
+        },
+      ],
+      freshness: "current",
+      retrievedAtUnixMs: 1,
+      compatibilityRevision: "1.0.0",
+    });
+    getProviderModelSelectionMock.mockResolvedValue({
+      providerId: "openai-chatgpt-compat",
+      selectedModelId: "gpt-5.5",
+      requiresSelection: false,
+    });
     loadThemePreferenceMock.mockResolvedValue("system");
     listenAppearanceChangedMock.mockResolvedValue(vi.fn());
     listenConnectionStatusChangedMock.mockResolvedValue(vi.fn());
+    listenProviderModelCatalogChangedMock.mockResolvedValue(vi.fn());
+    listenProviderModelSelectionChangedMock.mockResolvedValue(vi.fn());
     openSettingsWindowMock.mockResolvedValue(undefined);
     exitApplicationMock.mockResolvedValue(undefined);
     syncConnectionStatusMock.mockResolvedValue({

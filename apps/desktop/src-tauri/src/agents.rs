@@ -161,6 +161,7 @@ fn map_prepare(error: tule_core::PrepareAgentSendError) -> PublicError {
         tule_core::PrepareAgentSendError::SessionBusy => PublicError::SessionBusy,
         tule_core::PrepareAgentSendError::SessionNotFound => PublicError::InvalidInput,
         tule_core::PrepareAgentSendError::ProjectAssociationMismatch => PublicError::InvalidInput,
+        tule_core::PrepareAgentSendError::ModelUnavailable(_) => PublicError::ModelUnavailable,
         tule_core::PrepareAgentSendError::Time(_)
         | tule_core::PrepareAgentSendError::Repository(_) => PublicError::AgentStorageUnavailable,
     }
@@ -186,6 +187,7 @@ fn public_error_code(error: PublicError) -> &'static str {
         PublicError::Interrupted => "interrupted",
         PublicError::CredentialStoreUnavailable => "credential_store_unavailable",
         PublicError::AgentStorageUnavailable => "agent_storage_unavailable",
+        PublicError::ModelUnavailable => "model_unavailable",
     }
 }
 
@@ -302,6 +304,7 @@ pub(crate) async fn send_agent_message(
     session_id: Option<String>,
     user_text: String,
     project_id: Option<String>,
+    model_id: Option<String>,
     channel: Channel<AgentStreamEvent>,
     state: State<'_, AgentState>,
 ) -> Result<(), PublicError> {
@@ -336,12 +339,20 @@ pub(crate) async fn send_agent_message(
         }
         _ => return Err(PublicError::NotConnected),
     }
+    let frozen_model_id = if session_id.is_none() {
+        let requested = model_id.ok_or(PublicError::ModelUnavailable)?;
+        crate::provider::validate_new_session_model(store.as_ref(), &requested)?
+    } else {
+        // Existing sessions ignore client-supplied model identifiers.
+        String::new()
+    };
     let prepared = tule_core::prepare_agent_send(
         store.as_ref(),
         session_id,
         &user_text,
         project_id,
         &project_instructions,
+        &frozen_model_id,
     )
     .map_err(map_prepare)?;
     let turn_id = prepared.turn.id();
@@ -590,7 +601,8 @@ mod tests {
     fn accumulated_output_limit_reuses_the_existing_terminal_turn() {
         let (directory, store) = test_store();
         let prepared =
-            tule_core::prepare_agent_send(store.as_ref(), None, "Hello", None, "").unwrap();
+            tule_core::prepare_agent_send(store.as_ref(), None, "Hello", None, "", "gpt-5.5")
+                .unwrap();
         tule_core::apply_agent_delta(
             store.as_ref(),
             prepared.turn.id(),
@@ -636,6 +648,7 @@ mod tests {
                 "Try again",
                 None,
                 "",
+                "gpt-5.5",
             )
             .is_ok()
         );
@@ -647,7 +660,8 @@ mod tests {
     fn pre_stream_failure_terminalizes_pending_turn_once() {
         let (directory, store) = test_store();
         let prepared =
-            tule_core::prepare_agent_send(store.as_ref(), None, "Hello", None, "").unwrap();
+            tule_core::prepare_agent_send(store.as_ref(), None, "Hello", None, "", "gpt-5.5")
+                .unwrap();
 
         let terminal = fail_with_public_error(
             store.as_ref(),
@@ -675,7 +689,8 @@ mod tests {
     async fn project_association_change_uses_the_application_operation_gate() {
         let (directory, state) = test_state();
         let prepared =
-            tule_core::prepare_agent_send(state.store.as_ref(), None, "Hello", None, "").unwrap();
+            tule_core::prepare_agent_send(state.store.as_ref(), None, "Hello", None, "", "gpt-5.5")
+                .unwrap();
         tule_core::complete_agent_turn(state.store.as_ref(), prepared.turn.id(), None, None, None)
             .unwrap();
         let project = tule_core::create_project(state.store.as_ref(), "Context").unwrap();
@@ -716,7 +731,8 @@ mod tests {
     async fn cancellation_wins_while_pre_stream_refresh_is_pending() {
         let (directory, store) = test_store();
         let prepared =
-            tule_core::prepare_agent_send(store.as_ref(), None, "Hello", None, "").unwrap();
+            tule_core::prepare_agent_send(store.as_ref(), None, "Hello", None, "", "gpt-5.5")
+                .unwrap();
         let token = CancellationToken::new();
         let cancel = token.clone();
         let outcome = tokio::time::timeout(

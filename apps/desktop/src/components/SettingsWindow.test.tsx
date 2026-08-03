@@ -9,22 +9,34 @@ const {
   connectChatgptMock,
   disconnectChatgptMock,
   getConnectionStatusMock,
+  getProviderModelCatalogMock,
+  getProviderModelSelectionMock,
   listenAppearanceChangedMock,
   listenConnectionStatusChangedMock,
+  listenProviderModelCatalogChangedMock,
+  listenProviderModelSelectionChangedMock,
   listenSettingsNavigateMock,
   loadThemePreferenceMock,
+  refreshProviderModelCatalogMock,
   saveThemePreferenceMock,
+  setProviderModelSelectionMock,
   takeSettingsLaunchCategoryMock,
 } = vi.hoisted(() => ({
   cancelChatgptConnectMock: vi.fn(),
   connectChatgptMock: vi.fn(),
   disconnectChatgptMock: vi.fn(),
   getConnectionStatusMock: vi.fn(),
+  getProviderModelCatalogMock: vi.fn(),
+  getProviderModelSelectionMock: vi.fn(),
   listenAppearanceChangedMock: vi.fn(),
   listenConnectionStatusChangedMock: vi.fn(),
+  listenProviderModelCatalogChangedMock: vi.fn(),
+  listenProviderModelSelectionChangedMock: vi.fn(),
   listenSettingsNavigateMock: vi.fn(),
   loadThemePreferenceMock: vi.fn(),
+  refreshProviderModelCatalogMock: vi.fn(),
   saveThemePreferenceMock: vi.fn(),
+  setProviderModelSelectionMock: vi.fn(),
   takeSettingsLaunchCategoryMock: vi.fn(),
 }));
 
@@ -36,6 +48,12 @@ vi.mock("../platform/provider", async (importOriginal) => {
     connectChatgpt: connectChatgptMock,
     disconnectChatgpt: disconnectChatgptMock,
     getConnectionStatus: getConnectionStatusMock,
+    getProviderModelCatalog: getProviderModelCatalogMock,
+    getProviderModelSelection: getProviderModelSelectionMock,
+    listenProviderModelCatalogChanged: listenProviderModelCatalogChangedMock,
+    listenProviderModelSelectionChanged: listenProviderModelSelectionChangedMock,
+    refreshProviderModelCatalog: refreshProviderModelCatalogMock,
+    setProviderModelSelection: setProviderModelSelectionMock,
   };
 });
 
@@ -61,17 +79,35 @@ describe("SettingsWindow", () => {
     connectChatgptMock.mockReset();
     disconnectChatgptMock.mockReset();
     getConnectionStatusMock.mockReset();
+    getProviderModelCatalogMock.mockReset();
+    getProviderModelSelectionMock.mockReset();
     listenAppearanceChangedMock.mockReset();
     listenConnectionStatusChangedMock.mockReset();
+    listenProviderModelCatalogChangedMock.mockReset();
+    listenProviderModelSelectionChangedMock.mockReset();
     listenSettingsNavigateMock.mockReset();
     loadThemePreferenceMock.mockReset();
+    refreshProviderModelCatalogMock.mockReset();
     saveThemePreferenceMock.mockReset();
+    setProviderModelSelectionMock.mockReset();
     takeSettingsLaunchCategoryMock.mockReset();
 
     getConnectionStatusMock.mockResolvedValue({
       state: "disconnected",
       providerId: "openai-chatgpt-compat",
       model: "gpt-5.5",
+    });
+    getProviderModelCatalogMock.mockResolvedValue({
+      providerId: "openai-chatgpt-compat",
+      models: [],
+      freshness: "stale",
+      retrievedAtUnixMs: null,
+      compatibilityRevision: null,
+    });
+    getProviderModelSelectionMock.mockResolvedValue({
+      providerId: "openai-chatgpt-compat",
+      selectedModelId: "gpt-5.5",
+      requiresSelection: false,
     });
     loadThemePreferenceMock.mockResolvedValue("system");
     saveThemePreferenceMock.mockImplementation((theme: "system" | "light" | "dark") =>
@@ -80,6 +116,8 @@ describe("SettingsWindow", () => {
     takeSettingsLaunchCategoryMock.mockResolvedValue(null);
     listenAppearanceChangedMock.mockResolvedValue(vi.fn());
     listenConnectionStatusChangedMock.mockResolvedValue(vi.fn());
+    listenProviderModelCatalogChangedMock.mockResolvedValue(vi.fn());
+    listenProviderModelSelectionChangedMock.mockResolvedValue(vi.fn());
     listenSettingsNavigateMock.mockResolvedValue(vi.fn());
     cancelChatgptConnectMock.mockResolvedValue(undefined);
   });

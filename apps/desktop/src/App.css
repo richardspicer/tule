@@ -414,6 +414,19 @@ textarea:focus-visible {
   min-width: 0;
 }
 
+.session-model-note {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.settings-field-label {
+  display: block;
+  margin: 12px 0 4px;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
 .session-meta select {
   max-width: min(100%, 220px);
   min-width: 0;

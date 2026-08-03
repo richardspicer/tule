@@ -212,6 +212,7 @@ export async function sendAgentMessage(options: {
   sessionId: string | null;
   userText: string;
   projectId: string | null;
+  modelId: string | null;
   onEvent: (event: AgentStreamEvent) => void;
 }): Promise<void> {
   const channel = new Channel<unknown>((payload) => {
@@ -227,6 +228,7 @@ export async function sendAgentMessage(options: {
       sessionId: options.sessionId,
       userText: options.userText,
       projectId: options.projectId,
+      modelId: options.modelId,
       channel,
     });
   } catch (error: unknown) {
@@ -266,6 +268,8 @@ export function getSafeAgentErrorMessageForCode(code: AgentErrorCode): string {
       return "Credential storage is unavailable on this device.";
     case "agent_storage_unavailable":
       return "Agent storage is unavailable. Try again.";
+    case "model_unavailable":
+      return "That model is unavailable. Choose another model for a new session.";
     case "provider_unavailable":
       return "The provider is unavailable. Try again.";
   }

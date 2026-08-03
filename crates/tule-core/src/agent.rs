@@ -17,7 +17,7 @@ pub const PROMPT_VERSION: &str = "tule-direct-agent-v1";
 /// Built-in experimental ChatGPT compatibility provider-profile identifier.
 pub const PROVIDER_PROFILE_ID: &str = "openai-chatgpt-compat";
 
-/// Fixed first-slice model identifier.
+/// Upgrade-compatible default model identifier when still present in the catalog.
 pub const MODEL_ID: &str = "gpt-5.5";
 
 /// Exact direct-conversation system instruction.
@@ -365,10 +365,13 @@ pub struct AgentSession {
 }
 
 impl AgentSession {
-    /// Creates a new session with the fixed provider/model identity.
+    /// Creates a new session with the validated provider/model identity.
+    ///
+    /// The model identifier is frozen for the session lifetime at first send.
     pub fn new(
         title: impl Into<String>,
         project_id: Option<ProjectId>,
+        model_id: impl Into<String>,
     ) -> Result<Self, ProjectTimeError> {
         let now = unix_now_ms()?;
         Ok(Self {
@@ -376,7 +379,7 @@ impl AgentSession {
             title: title.into(),
             project_id,
             provider_profile_id: PROVIDER_PROFILE_ID.to_owned(),
-            model_id: MODEL_ID.to_owned(),
+            model_id: model_id.into(),
             created_at_unix_ms: now,
             updated_at_unix_ms: now,
         })
@@ -491,6 +494,8 @@ pub struct AgentTurn {
 
 impl AgentTurn {
     /// Creates a pending turn ready for persistence before network transmission.
+    ///
+    /// `model_id` must match the frozen session model for every turn.
     #[allow(clippy::too_many_arguments)]
     pub fn new_pending(
         session_id: AgentSessionId,
@@ -499,6 +504,7 @@ impl AgentTurn {
         project_id: Option<ProjectId>,
         project_instructions: impl Into<String>,
         provider_request_id: ProviderRequestId,
+        model_id: impl Into<String>,
     ) -> Result<Self, ProjectTimeError> {
         Ok(Self {
             id: AgentTurnId::generate(),
@@ -509,7 +515,7 @@ impl AgentTurn {
             state: AgentTurnState::Pending,
             error_code: None,
             provider_profile_id: PROVIDER_PROFILE_ID.to_owned(),
-            model_id: MODEL_ID.to_owned(),
+            model_id: model_id.into(),
             provider_request_id,
             provider_response_id: None,
             usage_input_tokens: None,
@@ -872,16 +878,21 @@ pub struct CompletedTurnContext {
     pub agent_text: String,
 }
 
-/// Assembles the deterministic Responses JSON body.
+/// Assembles the deterministic Responses JSON body for the frozen session model.
+///
+/// Callers must supply a validated model identifier; the value is JSON-escaped.
 pub fn assemble_responses_request_json(
     completed_history: &[CompletedTurnContext],
     current_user_text: &str,
     saved_project_instructions: Option<&str>,
+    model_id: &str,
 ) -> Result<String, AgentContextError> {
     validate_user_text(current_user_text).map_err(AgentContextError::InvalidInput)?;
 
     let instructions = assemble_instructions(saved_project_instructions);
-    let mut body = String::from("{\"model\":\"gpt-5.5\",\"instructions\":");
+    let mut body = String::from("{\"model\":");
+    append_json_string(&mut body, model_id);
+    body.push_str(",\"instructions\":");
     append_json_string(&mut body, &instructions);
     body.push_str(",\"input\":[");
 
@@ -1177,18 +1188,23 @@ mod tests {
             user_text: "Hello \"world\"\n".to_owned(),
             agent_text: "Reply\\path".to_owned(),
         }];
-        let json =
-            assemble_responses_request_json(&history, "Next message", Some("Exact\ninstructions"))
-                .unwrap();
+        let json = assemble_responses_request_json(
+            &history,
+            "Next message",
+            Some("Exact\ninstructions"),
+            MODEL_ID,
+        )
+        .unwrap();
         let expected = r#"{"model":"gpt-5.5","instructions":"You are TULE's direct conversational Agent. Answer using only the conversation and any saved Project instructions supplied in this request. You have no tools, filesystem, process, network, repository, GitHub, publication, Deliberation, or external-action capability. Do not claim to have performed an action. If a request requires an unavailable action, explain that limitation and provide guidance instead.\n\nSaved Project instructions:\n---\nExact\ninstructions\n---","input":[{"role":"user","content":"Hello \"world\"\n"},{"role":"assistant","content":"Reply\\path"},{"role":"user","content":"Next message"}],"store":false,"stream":true}"#;
         assert_eq!(json, expected);
     }
 
     #[test]
     fn empty_project_instructions_do_not_append_block() {
-        let json = assemble_responses_request_json(&[], "Hello", None).unwrap();
+        let json = assemble_responses_request_json(&[], "Hello", None, "other-model").unwrap();
         assert!(!json.contains("Saved Project instructions"));
         assert!(json.contains(FIXED_INSTRUCTION));
+        assert!(json.contains("\"model\":\"other-model\""));
     }
 
     #[test]

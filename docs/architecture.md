@@ -39,14 +39,36 @@ behavior or React components.
 ## Agent Sessions and Provider Boundary
 
 The first Agent slice lives in `tule-core` as provider-neutral session, turn,
-event, and lifecycle use cases. The desktop host persists non-secret session
-state in the shared SQLite store, streams ordered channel events to the
-interface, and owns one experimental ChatGPT subscription compatibility
-adapter. Credentials stay in the OS credential store behind an opaque handle.
-The frontend receives only typed connection status and transcript data; it never
-receives authorization URLs, codes, tokens, account identifiers, or raw provider
-frames. Tools, connectors, filesystem access, and autonomous retries are out of
-scope for this slice.
+event, lifecycle, and model-selection use cases. The desktop host persists
+non-secret session state in the shared SQLite store, streams ordered channel
+events to the interface, and owns one experimental ChatGPT subscription
+compatibility adapter. Credentials stay in the OS credential store behind an
+opaque handle. The frontend receives only typed connection status, allowlisted
+model-catalog metadata, selected-default state, and transcript data; it never
+receives authorization URLs, codes, tokens, account identifiers, raw catalog
+payloads, provider instructions, tool definitions, or raw provider frames.
+
+After a successful connection, the native adapter fetches an account-aware model
+catalog from the authenticated ChatGPT compatibility models endpoint using the
+existing credentials, account context, disabled redirects, and truthful TULE
+identity. Only allowlisted non-secret fields are retained. The last validated
+catalog is cached in SQLite scoped to the provider profile and credential
+generation—never the raw account identifier—with retrieval time, ETag, and
+catalog-compatibility revision. A five-minute TTL marks freshness; failures show
+last-known catalog as stale rather than substituting hard-coded or public lists.
+An authenticated success with no usable models is a bounded catalog failure and
+does not erase the last validated snapshot. Connection-status commands remain
+separate from catalog and selected-default commands and events.
+
+A profile selected-model default persists independently of connection lifecycle.
+A new unsent Agent session may accept that default or another catalog model; the
+first valid send freezes the chosen provider-profile and model identifiers onto
+the durable session and every later turn. Persisted sessions expose a
+non-editable model label and require a new session to change models. Existing
+`gpt-5.5` provenance is preserved. Model rejection surfaces as
+`model_unavailable` without silent fallback or retry under another model. Tools,
+connectors, filesystem access, autonomous retries, and active-session model
+switching are out of scope for this slice.
 
 ## Project Persistence
 
@@ -95,9 +117,11 @@ Optional category payloads (`providers` or `appearance`) travel on the
 implementation. A normal reopen after Settings was hidden starts on Providers;
 refocusing a visible Settings window preserves its selected category.
 Appearance updates emit `appearance-changed`; authoritative non-secret
-connection status emits `connection-status-changed`. Event payloads contain only
-typed public values—never credentials, authorization URLs or codes, tokens,
-account identifiers, raw provider responses, SQLite paths, or internal errors.
+connection status emits `connection-status-changed`; allowlisted model catalog
+and selected-default updates emit `provider-model-catalog-changed` and
+`provider-model-selection-changed`. Event payloads contain only typed public
+values—never credentials, authorization URLs or codes, tokens, account
+identifiers, raw provider responses, SQLite paths, or internal errors.
 
 Appearance preference persistence lives in the desktop SQLite owner behind an
 explicit `appearance_preference` table and the typed

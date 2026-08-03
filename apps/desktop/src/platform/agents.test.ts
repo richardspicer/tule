@@ -106,6 +106,7 @@ describe("agents platform", () => {
       sessionId: null,
       userText: "Hello",
       projectId: null,
+      modelId: "gpt-5.5",
       onEvent: (event) => events.push(event.kind),
     });
 
@@ -116,6 +117,7 @@ describe("agents platform", () => {
         sessionId: null,
         userText: "Hello",
         projectId: null,
+        modelId: "gpt-5.5",
       }),
     );
   });

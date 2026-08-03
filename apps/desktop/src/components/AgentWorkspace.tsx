@@ -23,11 +23,19 @@ interface AgentProjectOption {
   displayName: string;
 }
 
+interface AgentModelOption {
+  id: string;
+  displayName: string;
+}
+
 interface AgentWorkspaceProps {
   title: string;
   projectId: string | null;
   projects: readonly AgentProjectOption[];
   modelLabel: string;
+  modelOptions: readonly AgentModelOption[];
+  selectedModelId: string | null;
+  modelLocked: boolean;
   turns: readonly AgentTurn[];
   draft: string;
   connected: boolean;
@@ -40,6 +48,7 @@ interface AgentWorkspaceProps {
   onSend: () => void;
   onCancel: () => void;
   onProjectChange: (projectId: string | null) => void;
+  onModelChange: (modelId: string) => void;
   onOpenProvidersSettings: () => void;
 }
 
@@ -68,6 +77,9 @@ export function AgentWorkspace({
   projectId,
   projects,
   modelLabel,
+  modelOptions,
+  selectedModelId,
+  modelLocked,
   turns,
   draft,
   connected,
@@ -80,9 +92,11 @@ export function AgentWorkspace({
   onSend,
   onCancel,
   onProjectChange,
+  onModelChange,
   onOpenProvidersSettings,
 }: AgentWorkspaceProps) {
   const titleId = useId();
+  const modelSelectId = useId();
   const transcriptRef = useRef<HTMLDivElement>(null);
   const composerRef = useRef<HTMLTextAreaElement>(null);
   const followRef = useRef(true);
@@ -196,8 +210,38 @@ export function AgentWorkspace({
             <span aria-hidden="true">·</span>
             <span>ChatGPT subscription</span>
             <span aria-hidden="true">·</span>
-            <span>{modelLabel}</span>
+            {modelLocked || modelOptions.length === 0 ? (
+              <span>{modelLabel}</span>
+            ) : (
+              <>
+                <label className="sr-only" htmlFor={modelSelectId}>
+                  Model for this session
+                </label>
+                <select
+                  id={modelSelectId}
+                  className="truncate"
+                  aria-label="Model for this session"
+                  value={selectedModelId ?? ""}
+                  disabled={sending || sendBlocked}
+                  onChange={(event) => onModelChange(event.currentTarget.value)}
+                >
+                  {selectedModelId === null || selectedModelId === "" ? (
+                    <option value="" disabled>
+                      Choose a model
+                    </option>
+                  ) : null}
+                  {modelOptions.map((model) => (
+                    <option key={model.id} value={model.id}>
+                      {model.displayName}
+                    </option>
+                  ))}
+                </select>
+              </>
+            )}
           </p>
+          {modelLocked ? (
+            <p className="session-model-note">Start a new session to change models.</p>
+          ) : null}
         </div>
       </header>
 

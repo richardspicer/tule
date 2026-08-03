@@ -1,7 +1,12 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import { ApplicationChrome } from "./ApplicationChrome";
-import { JumpToLatestIcon, SettingsIcon } from "./icons";
+import {
+  JumpToLatestIcon,
+  SETTINGS_ICON_EDGE_PADDING,
+  SettingsIcon,
+  settingsIconStrokedBounds,
+} from "./icons";
 import { Tooltip } from "./Tooltip";
 
 describe("chrome and transcript icons", () => {
@@ -44,5 +49,16 @@ describe("chrome and transcript icons", () => {
     expect(svg).toHaveAttribute("aria-hidden", "true");
     expect(svg?.querySelector("circle")).toBeTruthy();
     expect(svg?.querySelector("path")).toHaveAttribute("stroke-width", "1.5");
+  });
+
+  it("keeps the complete Settings gear stroke inside the viewBox with padding", () => {
+    const { container } = render(<SettingsIcon />);
+    const svg = container.querySelector("svg");
+    expect(svg).not.toBeNull();
+    expect(svg).toHaveAttribute("viewBox", "0 0 16 16");
+
+    const bounds = settingsIconStrokedBounds(svg!);
+    expect(bounds.min).toBeGreaterThanOrEqual(SETTINGS_ICON_EDGE_PADDING);
+    expect(bounds.max).toBeLessThanOrEqual(16 - SETTINGS_ICON_EDGE_PADDING);
   });
 });

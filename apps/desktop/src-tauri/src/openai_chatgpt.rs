@@ -53,6 +53,7 @@ const FALLBACK_CALLBACK_PORT: u16 = 1457;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(300);
 const MAX_CALLBACK_REQUEST: usize = 16 * 1024;
 const MAX_CALLBACK_VALUE: usize = 8 * 1024;
+const CALLBACK_SUCCESS_BODY: &str = "You can return to TULE. This window may be closed.";
 const MAX_PROVIDER_BODY: usize = 64 * 1024;
 const MAX_SSE_BUFFER: usize = 256 * 1024;
 const REFRESH_SKEW_SECS: i64 = 60;
@@ -1045,7 +1046,13 @@ async fn accept_callback(
         return Err(PublicError::InvalidInput);
     }
     let _ = socket
-        .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 48\r\n\r\nYou can return to TULE. This window may be closed.")
+        .write_all(
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{CALLBACK_SUCCESS_BODY}",
+                CALLBACK_SUCCESS_BODY.len(),
+            )
+            .as_bytes(),
+        )
         .await;
     Ok(code.clone())
 }
@@ -2083,6 +2090,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn successful_callback_response_returns_complete_closed_copy() {
+        assert_eq!(
+            CALLBACK_SUCCESS_BODY,
+            "You can return to TULE. This window may be closed."
+        );
+        assert_ne!(
+            CALLBACK_SUCCESS_BODY,
+            "You can return to TULE. This window may be close"
+        );
+        let response = callback_http_response(
+            "GET /auth/callback?state=expected&code=ok HTTP/1.1\r\nHost: localhost\r\n\r\n",
+            "expected",
+        )
+        .await;
+        let body = response.split("\r\n\r\n").nth(1).expect("response body");
+        assert!(response.contains(&format!("Content-Length: {}\r\n", body.len())));
+        assert_eq!(body, CALLBACK_SUCCESS_BODY);
+        assert_eq!(body, "You can return to TULE. This window may be closed.");
+    }
+
+    #[tokio::test]
     async fn callback_requires_exact_method_path_and_state_before_result() {
         assert_eq!(
             callback_result(
@@ -2640,6 +2668,20 @@ mod tests {
     }
 
     async fn callback_result(request: &str, expected_state: &str) -> Result<String, PublicError> {
+        let (result, _response) = callback_exchange(request, expected_state).await;
+        result
+    }
+
+    async fn callback_http_response(request: &str, expected_state: &str) -> String {
+        let (result, response) = callback_exchange(request, expected_state).await;
+        assert_eq!(result, Ok("ok".to_owned()));
+        response
+    }
+
+    async fn callback_exchange(
+        request: &str,
+        expected_state: &str,
+    ) -> (Result<String, PublicError>, String) {
         let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = accept_callback(listener, expected_state);
@@ -2648,9 +2690,10 @@ mod tests {
             socket.write_all(request.as_bytes()).await.unwrap();
             let mut response = Vec::new();
             let _ = socket.read_to_end(&mut response).await;
+            String::from_utf8(response).unwrap()
         };
-        let (result, ()) = tokio::join!(server, client);
-        result
+        let (result, response) = tokio::join!(server, client);
+        (result, response)
     }
 
     async fn local_http_response(status: StatusCode, body: Vec<u8>) -> reqwest::Response {

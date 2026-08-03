@@ -5,6 +5,7 @@ import {
   disconnectChatgpt,
   getConnectionStatus,
   getProviderErrorCode,
+  isStaleConnectCancellation,
   ProviderError,
 } from "./provider";
 
@@ -53,6 +54,13 @@ describe("provider platform", () => {
     await expect(connectChatgpt()).rejects.toBeInstanceOf(ProviderError);
     await expect(connectChatgpt()).rejects.toMatchObject({ code: "session_busy" });
     expect(getProviderErrorCode(new ProviderError("not_connected"))).toBe("not_connected");
+  });
+
+  it("identifies late connect cancellation without treating other failures as stale", () => {
+    expect(isStaleConnectCancellation(new ProviderError("invalid_input"))).toBe(true);
+    expect(isStaleConnectCancellation(new ProviderError("cancelled"))).toBe(false);
+    expect(isStaleConnectCancellation(new ProviderError("session_busy"))).toBe(false);
+    expect(isStaleConnectCancellation("invalid_input")).toBe(false);
   });
 
   it("rejects malformed status payloads", async () => {

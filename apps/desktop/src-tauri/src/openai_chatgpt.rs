@@ -53,6 +53,7 @@ const FALLBACK_CALLBACK_PORT: u16 = 1457;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(300);
 const MAX_CALLBACK_REQUEST: usize = 16 * 1024;
 const MAX_CALLBACK_VALUE: usize = 8 * 1024;
+const CALLBACK_SUCCESS_BODY: &str = "You can return to TULE. This window may be closed.";
 const MAX_PROVIDER_BODY: usize = 64 * 1024;
 const MAX_SSE_BUFFER: usize = 256 * 1024;
 const REFRESH_SKEW_SECS: i64 = 60;
@@ -167,6 +168,30 @@ impl ChatGptAdapter {
         *self.test_transport.lock().expect("lock") = Some(transport);
     }
 
+    /// Test-only helper that completes the browser callback against the bound
+    /// redirect using the production query parser.
+    #[cfg(test)]
+    pub(crate) async fn connect_in_browser_with_test_callback(
+        &self,
+        store: Arc<SqliteStore>,
+        code: &str,
+    ) -> Result<ConnectionStatus, PublicError> {
+        let code = code.to_owned();
+        self.connect_in_browser(store, move |url| {
+            let query = url.split_once('?').map(|(_, query)| query).expect("query");
+            let params = parse_query(query).expect("authorization query");
+            let state = params.get("state").expect("state").clone();
+            let redirect = params.get("redirect_uri").expect("redirect_uri").clone();
+            let callback = format!("{redirect}?state={state}&code={code}");
+            tokio::spawn(async move {
+                let response = reqwest::get(callback).await.expect("callback request");
+                assert!(response.status().is_success());
+            });
+            Ok(())
+        })
+        .await
+    }
+
     pub(crate) async fn connect_in_browser(
         &self,
         store: Arc<SqliteStore>,
@@ -202,15 +227,16 @@ impl ChatGptAdapter {
             }
         };
         let result = self
-            .connect_in_browser_inner(store, open_url, &cancel)
+            .connect_in_browser_inner(Arc::clone(&store), open_url, &cancel)
             .await;
         drop(operation);
         let cleanup = self.clear_connect_cancel(&cancel);
+        // Clear the transient connecting lifecycle before sampling terminal status.
         self.connecting.store(false, Ordering::SeqCst);
         match (result, cleanup) {
-            (Ok(status), Ok(())) => Ok(status),
+            (Ok(()), Ok(())) => Ok(self.connection_status_with_store(store.as_ref())),
             (Err(error), _) => Err(error),
-            (Ok(_), Err(error)) => Err(error),
+            (Ok(()), Err(error)) => Err(error),
         }
     }
 
@@ -219,7 +245,7 @@ impl ChatGptAdapter {
         store: Arc<SqliteStore>,
         open_url: impl FnOnce(&str) -> Result<(), PublicError>,
         cancel: &Arc<CancellationToken>,
-    ) -> Result<ConnectionStatus, PublicError> {
+    ) -> Result<(), PublicError> {
         let (pkce_challenge, pkce_verifier) = PkceCodeChallenge::new_random_sha256();
         let csrf = CsrfToken::new_random();
         let (listener, redirect_uri) = tokio::select! {
@@ -265,7 +291,7 @@ impl ChatGptAdapter {
             }
             TokenBundle::InvalidGrant => return Err(PublicError::AuthenticationRequired),
         }
-        Ok(self.connection_status_with_store(store.as_ref()))
+        Ok(())
     }
 
     pub(crate) fn cancel_connect(&self) -> Result<(), PublicError> {
@@ -1020,7 +1046,13 @@ async fn accept_callback(
         return Err(PublicError::InvalidInput);
     }
     let _ = socket
-        .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 48\r\n\r\nYou can return to TULE. This window may be closed.")
+        .write_all(
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{CALLBACK_SUCCESS_BODY}",
+                CALLBACK_SUCCESS_BODY.len(),
+            )
+            .as_bytes(),
+        )
         .await;
     Ok(code.clone())
 }
@@ -1370,6 +1402,19 @@ pub(crate) struct TokenValues {
     preserve_refresh: bool,
 }
 
+#[cfg(test)]
+impl TokenValues {
+    pub(crate) fn for_test(access: &str, refresh: &str, account: &str) -> Self {
+        Self {
+            access: access.into(),
+            refresh: refresh.into(),
+            account: account.into(),
+            expires_at_unix_ms: Some(i64::MAX / 2),
+            preserve_refresh: false,
+        }
+    }
+}
+
 impl TokenValues {
     fn zeroize(&mut self) {
         self.access.zeroize();
@@ -1647,6 +1692,79 @@ mod tests {
         assert_eq!(adapter.cancel_connect(), Ok(()));
         assert!(cancel.is_cancelled());
         assert_eq!(adapter.cancel_connect(), Err(PublicError::InvalidInput));
+    }
+
+    #[tokio::test]
+    async fn successful_browser_connect_returns_connected_after_clearing_connecting() {
+        struct SuccessExchange;
+        impl TestTransport for SuccessExchange {
+            fn exchange_token(
+                &self,
+                _: &str,
+                _: &str,
+                _: &str,
+                _: &str,
+            ) -> Result<TokenBundle, PublicError> {
+                Ok(TokenBundle::Success(token_values(
+                    "access", "refresh", "account", false,
+                )))
+            }
+            fn refresh_token(&self, _: &str, _: &str) -> Result<TokenBundle, PublicError> {
+                unreachable!()
+            }
+            fn inference(
+                &self,
+                _: &str,
+                _: &HeaderMap,
+                _: &str,
+            ) -> Result<MockInference, PublicError> {
+                unreachable!()
+            }
+        }
+
+        let fake = Arc::new(FakeCredentialStore::default());
+        let adapter = ChatGptAdapter::new(fake.clone());
+        adapter.set_test_transport(Arc::new(SuccessExchange));
+        let dir = unique_connect_tempfile_dir("success");
+        let store = Arc::new(SqliteStore::open(dir.path().join("tule.sqlite3")).unwrap());
+
+        let status = complete_browser_connect(&adapter, Arc::clone(&store), "ok-code").await;
+        assert_eq!(status.state, ConnectionState::Connected);
+        assert!(!adapter.connecting.load(Ordering::SeqCst));
+        assert!(adapter.connect_cancel.lock().unwrap().is_none());
+        // Completion already won; late Cancel must not claim cancellation.
+        assert_eq!(adapter.cancel_connect(), Err(PublicError::InvalidInput));
+        assert_eq!(
+            adapter.connection_status_with_store(store.as_ref()).state,
+            ConnectionState::Connected
+        );
+        for kind in ALL_CREDENTIAL_KINDS {
+            assert!(fake.peek(CREDENTIAL_HANDLE, kind).is_some());
+        }
+    }
+
+    #[tokio::test]
+    async fn active_browser_connect_cancellation_returns_cancelled_without_credentials() {
+        let _guard = CONNECT_TEST_LOCK.lock().await;
+        let fake = Arc::new(FakeCredentialStore::default());
+        let adapter = Arc::new(ChatGptAdapter::new(fake.clone()));
+        let dir = unique_connect_tempfile_dir("cancel");
+        let store = Arc::new(SqliteStore::open(dir.path().join("tule.sqlite3")).unwrap());
+        let cancel_adapter = Arc::clone(&adapter);
+
+        let result = adapter
+            .connect_in_browser(store, move |_url| cancel_adapter.cancel_connect())
+            .await;
+        assert_eq!(result, Err(PublicError::Cancelled));
+        assert!(!adapter.connecting.load(Ordering::SeqCst));
+        assert!(adapter.connect_cancel.lock().unwrap().is_none());
+        assert_eq!(
+            adapter.connection_status().state,
+            ConnectionState::Disconnected
+        );
+        for kind in ALL_CREDENTIAL_KINDS {
+            assert_eq!(fake.peek(CREDENTIAL_HANDLE, kind), None);
+        }
     }
 
     #[tokio::test]
@@ -1969,6 +2087,27 @@ mod tests {
             parse_query("state=%FF&code=x"),
             Err(PublicError::InvalidInput)
         );
+    }
+
+    #[tokio::test]
+    async fn successful_callback_response_returns_complete_closed_copy() {
+        assert_eq!(
+            CALLBACK_SUCCESS_BODY,
+            "You can return to TULE. This window may be closed."
+        );
+        assert_ne!(
+            CALLBACK_SUCCESS_BODY,
+            "You can return to TULE. This window may be close"
+        );
+        let response = callback_http_response(
+            "GET /auth/callback?state=expected&code=ok HTTP/1.1\r\nHost: localhost\r\n\r\n",
+            "expected",
+        )
+        .await;
+        let body = response.split("\r\n\r\n").nth(1).expect("response body");
+        assert!(response.contains(&format!("Content-Length: {}\r\n", body.len())));
+        assert_eq!(body, CALLBACK_SUCCESS_BODY);
+        assert_eq!(body, "You can return to TULE. This window may be closed.");
     }
 
     #[tokio::test]
@@ -2470,6 +2609,28 @@ mod tests {
         assert!(!SCOPES.contains("api.connectors"));
     }
 
+    // Fixed callback ports cannot be shared across parallel browser-connect tests.
+    static CONNECT_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    fn unique_connect_tempfile_dir(label: &str) -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .prefix(&format!("tule-openai-connect-{label}-"))
+            .tempdir()
+            .expect("tempdir")
+    }
+
+    async fn complete_browser_connect(
+        adapter: &ChatGptAdapter,
+        store: Arc<SqliteStore>,
+        code: &str,
+    ) -> ConnectionStatus {
+        let _guard = CONNECT_TEST_LOCK.lock().await;
+        adapter
+            .connect_in_browser_with_test_callback(store, code)
+            .await
+            .expect("browser connect should succeed")
+    }
+
     fn token_values(
         access: &str,
         refresh: &str,
@@ -2507,6 +2668,20 @@ mod tests {
     }
 
     async fn callback_result(request: &str, expected_state: &str) -> Result<String, PublicError> {
+        let (result, _response) = callback_exchange(request, expected_state).await;
+        result
+    }
+
+    async fn callback_http_response(request: &str, expected_state: &str) -> String {
+        let (result, response) = callback_exchange(request, expected_state).await;
+        assert_eq!(result, Ok("ok".to_owned()));
+        response
+    }
+
+    async fn callback_exchange(
+        request: &str,
+        expected_state: &str,
+    ) -> (Result<String, PublicError>, String) {
         let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = accept_callback(listener, expected_state);
@@ -2515,9 +2690,10 @@ mod tests {
             socket.write_all(request.as_bytes()).await.unwrap();
             let mut response = Vec::new();
             let _ = socket.read_to_end(&mut response).await;
+            String::from_utf8(response).unwrap()
         };
-        let (result, ()) = tokio::join!(server, client);
-        result
+        let (result, response) = tokio::join!(server, client);
+        (result, response)
     }
 
     async fn local_http_response(status: StatusCode, body: Vec<u8>) -> reqwest::Response {

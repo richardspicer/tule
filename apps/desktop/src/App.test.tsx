@@ -177,6 +177,48 @@ describe("App", () => {
     ).toBeInTheDocument();
   });
 
+  it("converges on terminal Connected status from the native connection event", async () => {
+    let emitStatus:
+      | ((status: {
+          state: "connected" | "disconnected" | "connecting";
+          providerId: string;
+          model: string;
+        }) => void)
+      | undefined;
+    listenConnectionStatusChangedMock.mockImplementation(
+      (
+        handler: (status: {
+          state: "connected" | "disconnected" | "connecting";
+          providerId: string;
+          model: string;
+        }) => void,
+      ) => {
+        emitStatus = handler;
+        return Promise.resolve(vi.fn());
+      },
+    );
+
+    render(<App />);
+    expect(
+      await screen.findByText("Connect ChatGPT in Settings to message the Agent."),
+    ).toBeInTheDocument();
+
+    act(() => {
+      emitStatus?.({
+        state: "connected",
+        providerId: "openai-chatgpt-compat",
+        model: "gpt-5.5",
+      });
+    });
+
+    await waitFor(() => {
+      expect(
+        screen.queryByText("Connect ChatGPT in Settings to message the Agent."),
+      ).not.toBeInTheDocument();
+    });
+    expect(screen.getByRole("textbox", { name: "Message the Agent" })).toBeInTheDocument();
+  });
+
   it("exits the whole application when an accepted main-window close occurs", async () => {
     const user = userEvent.setup();
     let closeHandler: NativeCloseRequestedHandler | undefined;

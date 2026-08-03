@@ -157,6 +157,32 @@ describe("SettingsWindow", () => {
     expect(within(nav).getByRole("button", { name: "Providers" })).toBeInTheDocument();
   });
 
+  it("shows Connected after successful browser connection without restart", async () => {
+    const user = userEvent.setup();
+    let resolveConnect:
+      ((status: { state: "connected"; providerId: string; model: string }) => void) | undefined;
+    connectChatgptMock.mockReturnValue(
+      new Promise((resolve) => {
+        resolveConnect = resolve;
+      }),
+    );
+
+    render(<SettingsWindow />);
+    await user.click(await screen.findByRole("button", { name: "Connect in browser" }));
+    expect(screen.getByText("Connecting")).toBeInTheDocument();
+
+    resolveConnect?.({
+      state: "connected",
+      providerId: "openai-chatgpt-compat",
+      model: "gpt-5.5",
+    });
+
+    expect(await screen.findByText("Connected")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Disconnect" })).toBeInTheDocument();
+    expect(screen.queryByText("Connecting")).not.toBeInTheDocument();
+    expect(screen.queryByText("Enter a valid message.")).not.toBeInTheDocument();
+  });
+
   it("cancels browser connection and reports the safe result", async () => {
     const user = userEvent.setup();
     let rejectConnect: ((error: ProviderError) => void) | undefined;
@@ -167,6 +193,11 @@ describe("SettingsWindow", () => {
     );
     cancelChatgptConnectMock.mockImplementation(() => {
       rejectConnect?.(new ProviderError("cancelled"));
+      getConnectionStatusMock.mockResolvedValue({
+        state: "disconnected",
+        providerId: "openai-chatgpt-compat",
+        model: "gpt-5.5",
+      });
       return Promise.resolve();
     });
 
@@ -176,6 +207,98 @@ describe("SettingsWindow", () => {
 
     expect(cancelChatgptConnectMock).toHaveBeenCalledOnce();
     expect(await screen.findByText("Browser connection cancelled.")).toBeInTheDocument();
+    expect(await screen.findByText("Disconnected")).toBeInTheDocument();
+    expect(screen.queryByText("Enter a valid message.")).not.toBeInTheDocument();
+  });
+
+  it("reconciles a late Cancel to Connected without Agent validation copy", async () => {
+    const user = userEvent.setup();
+    let resolveConnect:
+      ((status: { state: "connected"; providerId: string; model: string }) => void) | undefined;
+    connectChatgptMock.mockReturnValue(
+      new Promise((resolve) => {
+        resolveConnect = resolve;
+      }),
+    );
+    cancelChatgptConnectMock.mockImplementation(() => {
+      resolveConnect?.({
+        state: "connected",
+        providerId: "openai-chatgpt-compat",
+        model: "gpt-5.5",
+      });
+      getConnectionStatusMock.mockResolvedValue({
+        state: "connected",
+        providerId: "openai-chatgpt-compat",
+        model: "gpt-5.5",
+      });
+      return Promise.reject(new ProviderError("invalid_input"));
+    });
+
+    render(<SettingsWindow />);
+    await user.click(await screen.findByRole("button", { name: "Connect in browser" }));
+    await user.click(await screen.findByRole("button", { name: "Cancel connection" }));
+
+    expect(await screen.findByText("Connected")).toBeInTheDocument();
+    expect(screen.queryByText("Browser connection cancelled.")).not.toBeInTheDocument();
+    expect(screen.queryByText("Enter a valid message.")).not.toBeInTheDocument();
+    expect(screen.queryByText("Cancelling browser connection…")).not.toBeInTheDocument();
+  });
+
+  it("recovers from a safe provider failure without remaining Connecting", async () => {
+    const user = userEvent.setup();
+    connectChatgptMock.mockRejectedValue(new ProviderError("provider_unavailable"));
+    getConnectionStatusMock
+      .mockResolvedValueOnce({
+        state: "disconnected",
+        providerId: "openai-chatgpt-compat",
+        model: "gpt-5.5",
+      })
+      .mockResolvedValue({
+        state: "disconnected",
+        providerId: "openai-chatgpt-compat",
+        model: "gpt-5.5",
+      });
+
+    render(<SettingsWindow />);
+    await user.click(await screen.findByRole("button", { name: "Connect in browser" }));
+
+    expect(await screen.findByText("Disconnected")).toBeInTheDocument();
+    expect(screen.queryByText("Connecting")).not.toBeInTheDocument();
+    expect(screen.getByRole("alert")).toHaveTextContent("The provider is unavailable. Try again.");
+  });
+
+  it("applies terminal connection status events from the native process", async () => {
+    let emitStatus:
+      | ((status: {
+          state: "connected" | "disconnected" | "connecting";
+          providerId: string;
+          model: string;
+        }) => void)
+      | undefined;
+    listenConnectionStatusChangedMock.mockImplementation(
+      (
+        handler: (status: {
+          state: "connected" | "disconnected" | "connecting";
+          providerId: string;
+          model: string;
+        }) => void,
+      ) => {
+        emitStatus = handler;
+        return Promise.resolve(vi.fn());
+      },
+    );
+
+    render(<SettingsWindow />);
+    await screen.findByRole("button", { name: "Connect in browser" });
+
+    emitStatus?.({
+      state: "connected",
+      providerId: "openai-chatgpt-compat",
+      model: "gpt-5.5",
+    });
+
+    expect(await screen.findByText("Connected")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Disconnect" })).toBeInTheDocument();
   });
 
   it("persists appearance through the typed preference path", async () => {

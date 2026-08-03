@@ -101,13 +101,19 @@ errors.
 Appearance preference persistence lives in the desktop SQLite owner behind an
 explicit `appearance_preference` table and the typed
 `get_appearance_preference` / `set_appearance_preference` commands. Invalid or
-missing stored values resolve to `system`. Storage failure must not prevent the
-shell from opening and must not expose storage details across IPC. The webview
-applies theme immediately but does not own durable preference storage.
+missing stored values resolve to `system`. A valid legacy webview `tule-theme`
+value is imported into that native store once during upgrade and then retired;
+the webview must not re-own durable preference storage. `appearance-changed`
+emits the selected non-secret value even when a ready store rejects the write,
+while the command still returns the bounded persistence error so open windows
+stay visually synchronized. Storage failure must not prevent the shell from
+opening and must not expose storage details across IPC.
 
-Tauri capabilities grant event listen/unlisten and window destroy only to the
-named `main` and `settings` windows. The host does not expose generic window
-creation, filesystem, shell, SQL, or credential access to either webview.
+Tauri capabilities grant event listen/unlisten only to the named `main` and
+`settings` windows. Accepted main-window close prevents per-window destruction
+and exits the application; Settings close hides the singleton instead. The host
+does not expose generic window creation, filesystem, shell, SQL, or credential
+access to either webview.
 
 ## Trust Boundary
 

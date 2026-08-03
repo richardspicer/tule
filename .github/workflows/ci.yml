@@ -20,6 +20,10 @@ jobs:
     name: Validate and build Windows desktop
     runs-on: windows-2025
     timeout-minutes: 45
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
 
     steps:
       - name: Check out repository
@@ -45,6 +49,12 @@ jobs:
           corepack pnpm --version
           rustc --version
           cargo --version
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          cache-bin: false
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
       - name: Install frontend dependencies
         shell: pwsh

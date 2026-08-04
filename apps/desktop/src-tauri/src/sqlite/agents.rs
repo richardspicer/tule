@@ -3,7 +3,7 @@ use std::ops::Deref;
 use rusqlite::{OptionalExtension, params};
 use tule_core::{
     AgentEvent, AgentRepository, AgentSession, AgentSessionId, AgentTurn, AgentTurnId, ProjectId,
-    ProviderProfile,
+    ProviderProfile, Source, TurnSource,
 };
 
 use super::{SqliteStore, SqliteStoreError};
@@ -255,6 +255,7 @@ impl AgentRepository for SqliteStore {
         turn: &AgentTurn,
         session_created: &AgentEvent,
         turn_pending: &AgentEvent,
+        source: Option<&Source>,
     ) -> Result<(), Self::Error> {
         let mut connection = self.connection()?;
         let transaction = connection
@@ -262,6 +263,9 @@ impl AgentRepository for SqliteStore {
             .map_err(SqliteStoreError::Database)?;
         insert_session(&transaction, session)?;
         insert_turn(&transaction, turn)?;
+        if let Some(source) = source {
+            insert_source_with_association(&transaction, turn.id(), source, 0)?;
+        }
         insert_event(&transaction, session_created)?;
         insert_event(&transaction, turn_pending)?;
         transaction.commit().map_err(SqliteStoreError::Database)
@@ -272,6 +276,7 @@ impl AgentRepository for SqliteStore {
         session: &AgentSession,
         turn: &AgentTurn,
         turn_pending: &AgentEvent,
+        source: Option<&Source>,
     ) -> Result<(), Self::Error> {
         let mut connection = self.connection()?;
         let transaction = connection
@@ -279,8 +284,76 @@ impl AgentRepository for SqliteStore {
             .map_err(SqliteStoreError::Database)?;
         update_session(&transaction, session)?;
         insert_turn(&transaction, turn)?;
+        if let Some(source) = source {
+            insert_source_with_association(&transaction, turn.id(), source, 0)?;
+        }
         insert_event(&transaction, turn_pending)?;
         transaction.commit().map_err(SqliteStoreError::Database)
+    }
+
+    fn list_turn_sources(
+        &self,
+        session_id: &AgentSessionId,
+    ) -> Result<Vec<TurnSource>, Self::Error> {
+        let connection = self.connection()?;
+        let mut statement = connection
+            .prepare(
+                "SELECT t.id, s.id, s.origin_kind, s.display_name, s.byte_count, s.content_sha256,
+                        s.content, s.created_at_unix_ms, ts.attachment_order
+                 FROM agent_turn_sources ts
+                 INNER JOIN agent_sources s ON s.id = ts.source_id
+                 INNER JOIN agent_turns t ON t.id = ts.turn_id
+                 WHERE t.session_id = ?1
+                 ORDER BY t.ordinal ASC, ts.attachment_order ASC",
+            )
+            .map_err(SqliteStoreError::Database)?;
+        let rows = statement
+            .query_map([session_id.to_string()], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, i64>(7)?,
+                    row.get::<_, i64>(8)?,
+                ))
+            })
+            .map_err(SqliteStoreError::Database)?;
+        let mut sources = Vec::new();
+        for row in rows {
+            let (
+                turn_id,
+                source_id,
+                origin_kind,
+                display_name,
+                byte_count,
+                content_sha256,
+                content,
+                created_at_unix_ms,
+                attachment_order,
+            ) = row.map_err(SqliteStoreError::Database)?;
+            let byte_count = u64::try_from(byte_count).map_err(|_| SqliteStoreError::Numeric)?;
+            let attachment_order =
+                u32::try_from(attachment_order).map_err(|_| SqliteStoreError::Numeric)?;
+            let source = Source::from_stored_parts(
+                &source_id,
+                origin_kind,
+                display_name,
+                byte_count,
+                content_sha256,
+                content,
+                created_at_unix_ms,
+            )
+            .map_err(SqliteStoreError::MalformedSource)?;
+            sources.push(
+                TurnSource::from_stored_parts(&turn_id, source, attachment_order)
+                    .map_err(SqliteStoreError::MalformedSource)?,
+            );
+        }
+        Ok(sources)
     }
 
     fn checkpoint_turn(
@@ -433,6 +506,44 @@ fn update_inflight_turn(
             rusqlite::Error::QueryReturnedNoRows,
         ));
     }
+    Ok(())
+}
+
+fn insert_source_with_association(
+    connection: &impl Deref<Target = rusqlite::Connection>,
+    turn_id: AgentTurnId,
+    source: &Source,
+    attachment_order: u32,
+) -> Result<(), SqliteStoreError> {
+    let byte_count = i64::try_from(source.byte_count()).map_err(|_| SqliteStoreError::Numeric)?;
+    let attachment_order = i64::from(attachment_order);
+    connection
+        .execute(
+            "INSERT INTO agent_sources (
+                id, origin_kind, display_name, byte_count, content_sha256, content, created_at_unix_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                source.id().to_string(),
+                source.origin_kind(),
+                source.display_name(),
+                byte_count,
+                source.content_sha256(),
+                source.content(),
+                source.created_at_unix_ms()
+            ],
+        )
+        .map_err(SqliteStoreError::Database)?;
+    connection
+        .execute(
+            "INSERT INTO agent_turn_sources (turn_id, source_id, attachment_order)
+             VALUES (?1, ?2, ?3)",
+            params![
+                turn_id.to_string(),
+                source.id().to_string(),
+                attachment_order
+            ],
+        )
+        .map_err(SqliteStoreError::Database)?;
     Ok(())
 }
 
@@ -604,7 +715,7 @@ fn reconstruct_event(row: EventRow) -> Result<AgentEvent, SqliteStoreError> {
 mod tests {
     use tule_core::{
         AgentEvent, AgentEventKind, AgentRepository, AgentSession, AgentTurn, AgentTurnState,
-        PROVIDER_PROFILE_ID, ProviderRequestId,
+        PROVIDER_PROFILE_ID, ProviderRequestId, Source, prepare_agent_send,
     };
 
     use super::*;
@@ -643,7 +754,7 @@ mod tests {
         )
         .unwrap();
         store
-            .create_session_with_first_turn(&session, &turn, &created, &pending)
+            .create_session_with_first_turn(&session, &turn, &created, &pending, None)
             .unwrap();
 
         turn.append_agent_text("partial\r\n応答").unwrap();
@@ -717,7 +828,8 @@ mod tests {
         let store = SqliteStore::open(directory.path().join("association.sqlite3")).unwrap();
         let project = tule_core::create_project(&store, "Project context").unwrap();
         let prepared =
-            tule_core::prepare_agent_send(&store, None, "Hello", None, "", "gpt-5.5").unwrap();
+            tule_core::prepare_agent_send(&store, None, "Hello", None, "", "gpt-5.5", None)
+                .unwrap();
         tule_core::complete_agent_turn(&store, prepared.turn.id(), None, None, None).unwrap();
 
         let mut changed = store.find_session(&prepared.session.id()).unwrap().unwrap();
@@ -756,7 +868,8 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let store = SqliteStore::open(directory.path().join("terminal-cas.sqlite3")).unwrap();
         let prepared =
-            tule_core::prepare_agent_send(&store, None, "Hello", None, "", "gpt-5.5").unwrap();
+            tule_core::prepare_agent_send(&store, None, "Hello", None, "", "gpt-5.5", None)
+                .unwrap();
         let mut stale = prepared.turn.clone();
         let completed =
             tule_core::complete_agent_turn(&store, prepared.turn.id(), None, None, None).unwrap();
@@ -824,7 +937,7 @@ mod tests {
             )
             .unwrap();
             store
-                .create_session_with_first_turn(&session, &turn, &created, &pending)
+                .create_session_with_first_turn(&session, &turn, &created, &pending, None)
                 .unwrap();
             turn_ids.push(turn.id());
             turn.interrupt().unwrap();
@@ -847,5 +960,96 @@ mod tests {
                 AgentTurnState::Pending
             );
         }
+    }
+
+    #[test]
+    fn source_round_trip_preserves_exact_content_and_omits_paths() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = SqliteStore::open(directory.path().join("sources.sqlite3")).unwrap();
+        let content = "α\r\nline two\n";
+        let source = Source::new_local_text("ユニコード.txt", content).unwrap();
+        let hash = source.content_sha256().to_owned();
+        let prepared = prepare_agent_send(
+            &store,
+            None,
+            "Use attachment",
+            None,
+            "",
+            "gpt-5.5",
+            Some(&source),
+        )
+        .unwrap();
+        let listed = store.list_turn_sources(&prepared.session.id()).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].source().content(), content);
+        assert_eq!(listed[0].source().display_name(), "ユニコード.txt");
+        assert_eq!(listed[0].source().content_sha256(), hash);
+        assert_eq!(listed[0].attachment_order(), 0);
+
+        let path = directory.path().join("sources.sqlite3");
+        drop(store);
+        let reopened = SqliteStore::open(&path).unwrap();
+        let again = reopened.list_turn_sources(&prepared.session.id()).unwrap();
+        assert_eq!(again[0].source().content(), content);
+        let dump: String = reopened
+            .connection()
+            .unwrap()
+            .query_row(
+                "SELECT group_concat(sql, '\n') FROM sqlite_master",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(!dump.to_lowercase().contains("path"));
+        let content_row: String = reopened
+            .connection()
+            .unwrap()
+            .query_row("SELECT content FROM agent_sources LIMIT 1", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(content_row, content);
+    }
+
+    #[test]
+    fn source_insert_rolls_back_with_turn_on_event_failure() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = SqliteStore::open(directory.path().join("source-atomic.sqlite3")).unwrap();
+        let session = AgentSession::new("Atomic", None, "gpt-5.5").unwrap();
+        let turn = AgentTurn::new_pending(
+            session.id(),
+            0,
+            "Hello",
+            None,
+            "",
+            ProviderRequestId::generate(),
+            "gpt-5.5",
+        )
+        .unwrap();
+        let created =
+            AgentEvent::new(session.id(), None, 0, AgentEventKind::SessionCreated).unwrap();
+        // Duplicate sequence forces the second event insert to fail after Source insert.
+        let pending = AgentEvent::new(
+            session.id(),
+            Some(turn.id()),
+            0,
+            AgentEventKind::TurnPending,
+        )
+        .unwrap();
+        let source = Source::new_local_text("a.txt", "body").unwrap();
+        assert!(
+            store
+                .create_session_with_first_turn(&session, &turn, &created, &pending, Some(&source))
+                .is_err()
+        );
+        let connection = store.connection().unwrap();
+        let source_count: i64 = connection
+            .query_row("SELECT COUNT(*) FROM agent_sources", [], |row| row.get(0))
+            .unwrap();
+        let turn_count: i64 = connection
+            .query_row("SELECT COUNT(*) FROM agent_turns", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(source_count, 0);
+        assert_eq!(turn_count, 0);
     }
 }

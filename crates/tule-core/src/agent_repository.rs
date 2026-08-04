@@ -2,7 +2,9 @@
 
 use std::error::Error;
 
-use crate::{AgentEvent, AgentSession, AgentSessionId, AgentTurn, AgentTurnId, ProjectId};
+use crate::{
+    AgentEvent, AgentSession, AgentSessionId, AgentTurn, AgentTurnId, ProjectId, Source, TurnSource,
+};
 
 /// Non-secret provider-profile metadata persisted in application storage.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -201,22 +203,30 @@ pub trait AgentRepository: Send + Sync {
     /// Lists events for a session in ascending sequence order.
     fn list_events(&self, session_id: &AgentSessionId) -> Result<Vec<AgentEvent>, Self::Error>;
 
-    /// Atomically creates a first-send session, pending turn, and events.
+    /// Atomically creates a first-send session, pending turn, optional Source, and events.
     fn create_session_with_first_turn(
         &self,
         session: &AgentSession,
         turn: &AgentTurn,
         session_created: &AgentEvent,
         turn_pending: &AgentEvent,
+        source: Option<&Source>,
     ) -> Result<(), Self::Error>;
 
-    /// Atomically appends a turn and its pending event to an existing session.
+    /// Atomically appends a turn, optional Source, and pending event to an existing session.
     fn append_turn_with_pending_event(
         &self,
         session: &AgentSession,
         turn: &AgentTurn,
         turn_pending: &AgentEvent,
+        source: Option<&Source>,
     ) -> Result<(), Self::Error>;
+
+    /// Lists Sources for a session in owning-turn ordinal then attachment-order.
+    fn list_turn_sources(
+        &self,
+        session_id: &AgentSessionId,
+    ) -> Result<Vec<TurnSource>, Self::Error>;
 
     /// Atomically checkpoints turn text and optionally records first streaming.
     fn checkpoint_turn(

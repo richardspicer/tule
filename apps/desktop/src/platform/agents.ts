@@ -25,6 +25,16 @@ const agentTurnStates: readonly AgentTurnState[] = [
   "interrupted",
 ];
 
+export type SourceOriginKind = "local_text_file";
+
+export interface AgentSourceMetadata {
+  id: string;
+  originKind: SourceOriginKind;
+  displayName: string;
+  byteCount: number;
+  contentSha256: string;
+}
+
 export interface AgentTurn {
   id: string;
   ordinal: number;
@@ -32,6 +42,7 @@ export interface AgentTurn {
   agentText: string;
   state: AgentTurnState;
   errorCode: AgentErrorCode | null;
+  sources: AgentSourceMetadata[];
 }
 
 export interface AgentSessionDetail {
@@ -44,7 +55,27 @@ export type AgentStreamEvent =
   | { kind: "delta"; turn_id: string; text: string }
   | { kind: "terminal"; turn: AgentTurn };
 
-export type AgentErrorCode = ProviderErrorCode;
+export type AgentSourceErrorCode =
+  "source_unreadable" | "source_unsupported" | "source_too_large" | "source_draft_expired";
+
+export type AgentErrorCode = ProviderErrorCode | AgentSourceErrorCode;
+
+const agentSourceErrorCodes: readonly AgentSourceErrorCode[] = [
+  "source_unreadable",
+  "source_unsupported",
+  "source_too_large",
+  "source_draft_expired",
+];
+
+export interface PendingSourceAttachment {
+  draftHandle: string;
+  displayName: string;
+  byteCount: number;
+  originKind: SourceOriginKind;
+}
+
+export type PickAgentTextSourceResult =
+  { status: "cancelled" } | { status: "selected"; attachment: PendingSourceAttachment };
 
 export class AgentError extends Error {
   readonly code: AgentErrorCode;
@@ -56,9 +87,40 @@ export class AgentError extends Error {
   }
 }
 
+function isAgentSourceErrorCode(value: unknown): value is AgentSourceErrorCode {
+  return typeof value === "string" && agentSourceErrorCodes.includes(value as AgentSourceErrorCode);
+}
+
+function isAgentErrorCode(value: unknown): value is AgentErrorCode {
+  return isProviderErrorCode(value) || isAgentSourceErrorCode(value);
+}
+
+function extractErrorCode(error: unknown): unknown {
+  if (typeof error === "string") {
+    return error;
+  }
+
+  if (typeof error === "object" && error !== null) {
+    if ("code" in error) {
+      return error.code;
+    }
+
+    if ("message" in error && typeof error.message === "string") {
+      return error.message;
+    }
+  }
+
+  return undefined;
+}
+
 export function getAgentErrorCode(error: unknown): AgentErrorCode {
   if (error instanceof AgentError) {
     return error.code;
+  }
+
+  const code = extractErrorCode(error);
+  if (isAgentErrorCode(code)) {
+    return code;
   }
 
   return getProviderErrorCode(error);
@@ -85,6 +147,28 @@ function isAgentSession(value: unknown): value is AgentSession {
   );
 }
 
+function isSourceMetadata(value: unknown): value is AgentSourceMetadata {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return false;
+  }
+
+  return (
+    "id" in value &&
+    typeof value.id === "string" &&
+    "originKind" in value &&
+    value.originKind === "local_text_file" &&
+    "displayName" in value &&
+    typeof value.displayName === "string" &&
+    "byteCount" in value &&
+    typeof value.byteCount === "number" &&
+    Number.isFinite(value.byteCount) &&
+    value.byteCount >= 0 &&
+    "contentSha256" in value &&
+    typeof value.contentSha256 === "string" &&
+    /^[0-9a-f]{64}$/.test(value.contentSha256)
+  );
+}
+
 function isAgentTurn(value: unknown): value is AgentTurn {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     return false;
@@ -103,7 +187,10 @@ function isAgentTurn(value: unknown): value is AgentTurn {
     typeof value.state === "string" &&
     agentTurnStates.includes(value.state as AgentTurnState) &&
     "errorCode" in value &&
-    (value.errorCode === null || isProviderErrorCode(value.errorCode))
+    (value.errorCode === null || isAgentErrorCode(value.errorCode)) &&
+    "sources" in value &&
+    Array.isArray(value.sources) &&
+    value.sources.every(isSourceMetadata)
   );
 }
 
@@ -176,6 +263,48 @@ function isAgentStreamEvent(value: unknown): value is AgentStreamEvent {
   return false;
 }
 
+function validatePickResult(value: unknown): PickAgentTextSourceResult {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new AgentError("agent_storage_unavailable");
+  }
+
+  const record = value as Record<string, unknown>;
+  const keys = Object.keys(record).sort();
+  if (record.status === "cancelled") {
+    const allowed = ["byteCount", "displayName", "draftHandle", "originKind", "status"];
+    if (!keys.every((key) => allowed.includes(key))) {
+      throw new AgentError("agent_storage_unavailable");
+    }
+    return { status: "cancelled" };
+  }
+
+  if (
+    record.status === "selected" &&
+    typeof record.draftHandle === "string" &&
+    record.draftHandle.length > 0 &&
+    typeof record.displayName === "string" &&
+    typeof record.byteCount === "number" &&
+    Number.isFinite(record.byteCount) &&
+    record.byteCount >= 0 &&
+    record.originKind === "local_text_file" &&
+    keys.every((key) =>
+      ["byteCount", "displayName", "draftHandle", "originKind", "status"].includes(key),
+    )
+  ) {
+    return {
+      status: "selected",
+      attachment: {
+        draftHandle: record.draftHandle,
+        displayName: record.displayName,
+        byteCount: record.byteCount,
+        originKind: "local_text_file",
+      },
+    };
+  }
+
+  throw new AgentError("agent_storage_unavailable");
+}
+
 async function invokeAgentCommand(
   command: string,
   args?: Record<string, unknown>,
@@ -208,11 +337,24 @@ export async function cancelAgentTurn(turnId: string): Promise<void> {
   await invokeAgentCommand("cancel_agent_turn", { turnId });
 }
 
+export async function pickAgentTextSource(): Promise<PickAgentTextSourceResult> {
+  return validatePickResult(await invokeAgentCommand("pick_agent_text_source"));
+}
+
+export async function clearAgentTextSourceDraft(draftHandle: string | null): Promise<void> {
+  await invokeAgentCommand("clear_agent_text_source_draft", { draftHandle });
+}
+
+export async function setAgentSourceDraftScope(scopeKey: string): Promise<void> {
+  await invokeAgentCommand("set_agent_source_draft_scope", { scopeKey });
+}
+
 export async function sendAgentMessage(options: {
   sessionId: string | null;
   userText: string;
   projectId: string | null;
   modelId: string | null;
+  sourceDraftHandle: string | null;
   onEvent: (event: AgentStreamEvent) => void;
 }): Promise<void> {
   const channel = new Channel<unknown>((payload) => {
@@ -229,6 +371,7 @@ export async function sendAgentMessage(options: {
       userText: options.userText,
       projectId: options.projectId,
       modelId: options.modelId,
+      sourceDraftHandle: options.sourceDraftHandle,
       channel,
     });
   } catch (error: unknown) {
@@ -272,9 +415,25 @@ export function getSafeAgentErrorMessageForCode(code: AgentErrorCode): string {
       return "That model is unavailable. Choose another model for a new session.";
     case "provider_unavailable":
       return "The provider is unavailable. Try again.";
+    case "source_unreadable":
+      return "That file could not be read.";
+    case "source_unsupported":
+      return "That file is not supported as a text attachment.";
+    case "source_too_large":
+      return "That file is too large to attach.";
+    case "source_draft_expired":
+      return "The attachment is no longer available. Choose the file again.";
   }
 }
 
 export function getSafeAgentErrorMessage(error: unknown): string {
   return getSafeAgentErrorMessageForCode(getAgentErrorCode(error));
+}
+
+export function formatSourceByteCount(byteCount: number): string {
+  if (byteCount < 1024) {
+    return `${byteCount} B`;
+  }
+
+  return `${(byteCount / 1024).toFixed(byteCount < 10 * 1024 ? 1 : 0)} KB`;
 }

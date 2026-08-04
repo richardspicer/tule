@@ -8,7 +8,12 @@ import {
   type KeyboardEvent,
   type UIEvent,
 } from "react";
-import { getSafeAgentErrorMessageForCode, type AgentTurn } from "../platform/agents";
+import {
+  formatSourceByteCount,
+  getSafeAgentErrorMessageForCode,
+  type AgentTurn,
+  type PendingSourceAttachment,
+} from "../platform/agents";
 import { JumpToLatestIcon } from "./icons";
 import { Tooltip } from "./Tooltip";
 import { TuleWordmark } from "./TuleWordmark";
@@ -38,6 +43,7 @@ interface AgentWorkspaceProps {
   modelLocked: boolean;
   turns: readonly AgentTurn[];
   draft: string;
+  pendingAttachment: PendingSourceAttachment | null;
   connected: boolean;
   sending: boolean;
   sendBlocked: boolean;
@@ -47,6 +53,8 @@ interface AgentWorkspaceProps {
   onDraftChange: (value: string) => void;
   onSend: () => void;
   onCancel: () => void;
+  onAttach: () => void;
+  onRemoveAttachment: () => void;
   onProjectChange: (projectId: string | null) => void;
   onModelChange: (modelId: string) => void;
   onOpenProvidersSettings: () => void;
@@ -82,6 +90,7 @@ export function AgentWorkspace({
   modelLocked,
   turns,
   draft,
+  pendingAttachment,
   connected,
   sending,
   sendBlocked,
@@ -91,6 +100,8 @@ export function AgentWorkspace({
   onDraftChange,
   onSend,
   onCancel,
+  onAttach,
+  onRemoveAttachment,
   onProjectChange,
   onModelChange,
   onOpenProvidersSettings,
@@ -263,11 +274,18 @@ export function AgentWorkspace({
             ) : (
               turns.map((turn) => {
                 const stateLabel = turnStateLabel(turn.state);
+                const attachment = turn.sources[0] ?? null;
                 return (
                   <article key={turn.id} className="turn">
                     <div className="turn-block user">
                       <h2>You</h2>
                       <pre className="turn-text">{turn.userText}</pre>
+                      {attachment === null ? null : (
+                        <p className="turn-attachment">
+                          Attached snapshot: {attachment.displayName} (
+                          {formatSourceByteCount(attachment.byteCount)})
+                        </p>
+                      )}
                     </div>
                     <div className="turn-block agent">
                       <h2>Agent</h2>
@@ -325,7 +343,37 @@ export function AgentWorkspace({
                 onChange={(event) => onDraftChange(event.currentTarget.value)}
                 onKeyDown={handleKeyDown}
               />
+              {pendingAttachment === null ? null : (
+                <div className="composer-attachment" aria-live="polite">
+                  <p>
+                    Captured snapshot: {pendingAttachment.displayName} (
+                    {formatSourceByteCount(pendingAttachment.byteCount)})
+                  </p>
+                  <button
+                    className="secondary-action"
+                    type="button"
+                    disabled={sending}
+                    aria-label={`Remove attachment ${pendingAttachment.displayName}`}
+                    onClick={onRemoveAttachment}
+                  >
+                    Remove
+                  </button>
+                </div>
+              )}
               <div className="composer-actions">
+                <button
+                  className="secondary-action"
+                  type="button"
+                  disabled={sending}
+                  aria-label={
+                    pendingAttachment === null
+                      ? "Attach a text file"
+                      : "Replace the attached text file"
+                  }
+                  onClick={onAttach}
+                >
+                  {pendingAttachment === null ? "Attach" : "Replace"}
+                </button>
                 {sending ? (
                   <button
                     className="secondary-action"

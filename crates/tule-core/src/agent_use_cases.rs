@@ -6,8 +6,8 @@ use crate::{
     AgentContextError, AgentEvent, AgentEventKind, AgentInputError, AgentOutputLimitError,
     AgentRepository, AgentSession, AgentSessionId, AgentTurn, AgentTurnFinishError, AgentTurnId,
     AgentTurnState, CompletedTurnContext, IllegalAgentTurnTransition, InvalidModelId, ProjectId,
-    ProjectTimeError, ProviderRequestId, assemble_responses_request_json, derive_session_title,
-    validate_model_id, validate_user_text,
+    ProjectTimeError, ProviderRequestId, Source, SourceContext, TurnSource,
+    assemble_responses_request_json, derive_session_title, validate_model_id, validate_user_text,
 };
 
 /// Result of preparing a first or follow-up send before network transmission.
@@ -35,6 +35,7 @@ pub fn prepare_agent_send<R>(
     project_id: Option<ProjectId>,
     saved_project_instructions: &str,
     model_id: &str,
+    source: Option<&Source>,
 ) -> Result<PreparedAgentSend, PrepareAgentSendError>
 where
     R: AgentRepository + ?Sized,
@@ -76,11 +77,15 @@ where
         let turns = repository
             .list_turns(&session.id())
             .map_err(PrepareAgentSendError::repository)?;
-        completed_history_from_turns(&turns)
+        let sources = repository
+            .list_turn_sources(&session.id())
+            .map_err(PrepareAgentSendError::repository)?;
+        completed_history_from_turns(&turns, &sources)
     } else {
         Vec::new()
     };
 
+    let current_source = source.map(SourceContext::from);
     let request_json = assemble_responses_request_json(
         &completed_history,
         user_text,
@@ -90,6 +95,7 @@ where
             Some(saved_project_instructions)
         },
         &frozen_model_id,
+        current_source.as_ref(),
     )
     .map_err(PrepareAgentSendError::from)?;
 
@@ -124,7 +130,7 @@ where
         )
         .map_err(PrepareAgentSendError::Time)?;
         repository
-            .append_turn_with_pending_event(&session, &turn, &turn_pending)
+            .append_turn_with_pending_event(&session, &turn, &turn_pending, source)
             .map_err(PrepareAgentSendError::repository)?;
         return Ok(PreparedAgentSend {
             session,
@@ -157,7 +163,7 @@ where
     )
     .map_err(PrepareAgentSendError::Time)?;
     repository
-        .create_session_with_first_turn(&session, &turn, &session_created, &turn_pending)
+        .create_session_with_first_turn(&session, &turn, &session_created, &turn_pending, source)
         .map_err(PrepareAgentSendError::repository)?;
 
     Ok(PreparedAgentSend {
@@ -372,13 +378,27 @@ where
 
 /// Selects completed turns only for later provider context.
 #[must_use]
-pub fn completed_history_from_turns(turns: &[AgentTurn]) -> Vec<CompletedTurnContext> {
+/// Selects completed prior turns and their Sources in owning-turn order.
+pub fn completed_history_from_turns(
+    turns: &[AgentTurn],
+    sources: &[TurnSource],
+) -> Vec<CompletedTurnContext> {
     turns
         .iter()
         .filter(|turn| turn.state() == AgentTurnState::Completed)
-        .map(|turn| CompletedTurnContext {
-            user_text: turn.user_text().to_owned(),
-            agent_text: turn.agent_text().to_owned(),
+        .map(|turn| {
+            let mut turn_sources: Vec<&TurnSource> = sources
+                .iter()
+                .filter(|item| item.turn_id() == turn.id())
+                .collect();
+            turn_sources.sort_by_key(|item| item.attachment_order());
+            CompletedTurnContext {
+                user_text: turn.user_text().to_owned(),
+                agent_text: turn.agent_text().to_owned(),
+                source: turn_sources
+                    .first()
+                    .map(|item| SourceContext::from(item.source())),
+            }
         })
         .collect()
 }
@@ -662,6 +682,7 @@ mod tests {
         sessions: Vec<AgentSession>,
         turns: Vec<AgentTurn>,
         events: Vec<AgentEvent>,
+        turn_sources: Vec<TurnSource>,
     }
 
     impl AgentRepository for FakeAgentRepository {
@@ -889,9 +910,17 @@ mod tests {
             turn: &AgentTurn,
             session_created: &AgentEvent,
             turn_pending: &AgentEvent,
+            source: Option<&Source>,
         ) -> Result<(), Self::Error> {
             self.create_session(session)?;
             self.create_turn(turn)?;
+            if let Some(source) = source {
+                self.inner
+                    .lock()
+                    .unwrap()
+                    .turn_sources
+                    .push(TurnSource::new(turn.id(), source.clone(), 0));
+            }
             self.append_event(session_created)?;
             self.append_event(turn_pending)?;
             Ok(())
@@ -902,11 +931,47 @@ mod tests {
             session: &AgentSession,
             turn: &AgentTurn,
             turn_pending: &AgentEvent,
+            source: Option<&Source>,
         ) -> Result<(), Self::Error> {
             self.update_session(session)?;
             self.create_turn(turn)?;
+            if let Some(source) = source {
+                self.inner
+                    .lock()
+                    .unwrap()
+                    .turn_sources
+                    .push(TurnSource::new(turn.id(), source.clone(), 0));
+            }
             self.append_event(turn_pending)?;
             Ok(())
+        }
+
+        fn list_turn_sources(
+            &self,
+            session_id: &AgentSessionId,
+        ) -> Result<Vec<TurnSource>, Self::Error> {
+            let turns = self.list_turns(session_id)?;
+            let turn_ids: std::collections::HashSet<_> = turns.iter().map(AgentTurn::id).collect();
+            let mut sources: Vec<_> = self
+                .inner
+                .lock()
+                .unwrap()
+                .turn_sources
+                .iter()
+                .filter(|item| turn_ids.contains(&item.turn_id()))
+                .cloned()
+                .collect();
+            sources.sort_by_key(|item| {
+                (
+                    turns
+                        .iter()
+                        .find(|turn| turn.id() == item.turn_id())
+                        .map(AgentTurn::ordinal)
+                        .unwrap_or(u64::MAX),
+                    item.attachment_order(),
+                )
+            });
+            Ok(sources)
         }
 
         fn checkpoint_turn(
@@ -968,8 +1033,9 @@ mod tests {
     #[test]
     fn first_send_creates_session_pending_turn_and_events() {
         let repository = FakeAgentRepository::default();
-        let prepared = prepare_agent_send(&repository, None, "Hello Agent", None, "", "gpt-5.5")
-            .expect("prepare");
+        let prepared =
+            prepare_agent_send(&repository, None, "Hello Agent", None, "", "gpt-5.5", None)
+                .expect("prepare");
         assert!(prepared.created_session);
         assert_eq!(prepared.session.title(), "Hello Agent");
         assert_eq!(prepared.turn.state(), AgentTurnState::Pending);
@@ -983,16 +1049,17 @@ mod tests {
     #[test]
     fn one_inflight_turn_blocks_second_send() {
         let repository = FakeAgentRepository::default();
-        prepare_agent_send(&repository, None, "First", None, "", "gpt-5.5").unwrap();
+        prepare_agent_send(&repository, None, "First", None, "", "gpt-5.5", None).unwrap();
         let error =
-            prepare_agent_send(&repository, None, "Second", None, "", "gpt-5.5").unwrap_err();
+            prepare_agent_send(&repository, None, "Second", None, "", "gpt-5.5", None).unwrap_err();
         assert!(matches!(error, PrepareAgentSendError::SessionBusy));
     }
 
     #[test]
     fn streaming_completion_and_history_selection() {
         let repository = FakeAgentRepository::default();
-        let prepared = prepare_agent_send(&repository, None, "First", None, "", "gpt-5.5").unwrap();
+        let prepared =
+            prepare_agent_send(&repository, None, "First", None, "", "gpt-5.5", None).unwrap();
         let turn = apply_agent_delta(&repository, prepared.turn.id(), "Hi").unwrap();
         assert_eq!(turn.state(), AgentTurnState::Streaming);
         let completed =
@@ -1013,11 +1080,16 @@ mod tests {
             None,
             "",
             "gpt-5.5",
+            None,
         )
         .unwrap();
         cancel_agent_turn(&repository, cancelled_prep.turn.id()).unwrap();
-        let history =
-            completed_history_from_turns(&repository.list_turns(&prepared.session.id()).unwrap());
+        let history = completed_history_from_turns(
+            &repository.list_turns(&prepared.session.id()).unwrap(),
+            &repository
+                .list_turn_sources(&prepared.session.id())
+                .unwrap(),
+        );
         assert_eq!(history.len(), 1);
         assert_eq!(history[0].user_text, "First");
     }
@@ -1025,7 +1097,8 @@ mod tests {
     #[test]
     fn startup_interruption_marks_inflight_once() {
         let repository = FakeAgentRepository::default();
-        let prepared = prepare_agent_send(&repository, None, "Hang", None, "", "gpt-5.5").unwrap();
+        let prepared =
+            prepare_agent_send(&repository, None, "Hang", None, "", "gpt-5.5", None).unwrap();
         apply_agent_delta(&repository, prepared.turn.id(), "partial").unwrap();
         let interrupted = interrupt_inflight_turns(&repository).unwrap();
         assert_eq!(interrupted.len(), 1);
@@ -1037,7 +1110,8 @@ mod tests {
     #[test]
     fn prospective_project_change_records_event() {
         let repository = FakeAgentRepository::default();
-        let prepared = prepare_agent_send(&repository, None, "Hello", None, "", "gpt-5.5").unwrap();
+        let prepared =
+            prepare_agent_send(&repository, None, "Hello", None, "", "gpt-5.5", None).unwrap();
         complete_agent_turn(&repository, prepared.turn.id(), None, None, None).unwrap();
         let project_id = ProjectId::generate();
         let session =
@@ -1056,7 +1130,8 @@ mod tests {
     #[test]
     fn existing_session_rejects_unconfirmed_project_context() {
         let repository = FakeAgentRepository::default();
-        let prepared = prepare_agent_send(&repository, None, "Hello", None, "", "gpt-5.5").unwrap();
+        let prepared =
+            prepare_agent_send(&repository, None, "Hello", None, "", "gpt-5.5", None).unwrap();
         complete_agent_turn(&repository, prepared.turn.id(), None, None, None).unwrap();
         let event_count = repository
             .list_events(&prepared.session.id())
@@ -1070,6 +1145,7 @@ mod tests {
             Some(ProjectId::generate()),
             "unconfirmed instructions",
             "gpt-5.5",
+            None,
         )
         .unwrap_err();
 
@@ -1094,7 +1170,7 @@ mod tests {
     fn new_session_freezes_model_and_follow_ups_reuse_it() {
         let repository = FakeAgentRepository::default();
         let prepared =
-            prepare_agent_send(&repository, None, "First", None, "", "other-model").unwrap();
+            prepare_agent_send(&repository, None, "First", None, "", "other-model", None).unwrap();
         assert_eq!(prepared.session.model_id(), "other-model");
         assert_eq!(prepared.turn.model_id(), "other-model");
         assert!(prepared.request_json.contains("\"model\":\"other-model\""));
@@ -1107,10 +1183,67 @@ mod tests {
             None,
             "",
             "ignored-client-model",
+            None,
         )
         .unwrap();
         assert_eq!(follow_up.turn.model_id(), "other-model");
         assert!(follow_up.request_json.contains("\"model\":\"other-model\""));
         assert!(!follow_up.request_json.contains("ignored-client-model"));
+    }
+
+    #[test]
+    fn source_persists_and_only_completed_prior_sources_enter_history() {
+        let repository = FakeAgentRepository::default();
+        let source = Source::new_local_text("notes.txt", "secret marker 42").unwrap();
+        let prepared = prepare_agent_send(
+            &repository,
+            None,
+            "Use this",
+            None,
+            "",
+            "gpt-5.5",
+            Some(&source),
+        )
+        .unwrap();
+        assert!(prepared.request_json.contains("secret marker 42"));
+        assert!(
+            prepared
+                .request_json
+                .contains("Attached untrusted source snapshot")
+        );
+        assert_eq!(
+            repository
+                .list_turn_sources(&prepared.session.id())
+                .unwrap()
+                .len(),
+            1
+        );
+        complete_agent_turn(&repository, prepared.turn.id(), None, None, None).unwrap();
+
+        let failed_source = Source::new_local_text("fail.txt", "should not return").unwrap();
+        let failed = prepare_agent_send(
+            &repository,
+            Some(prepared.session.id()),
+            "Fail next",
+            None,
+            "",
+            "gpt-5.5",
+            Some(&failed_source),
+        )
+        .unwrap();
+        fail_agent_turn(&repository, failed.turn.id(), "provider_unavailable").unwrap();
+
+        let follow_up = prepare_agent_send(
+            &repository,
+            Some(prepared.session.id()),
+            "Follow",
+            None,
+            "",
+            "gpt-5.5",
+            None,
+        )
+        .unwrap();
+        assert!(follow_up.request_json.contains("secret marker 42"));
+        assert!(!follow_up.request_json.contains("should not return"));
     }
 }

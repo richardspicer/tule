@@ -5,13 +5,15 @@ mod preferences;
 mod projects;
 mod provider;
 mod settings_window;
+mod source_draft;
 mod sqlite;
 
 use std::{fs, sync::Arc};
 
 use agents::{
-    AgentState, cancel_agent_turn, get_agent_session, list_agent_sessions, send_agent_message,
-    set_agent_session_project,
+    AgentState, cancel_agent_turn, clear_agent_text_source_draft, get_agent_session,
+    list_agent_sessions, pick_agent_text_source, send_agent_message, set_agent_session_project,
+    set_agent_source_draft_scope,
 };
 use credentials::native_store;
 use openai_chatgpt::ChatGptAdapter;
@@ -342,6 +344,7 @@ async fn set_provider_model_selection(
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             if let Some(main) = app.get_webview_window("main") {
                 let _ = main.set_title("");
@@ -371,6 +374,9 @@ pub fn run() {
             update_project_instructions,
             list_agent_sessions,
             get_agent_session,
+            pick_agent_text_source,
+            clear_agent_text_source_draft,
+            set_agent_source_draft_scope,
             send_agent_message,
             cancel_agent_turn,
             set_agent_session_project,
@@ -390,8 +396,15 @@ pub fn run() {
             take_settings_launch_category,
             exit_application
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| {
+            if let tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit = event
+                && let Some(state) = app.try_state::<AgentState>()
+            {
+                state.clear_source_drafts();
+            }
+        });
 }
 
 #[cfg(test)]

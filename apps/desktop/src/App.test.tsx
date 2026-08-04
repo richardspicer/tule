@@ -14,6 +14,7 @@ type NativeCloseRequestedHandler = (event: NativeCloseRequestedEvent) => void;
 
 const {
   cancelAgentTurnMock,
+  clearAgentTextSourceDraftMock,
   createProjectMock,
   exitApplicationMock,
   getApplicationInfoMock,
@@ -32,13 +33,16 @@ const {
   onCloseRequestedMock,
   openProjectMock,
   openSettingsWindowMock,
+  pickAgentTextSourceMock,
   sendAgentMessageMock,
   setAgentSessionProjectMock,
+  setAgentSourceDraftScopeMock,
   syncConnectionStatusMock,
   unlistenCloseRequestedMock,
   updateProjectInstructionsMock,
 } = vi.hoisted(() => ({
   cancelAgentTurnMock: vi.fn(),
+  clearAgentTextSourceDraftMock: vi.fn(),
   createProjectMock: vi.fn(),
   exitApplicationMock: vi.fn(),
   getApplicationInfoMock: vi.fn(),
@@ -57,8 +61,10 @@ const {
   onCloseRequestedMock: vi.fn<(handler: NativeCloseRequestedHandler) => Promise<() => void>>(),
   openProjectMock: vi.fn(),
   openSettingsWindowMock: vi.fn(),
+  pickAgentTextSourceMock: vi.fn(),
   sendAgentMessageMock: vi.fn(),
   setAgentSessionProjectMock: vi.fn(),
+  setAgentSourceDraftScopeMock: vi.fn(),
   syncConnectionStatusMock: vi.fn(),
   unlistenCloseRequestedMock: vi.fn(),
   updateProjectInstructionsMock: vi.fn(),
@@ -115,6 +121,9 @@ vi.mock("./platform/agents", async (importOriginal) => {
     sendAgentMessage: sendAgentMessageMock,
     cancelAgentTurn: cancelAgentTurnMock,
     setAgentSessionProject: setAgentSessionProjectMock,
+    pickAgentTextSource: pickAgentTextSourceMock,
+    clearAgentTextSourceDraft: clearAgentTextSourceDraftMock,
+    setAgentSourceDraftScope: setAgentSourceDraftScopeMock,
   };
 });
 
@@ -138,15 +147,21 @@ describe("App", () => {
   beforeEach(() => {
     createProjectMock.mockReset();
     cancelAgentTurnMock.mockReset();
+    clearAgentTextSourceDraftMock.mockReset();
     exitApplicationMock.mockReset();
     getApplicationInfoMock.mockReset();
     getAgentSessionMock.mockReset();
     listProjectsMock.mockReset();
     openProjectMock.mockReset();
     openSettingsWindowMock.mockReset();
+    pickAgentTextSourceMock.mockReset();
     sendAgentMessageMock.mockReset();
     setAgentSessionProjectMock.mockReset();
+    setAgentSourceDraftScopeMock.mockReset();
     syncConnectionStatusMock.mockReset();
+    clearAgentTextSourceDraftMock.mockResolvedValue(undefined);
+    pickAgentTextSourceMock.mockResolvedValue({ status: "cancelled" });
+    setAgentSourceDraftScopeMock.mockResolvedValue(undefined);
     updateProjectInstructionsMock.mockReset();
     listAgentSessionsMock.mockReset();
     getConnectionStatusMock.mockReset();
@@ -400,6 +415,7 @@ describe("App", () => {
           agentText: "Persisted answer",
           state: "completed",
           errorCode: null,
+          sources: [],
         },
       ],
     });
@@ -443,6 +459,7 @@ describe("App", () => {
           agentText: "Stale answer",
           state: "completed",
           errorCode: null,
+          sources: [],
         },
       ],
     });
@@ -497,6 +514,7 @@ describe("App", () => {
           agentText: "Latest answer",
           state: "completed",
           errorCode: null,
+          sources: [],
         },
       ],
     });
@@ -512,6 +530,7 @@ describe("App", () => {
           agentText: "Older answer",
           state: "completed",
           errorCode: null,
+          sources: [],
         },
       ],
     });
@@ -811,6 +830,7 @@ describe("App", () => {
             agentText: "",
             state: "failed",
             errorCode: "authentication_required",
+            sources: [],
           },
         });
         return Promise.resolve();
@@ -870,6 +890,7 @@ describe("App", () => {
           agentText: "",
           state: "cancelled",
           errorCode: "cancelled",
+          sources: [],
         },
       });
       resolveSend?.();

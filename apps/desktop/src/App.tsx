@@ -8,14 +8,21 @@ import { WorkspaceSidebar } from "./components/WorkspaceSidebar";
 import type { ProjectListState } from "./components/ProjectList";
 import {
   cancelAgentTurn,
+  clearAgentTextSourceDraft,
+  getAgentErrorCode,
   getAgentSession,
   getSafeAgentErrorMessage,
   listAgentSessions,
+  pickAgentTextSource,
   sendAgentMessage,
   setAgentSessionProject,
+  setAgentSourceDraftScope,
   type AgentSession,
   type AgentTurn,
+  type PendingSourceAttachment,
 } from "./platform/agents";
+
+let nextOptimisticTurnId = 0;
 import { getApplicationInfo, type ApplicationInfo } from "./platform/application";
 import { createCommandDispatcher, type AppCommandId } from "./platform/commands";
 import {
@@ -96,6 +103,7 @@ function App() {
   const [pendingProjectId, setPendingProjectId] = useState<string | null>(null);
   const [turns, setTurns] = useState<AgentTurn[]>([]);
   const [draft, setDraft] = useState("");
+  const [pendingAttachment, setPendingAttachment] = useState<PendingSourceAttachment | null>(null);
   const [sending, setSending] = useState(false);
   const sendingRef = useRef(false);
   const [activeTurnId, setActiveTurnId] = useState<string | null>(null);
@@ -461,6 +469,8 @@ function App() {
     setTurns([]);
     setDraft("");
     setAgentError(null);
+    setPendingAttachment(null);
+    void setAgentSourceDraftScope("").catch(() => undefined);
   }
 
   async function handleSelectSession(sessionId: string) {
@@ -477,6 +487,8 @@ function App() {
     setPendingProjectId(summary?.projectId ?? null);
     setTurns([]);
     setAgentError(null);
+    setPendingAttachment(null);
+    void setAgentSourceDraftScope(sessionId).catch(() => undefined);
     try {
       const detail = await getAgentSession(sessionId);
       if (sessionRequestGenerationRef.current !== requestGeneration) {
@@ -515,6 +527,8 @@ function App() {
     setTurns([]);
     setDraft("");
     setAgentError(null);
+    setPendingAttachment(null);
+    void setAgentSourceDraftScope("").catch(() => undefined);
   }
 
   function handleManageProjects() {
@@ -563,19 +577,33 @@ function App() {
     }
 
     const userText = draft;
+    const attachment = pendingAttachment;
     sendingRef.current = true;
     setSending(true);
     clearAgentCancellation();
     setAgentError(null);
     setDraft("");
 
+    nextOptimisticTurnId += 1;
     const optimisticTurn: AgentTurn = {
-      id: `local-${Date.now()}`,
+      id: `local-${nextOptimisticTurnId}`,
       ordinal: turns.length + 1,
       userText,
       agentText: "",
       state: "pending",
       errorCode: null,
+      sources:
+        attachment === null
+          ? []
+          : [
+              {
+                id: attachment.draftHandle,
+                originKind: attachment.originKind,
+                displayName: attachment.displayName,
+                byteCount: attachment.byteCount,
+                contentSha256: "0".repeat(64),
+              },
+            ],
     };
     setTurns((current) => [...current, optimisticTurn]);
     setActiveTurnId(optimisticTurn.id);
@@ -586,6 +614,7 @@ function App() {
         userText,
         projectId: contextProjectId,
         modelId: activeSessionId === null ? sessionModelId : null,
+        sourceDraftHandle: attachment?.draftHandle ?? null,
         onEvent: (event) => {
           if (event.kind === "started") {
             nativeActiveTurnIdRef.current = event.turn_id;
@@ -627,16 +656,64 @@ function App() {
       });
       const sessionsNow = await listAgentSessions();
       setSessions(sessionsNow);
+      setPendingAttachment(null);
     } catch (error: unknown) {
       setAgentError(getSafeAgentErrorMessage(error));
       setTurns((current) => current.filter((turn) => turn.id !== optimisticTurn.id));
       setDraft(userText);
+      const code = getAgentErrorCode(error);
+      const keepPendingAttachment =
+        code === "invalid_input" ||
+        code === "context_limit" ||
+        code === "source_unreadable" ||
+        code === "source_unsupported" ||
+        code === "source_too_large" ||
+        code === "model_unavailable" ||
+        code === "not_connected" ||
+        code === "authentication_required" ||
+        code === "session_busy" ||
+        code === "agent_storage_unavailable" ||
+        code === "credential_store_unavailable" ||
+        code === "entitlement_unavailable";
+      if (!keepPendingAttachment) {
+        setPendingAttachment(null);
+      }
       clearAgentCancellation();
       setActiveTurnId(null);
     } finally {
       clearAgentCancellation();
       sendingRef.current = false;
       setSending(false);
+    }
+  }
+
+  async function handleAttach() {
+    if (sendingRef.current) {
+      return;
+    }
+
+    setAgentError(null);
+    try {
+      const result = await pickAgentTextSource();
+      if (result.status === "cancelled") {
+        return;
+      }
+
+      setPendingAttachment(result.attachment);
+    } catch (error: unknown) {
+      setAgentError(getSafeAgentErrorMessage(error));
+    }
+  }
+
+  async function handleRemoveAttachment() {
+    if (sendingRef.current) {
+      return;
+    }
+
+    const current = pendingAttachment;
+    setPendingAttachment(null);
+    if (current !== null) {
+      await clearAgentTextSourceDraft(current.draftHandle).catch(() => undefined);
     }
   }
 
@@ -927,6 +1004,7 @@ function App() {
               modelLocked={modelLocked}
               turns={turns}
               draft={draft}
+              pendingAttachment={pendingAttachment}
               connected={connected}
               sending={sending}
               sendBlocked={
@@ -943,6 +1021,8 @@ function App() {
               onDraftChange={setDraft}
               onSend={() => void handleSend()}
               onCancel={handleCancel}
+              onAttach={() => void handleAttach()}
+              onRemoveAttachment={() => void handleRemoveAttachment()}
               onProjectChange={(projectId) => void handleChangePersistedProject(projectId)}
               onModelChange={setPendingModelId}
               onOpenProvidersSettings={() => void openSettingsWindow("providers")}

@@ -93,6 +93,23 @@ To validate a release-mode desktop executable without creating an installer:
 corepack pnpm --filter @tule/desktop tauri build --no-bundle -- --locked
 ```
 
+## Maintain frontend dependencies
+
+Dependabot maintains Cargo, the Rust toolchain, and GitHub Actions weekly.
+GitHub's version updater does not currently support the pinned pnpm 11
+toolchain, so review frontend dependencies manually during the first
+maintenance pass of each month:
+
+1. Recheck whether Dependabot supports the repository's pinned pnpm version. If
+   it does, replace this manual procedure with an `npm` ecosystem entry in
+   `.github/dependabot.yml`.
+2. Run `corepack pnpm outdated --recursive` from a trusted, current checkout.
+3. Review direct dependency release notes and update deliberately rather than
+   applying every available version automatically.
+4. Refresh `pnpm-lock.yaml`, run the standard check and production web build,
+   and run the native desktop build when the changed dependency affects the
+   host or packaging boundary.
+
 ## Detection notes
 
 If rustup has just been installed but the current process inherited an older `PATH`, the doctor also checks the standard per-user `.cargo\bin` directory. It uses the discovered tools for validation and warns that the terminal must be restarted; it does not report Rust as absent.

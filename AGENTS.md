@@ -19,6 +19,9 @@ These instructions apply to the entire repository.
 - Respect `rust-toolchain.toml` and `.node-version`.
 - Use the package-manager version declared in `package.json` through Corepack.
 - Commit `Cargo.lock` and `pnpm-lock.yaml` for reproducible application builds.
+- Follow the monthly frontend dependency-review procedure in
+  `docs/development.md` while automated version updates do not support the
+  pinned pnpm version.
 - Run formatting, static checks, tests, and the desktop build appropriate to the changed scope.
 - Keep dependencies minimal and justify new privileged Tauri capabilities.
 

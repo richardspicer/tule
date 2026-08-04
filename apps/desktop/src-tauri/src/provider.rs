@@ -224,6 +224,12 @@ pub(crate) fn persist_model_selection(
         .as_ref()
         .map(|item| item.entries.as_slice())
         .unwrap_or(&[]);
+    if store
+        .is_model_rejected(PROVIDER_PROFILE_ID, &model_id)
+        .map_err(|_| PublicError::AgentStorageUnavailable)?
+    {
+        return Err(PublicError::ModelUnavailable);
+    }
     if !model_id_in_catalog(&model_id, entries) {
         return Err(PublicError::ModelUnavailable);
     }
@@ -236,27 +242,35 @@ pub(crate) fn persist_model_selection(
     build_selection_response(store)
 }
 
-/// Clears the selected default when it matches a rejected model id.
+/// Records a provider model rejection and clears any matching selected default.
 ///
-/// Writes an explicit requires-choice marker so the built-in catalog default
-/// cannot silently reappear after rejection.
-pub(crate) fn clear_selected_default_if_matches(
+/// The rejected identifier remains unavailable for new-session choice for the
+/// current credential generation, even when a later catalog refresh returns it.
+pub(crate) fn apply_model_rejection(
     store: &SqliteStore,
     rejected_model_id: &str,
-) -> Result<ProviderModelSelectionResponse, PublicError> {
+) -> Result<(ProviderModelCatalogResponse, ProviderModelSelectionResponse), PublicError> {
+    let rejected_model_id = validate_model_id(rejected_model_id)
+        .map(str::to_owned)
+        .map_err(|_| PublicError::ModelUnavailable)?;
+    let now = unix_now_ms()?;
+    store
+        .record_rejected_model(PROVIDER_PROFILE_ID, &rejected_model_id, now)
+        .map_err(|_| PublicError::AgentStorageUnavailable)?;
     let selection = store
         .get_model_selection(PROVIDER_PROFILE_ID)
         .map_err(|_| PublicError::AgentStorageUnavailable)?;
     let resolved = build_selection_response(store)?;
-    if resolved.selected_model_id.as_deref() == Some(rejected_model_id)
-        || selection.selected_model_id.as_deref() == Some(rejected_model_id)
+    if resolved.selected_model_id.as_deref() == Some(rejected_model_id.as_str())
+        || selection.selected_model_id.as_deref() == Some(rejected_model_id.as_str())
     {
-        let now = unix_now_ms()?;
         store
             .set_model_selection(PROVIDER_PROFILE_ID, Some(REQUIRES_EXPLICIT_CHOICE), now)
             .map_err(|_| PublicError::AgentStorageUnavailable)?;
     }
-    build_selection_response(store)
+    let catalog = build_catalog_response(store)?;
+    let selection = build_selection_response(store)?;
+    Ok((catalog, selection))
 }
 
 /// Ensures a new-session model is present in the last validated catalog.
@@ -267,6 +281,12 @@ pub(crate) fn validate_new_session_model(
     let model_id = validate_model_id(model_id)
         .map(str::to_owned)
         .map_err(|_| PublicError::ModelUnavailable)?;
+    if store
+        .is_model_rejected(PROVIDER_PROFILE_ID, &model_id)
+        .map_err(|_| PublicError::AgentStorageUnavailable)?
+    {
+        return Err(PublicError::ModelUnavailable);
+    }
     let snapshot = store
         .get_catalog_snapshot(PROVIDER_PROFILE_ID)
         .map_err(|_| PublicError::AgentStorageUnavailable)?;
@@ -412,9 +432,25 @@ mod tests {
     }
 
     #[test]
-    fn clear_selected_default_requires_new_choice() {
+    fn model_rejection_recovery_clears_default_and_blocks_repeated_selection() {
         let dir = tempfile_dir();
-        let store = SqliteStore::open(dir.join("clear-selection.sqlite3")).unwrap();
+        let store = SqliteStore::open(dir.join("reject-recovery.sqlite3")).unwrap();
+        let entries = vec![
+            ModelCatalogEntry {
+                model_id: "bad-model".into(),
+                display_name: "Bad".into(),
+                description: None,
+                sort_order: 1,
+                is_provider_default: false,
+            },
+            ModelCatalogEntry {
+                model_id: "good-model".into(),
+                display_name: "Good".into(),
+                description: None,
+                sort_order: 2,
+                is_provider_default: true,
+            },
+        ];
         store
             .replace_catalog_snapshot(
                 PROVIDER_PROFILE_ID,
@@ -425,18 +461,59 @@ mod tests {
                     retrieved_at_unix_ms: 1,
                     updated_at_unix_ms: 1,
                 },
-                &[ModelCatalogEntry {
-                    model_id: "gpt-5.5".into(),
-                    display_name: "GPT-5.5".into(),
-                    description: None,
-                    sort_order: 1,
-                    is_provider_default: true,
-                }],
+                &entries,
             )
             .unwrap();
-        persist_model_selection(&store, "gpt-5.5").unwrap();
-        let cleared = clear_selected_default_if_matches(&store, "gpt-5.5").unwrap();
-        assert!(cleared.selected_model_id.is_none());
-        assert!(cleared.requires_selection);
+        persist_model_selection(&store, "bad-model").unwrap();
+
+        let (catalog, selection) = apply_model_rejection(&store, "bad-model").unwrap();
+        assert!(selection.selected_model_id.is_none());
+        assert!(selection.requires_selection);
+        assert_eq!(
+            catalog
+                .models
+                .iter()
+                .map(|model| model.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["good-model"]
+        );
+        assert_eq!(
+            validate_new_session_model(&store, "bad-model"),
+            Err(PublicError::ModelUnavailable)
+        );
+        assert_eq!(
+            persist_model_selection(&store, "bad-model"),
+            Err(PublicError::ModelUnavailable)
+        );
+
+        // Refresh returning the same identifier must not re-offer it.
+        store
+            .replace_catalog_snapshot(
+                PROVIDER_PROFILE_ID,
+                &StoredCatalogState {
+                    credential_generation: 0,
+                    compatibility_revision: "1.0.0".into(),
+                    etag: Some("\"v2\"".into()),
+                    retrieved_at_unix_ms: 2,
+                    updated_at_unix_ms: 2,
+                },
+                &entries,
+            )
+            .unwrap();
+        let after_refresh = build_catalog_response(&store).unwrap();
+        assert!(
+            !after_refresh
+                .models
+                .iter()
+                .any(|model| model.id == "bad-model")
+        );
+        assert_eq!(
+            validate_new_session_model(&store, "bad-model"),
+            Err(PublicError::ModelUnavailable)
+        );
+        assert_eq!(
+            validate_new_session_model(&store, "good-model").as_deref(),
+            Ok("good-model")
+        );
     }
 }

@@ -30,6 +30,9 @@ const MIGRATION_SET: &[M<'static>] = &[
     M::up(include_str!("../migrations/0003_agent_conversations.sql")),
     M::up(include_str!("../migrations/0004_desktop_preferences.sql")),
     M::up(include_str!("../migrations/0005_provider_models.sql")),
+    M::up(include_str!(
+        "../migrations/0006_provider_rejected_models.sql"
+    )),
 ];
 const MIGRATIONS: Migrations<'static> = Migrations::from_slice(MIGRATION_SET);
 
@@ -380,7 +383,7 @@ mod tests {
             .unwrap()
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 5);
+        assert_eq!(version, 6);
         drop(repository);
 
         let reopened = open_repository(&path);
@@ -390,7 +393,7 @@ mod tests {
             .unwrap()
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 5);
+        assert_eq!(version, 6);
     }
 
     #[test]
@@ -422,7 +425,7 @@ mod tests {
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
 
-        assert_eq!(version, 5);
+        assert_eq!(version, 6);
         assert_eq!(projects.len(), 1);
         assert_eq!(projects[0].id().to_string(), id);
         assert_eq!(projects[0].name().as_str(), "Existing project");
@@ -459,7 +462,7 @@ mod tests {
             .unwrap()
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 5);
+        assert_eq!(version, 6);
     }
 
     #[test]
@@ -474,7 +477,7 @@ mod tests {
             )
             .unwrap();
         connection
-            .pragma_update(None, "user_version", 6_i64)
+            .pragma_update(None, "user_version", 7_i64)
             .unwrap();
         drop(connection);
 
@@ -487,7 +490,7 @@ mod tests {
         let sentinel: String = connection
             .query_row("SELECT value FROM future_sentinel", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 6);
+        assert_eq!(version, 7);
         assert_eq!(sentinel, "preserve me");
     }
 

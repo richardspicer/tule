@@ -18,8 +18,8 @@ use tule_core::{
 use crate::{
     provider::{
         PROVIDER_MODEL_CATALOG_CHANGED_EVENT, PROVIDER_MODEL_SELECTION_CHANGED_EVENT,
-        ProviderAdapter, ProviderEvent, PublicError, build_selection_response,
-        build_stale_catalog_response, clear_selected_default_if_matches,
+        ProviderAdapter, ProviderEvent, PublicError, apply_model_rejection,
+        build_selection_response, build_stale_catalog_response,
     },
     sqlite::SqliteStore,
 };
@@ -525,23 +525,26 @@ async fn recover_after_model_rejection(
     store: &SqliteStore,
     rejected_model_id: &str,
 ) {
+    let Ok((mut catalog, mut selection)) = apply_model_rejection(store, rejected_model_id) else {
+        return;
+    };
     if let Some(adapter) = adapter {
         match adapter.refresh_model_catalog(store, true).await {
-            Ok(catalog) => {
-                let _ = app.emit(PROVIDER_MODEL_CATALOG_CHANGED_EVENT, &catalog);
+            Ok(refreshed) => {
+                catalog = refreshed;
             }
             Err(_) => {
                 if let Ok(stale) = build_stale_catalog_response(store) {
-                    let _ = app.emit(PROVIDER_MODEL_CATALOG_CHANGED_EVENT, &stale);
+                    catalog = stale;
                 }
             }
         }
+        if let Ok(next_selection) = build_selection_response(store) {
+            selection = next_selection;
+        }
     }
-    let selection = clear_selected_default_if_matches(store, rejected_model_id)
-        .or_else(|_| build_selection_response(store));
-    if let Ok(selection) = selection {
-        let _ = app.emit(PROVIDER_MODEL_SELECTION_CHANGED_EVENT, &selection);
-    }
+    let _ = app.emit(PROVIDER_MODEL_CATALOG_CHANGED_EVENT, &catalog);
+    let _ = app.emit(PROVIDER_MODEL_SELECTION_CHANGED_EVENT, &selection);
 }
 
 #[tauri::command(rename_all = "camelCase")]

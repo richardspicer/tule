@@ -129,6 +129,44 @@ describe("SettingsWindow", () => {
     });
   });
 
+  it("surfaces a cached catalog refresh failure without treating stale data as success", async () => {
+    const user = userEvent.setup();
+    getConnectionStatusMock.mockResolvedValue({
+      state: "connected",
+      providerId: "openai-chatgpt-compat",
+      model: "gpt-5.5",
+    });
+    refreshProviderModelCatalogMock
+      .mockResolvedValueOnce({
+        providerId: "openai-chatgpt-compat",
+        models: [
+          {
+            id: "gpt-5.5",
+            displayName: "GPT-5.5",
+            description: null,
+            isProviderDefault: true,
+          },
+        ],
+        freshness: "current",
+        retrievedAtUnixMs: 10,
+        compatibilityRevision: "1.0.0",
+      })
+      .mockRejectedValueOnce(new ProviderError("provider_unavailable"));
+    getProviderModelSelectionMock.mockResolvedValue({
+      providerId: "openai-chatgpt-compat",
+      selectedModelId: "gpt-5.5",
+      requiresSelection: false,
+    });
+
+    render(<SettingsWindow />);
+    expect(await screen.findByRole("option", { name: "GPT-5.5" })).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Refresh models" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("The provider is unavailable.");
+    expect(screen.getByRole("option", { name: "GPT-5.5" })).toBeInTheDocument();
+    expect(getProviderModelCatalogMock).not.toHaveBeenCalled();
+  });
+
   it("keeps Refresh models available when connected with an empty catalog", async () => {
     getConnectionStatusMock.mockResolvedValue({
       state: "connected",

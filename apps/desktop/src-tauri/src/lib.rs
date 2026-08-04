@@ -252,15 +252,8 @@ async fn get_provider_model_catalog(
                 .state,
             provider::ConnectionState::Connected
         );
-        if connected
-            && adapter
-                .catalog_needs_refresh(state.store.as_ref())
-                .unwrap_or(true)
-        {
-            match adapter
-                .refresh_model_catalog(state.store.as_ref(), false)
-                .await
-            {
+        if connected {
+            match adapter.load_connected_catalog(state.store.as_ref()).await {
                 Ok(catalog) => {
                     emit_catalog_status(&app, &catalog);
                     if let Ok(selection) = build_selection_response(state.store.as_ref()) {
@@ -269,13 +262,9 @@ async fn get_provider_model_catalog(
                     return Ok(catalog);
                 }
                 Err(error) => {
+                    // Retain/emit last-known as visibly stale, but never convert a
+                    // failed refresh into a successful catalog response.
                     emit_stale_model_surfaces(&app, state.store.as_ref());
-                    if let Ok(stale) = build_stale_catalog_response(state.store.as_ref())
-                        && !stale.models.is_empty()
-                    {
-                        // Last-known remains visible; recovery stays available via refresh.
-                        return Ok(stale);
-                    }
                     return Err(error);
                 }
             }

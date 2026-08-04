@@ -138,6 +138,14 @@ impl SqliteStore {
             .map_err(SqliteStoreError::Database)?
             .collect::<Result<Vec<_>, _>>()
             .map_err(SqliteStoreError::Database)?;
+        drop(statement);
+        drop(connection);
+
+        let rejected = self.rejected_model_ids(provider_profile_id)?;
+        let entries = entries
+            .into_iter()
+            .filter(|entry| !rejected.iter().any(|model_id| model_id == &entry.model_id))
+            .collect::<Vec<_>>();
 
         if entries.is_empty() {
             return Ok(None);
@@ -151,11 +159,17 @@ impl SqliteStore {
         state: &StoredCatalogState,
         entries: &[ModelCatalogEntry],
     ) -> Result<(), SqliteStoreError> {
+        let rejected = self.rejected_model_ids(provider_profile_id)?;
+        let entries = entries
+            .iter()
+            .filter(|entry| !rejected.iter().any(|model_id| model_id == &entry.model_id))
+            .cloned()
+            .collect::<Vec<_>>();
         let mut connection = self.connection()?;
         let transaction = connection
             .transaction()
             .map_err(SqliteStoreError::Database)?;
-        replace_catalog_snapshot_tx(&transaction, provider_profile_id, state, entries)?;
+        replace_catalog_snapshot_tx(&transaction, provider_profile_id, state, &entries)?;
         transaction.commit().map_err(SqliteStoreError::Database)?;
         Ok(())
     }
@@ -242,6 +256,13 @@ impl SqliteStore {
             .map_err(SqliteStoreError::Database)?;
         transaction
             .execute(
+                "DELETE FROM provider_rejected_models
+                 WHERE provider_profile_id = ?1",
+                params![provider_profile_id],
+            )
+            .map_err(SqliteStoreError::Database)?;
+        transaction
+            .execute(
                 "INSERT INTO provider_model_catalog_state (
                     provider_profile_id, credential_generation, compatibility_revision,
                     etag, retrieved_at_unix_ms, updated_at_unix_ms
@@ -257,6 +278,110 @@ impl SqliteStore {
             .map_err(SqliteStoreError::Database)?;
         transaction.commit().map_err(SqliteStoreError::Database)?;
         Ok(next)
+    }
+
+    /// Deletes catalog entries without advancing generation metadata. Used only
+    /// when compensation cannot restore the prior credential generation.
+    pub(crate) fn scrub_catalog_entries(
+        &self,
+        provider_profile_id: &str,
+    ) -> Result<(), SqliteStoreError> {
+        let connection = self.connection()?;
+        connection
+            .execute(
+                "DELETE FROM provider_model_catalog_entries
+                 WHERE provider_profile_id = ?1",
+                params![provider_profile_id],
+            )
+            .map_err(SqliteStoreError::Database)?;
+        connection
+            .execute(
+                "DELETE FROM provider_rejected_models
+                 WHERE provider_profile_id = ?1",
+                params![provider_profile_id],
+            )
+            .map_err(SqliteStoreError::Database)?;
+        connection
+            .execute(
+                "UPDATE provider_model_catalog_state
+                 SET compatibility_revision = '',
+                     etag = NULL,
+                     retrieved_at_unix_ms = 0
+                 WHERE provider_profile_id = ?1",
+                params![provider_profile_id],
+            )
+            .map_err(SqliteStoreError::Database)?;
+        Ok(())
+    }
+
+    pub(crate) fn record_rejected_model(
+        &self,
+        provider_profile_id: &str,
+        model_id: &str,
+        rejected_at_unix_ms: i64,
+    ) -> Result<(), SqliteStoreError> {
+        let generation = self.current_credential_generation(provider_profile_id)?;
+        self.connection()?
+            .execute(
+                "INSERT INTO provider_rejected_models (
+                    provider_profile_id, model_id, credential_generation, rejected_at_unix_ms
+                 ) VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(provider_profile_id, model_id) DO UPDATE SET
+                    credential_generation = excluded.credential_generation,
+                    rejected_at_unix_ms = excluded.rejected_at_unix_ms",
+                params![
+                    provider_profile_id,
+                    model_id,
+                    generation,
+                    rejected_at_unix_ms
+                ],
+            )
+            .map_err(SqliteStoreError::Database)?;
+        Ok(())
+    }
+
+    pub(crate) fn rejected_model_ids(
+        &self,
+        provider_profile_id: &str,
+    ) -> Result<Vec<String>, SqliteStoreError> {
+        let generation = self.current_credential_generation(provider_profile_id)?;
+        let connection = self.connection()?;
+        let mut statement = connection
+            .prepare(
+                "SELECT model_id
+                 FROM provider_rejected_models
+                 WHERE provider_profile_id = ?1 AND credential_generation = ?2
+                 ORDER BY model_id ASC",
+            )
+            .map_err(SqliteStoreError::Database)?;
+        let ids = statement
+            .query_map(params![provider_profile_id, generation], |row| row.get(0))
+            .map_err(SqliteStoreError::Database)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(SqliteStoreError::Database)?;
+        Ok(ids)
+    }
+
+    pub(crate) fn is_model_rejected(
+        &self,
+        provider_profile_id: &str,
+        model_id: &str,
+    ) -> Result<bool, SqliteStoreError> {
+        let generation = self.current_credential_generation(provider_profile_id)?;
+        let exists = self
+            .connection()?
+            .query_row(
+                "SELECT 1
+                 FROM provider_rejected_models
+                 WHERE provider_profile_id = ?1
+                   AND model_id = ?2
+                   AND credential_generation = ?3",
+                params![provider_profile_id, model_id, generation],
+                |_| Ok(()),
+            )
+            .optional()
+            .map_err(SqliteStoreError::Database)?;
+        Ok(exists.is_some())
     }
 
     pub(crate) fn ensure_builtin_model_selection(&self) -> Result<(), SqliteStoreError> {

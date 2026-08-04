@@ -478,6 +478,19 @@ impl ChatGptAdapter {
             || snapshot.state.compatibility_revision != CATALOG_COMPATIBILITY_REVISION)
     }
 
+    /// Public get-command path: refresh when missing/stale, and surface refresh
+    /// failures instead of returning stale success.
+    pub(crate) async fn load_connected_catalog(
+        &self,
+        store: &SqliteStore,
+    ) -> Result<ProviderModelCatalogResponse, PublicError> {
+        if self.catalog_needs_refresh(store)? {
+            self.refresh_model_catalog(store, false).await
+        } else {
+            build_catalog_response(store)
+        }
+    }
+
     #[cfg(not(test))]
     async fn fetch_models_http(
         &self,
@@ -825,9 +838,14 @@ impl ChatGptAdapter {
                 .invalidate_catalog_for_credential_change(PROVIDER_PROFILE_ID, now)
                 .is_err()
         {
-            // Credentials already committed for the new account. Fail closed so
-            // a prior generation catalog can never be observed as current.
-            self.reconnect_required.store(true, Ordering::SeqCst);
+            // Credentials were written for the new account. Compensate back to the
+            // prior committed generation, or scrub the prior catalog so it can
+            // never be read under the new account.
+            if !self.restore_persistence_state(store, &snapshot, &written, &original_profile) {
+                let _ = store.scrub_catalog_entries(PROVIDER_PROFILE_ID);
+                self.reconnect_required.store(true, Ordering::SeqCst);
+                return Err(PublicError::CredentialStoreUnavailable);
+            }
             return Err(PublicError::AgentStorageUnavailable);
         }
         self.reconnect_required.store(false, Ordering::SeqCst);
@@ -3542,7 +3560,7 @@ mod tests {
     }
 
     #[test]
-    fn account_change_catalog_invalidation_failure_fails_closed() {
+    fn account_change_catalog_invalidation_failure_compensates_prior_account() {
         let fake = Arc::new(FakeCredentialStore::default());
         seed_connected(&fake);
         let adapter = ChatGptAdapter::new(fake.clone());
@@ -3578,20 +3596,153 @@ mod tests {
             ),
             Err(PublicError::AgentStorageUnavailable)
         );
+        // Compensated back to the original committed account.
         assert_eq!(
-            adapter.connection_status_with_store(&store).state,
-            ConnectionState::ReconnectRequired
+            fake.peek(CREDENTIAL_HANDLE, CredentialKind::AccountId)
+                .as_deref(),
+            Some(b"account".as_slice())
         );
-        // Prior generation remains only because invalidation failed; reconnect is required.
         assert_eq!(
-            store
-                .get_catalog_snapshot(PROVIDER_PROFILE_ID)
-                .unwrap()
-                .unwrap()
-                .entries[0]
-                .model_id,
-            "prior-account-model"
+            fake.peek(CREDENTIAL_HANDLE, CredentialKind::AccessToken)
+                .as_deref(),
+            Some(b"access".as_slice())
         );
+        let public = crate::provider::build_catalog_response(&store).unwrap();
+        assert_eq!(
+            public
+                .models
+                .iter()
+                .map(|model| model.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["prior-account-model"]
+        );
+        assert_ne!(
+            fake.peek(CREDENTIAL_HANDLE, CredentialKind::AccountId)
+                .as_deref(),
+            Some(b"account-2".as_slice())
+        );
+    }
+
+    #[test]
+    fn account_change_invalidation_and_restore_failure_scrubs_prior_catalog() {
+        let fake = Arc::new(FakeCredentialStore::default());
+        seed_connected(&fake);
+        let dir = tempfile_dir();
+        let store = SqliteStore::open(dir.join("account-scrub.sqlite3")).unwrap();
+        mark_profile_connected(&store, Some(i64::MAX / 2));
+        store
+            .replace_catalog_snapshot(
+                PROVIDER_PROFILE_ID,
+                &StoredCatalogState {
+                    credential_generation: 2,
+                    compatibility_revision: CATALOG_COMPATIBILITY_REVISION.to_owned(),
+                    etag: None,
+                    retrieved_at_unix_ms: 1,
+                    updated_at_unix_ms: 1,
+                },
+                &[tule_core::ModelCatalogEntry {
+                    model_id: "prior-account-model".into(),
+                    display_name: "Prior".into(),
+                    description: None,
+                    sort_order: 1,
+                    is_provider_default: false,
+                }],
+            )
+            .unwrap();
+        store.set_fail_catalog_invalidation(true);
+        // Snapshot reads are ops 1-3, credential writes 4-6, restore replaces 7-9.
+        fake.reset_operations();
+        fake.fail_on_operations([7, 8, 9]);
+        let adapter = ChatGptAdapter::new(fake.clone());
+        assert_eq!(
+            adapter.persist_tokens(
+                &store,
+                token_values("access-2", "refresh-2", "account-2", false),
+                TokenPersistence::Rotation,
+                PersistenceCancellation::None,
+            ),
+            Err(PublicError::CredentialStoreUnavailable)
+        );
+        let public = crate::provider::build_catalog_response(&store).unwrap();
+        assert!(
+            public.models.is_empty(),
+            "unrestored new-account commit must not observe prior models"
+        );
+        assert!(
+            !public
+                .models
+                .iter()
+                .any(|model| model.id == "prior-account-model")
+        );
+    }
+
+    #[tokio::test]
+    async fn connected_catalog_get_surfaces_refresh_error_while_preserving_stale() {
+        let fake = Arc::new(FakeCredentialStore::default());
+        seed_connected(&fake);
+        let adapter = ChatGptAdapter::new(fake);
+        let dir = tempfile_dir();
+        let store = SqliteStore::open(dir.join("stale-get.sqlite3")).unwrap();
+        mark_profile_connected(&store, Some(i64::MAX / 2));
+        store
+            .replace_catalog_snapshot(
+                PROVIDER_PROFILE_ID,
+                &StoredCatalogState {
+                    credential_generation: 0,
+                    compatibility_revision: CATALOG_COMPATIBILITY_REVISION.to_owned(),
+                    etag: Some("\"v1\"".into()),
+                    retrieved_at_unix_ms: 1,
+                    updated_at_unix_ms: 1,
+                },
+                &[tule_core::ModelCatalogEntry {
+                    model_id: "gpt-5.5".into(),
+                    display_name: "GPT-5.5".into(),
+                    description: None,
+                    sort_order: 1,
+                    is_provider_default: true,
+                }],
+            )
+            .unwrap();
+        struct FailTransport;
+        impl TestTransport for FailTransport {
+            fn exchange_token(
+                &self,
+                _: &str,
+                _: &str,
+                _: &str,
+                _: &str,
+            ) -> Result<TokenBundle, PublicError> {
+                unreachable!()
+            }
+            fn refresh_token(&self, _: &str, _: &str) -> Result<TokenBundle, PublicError> {
+                unreachable!()
+            }
+            fn inference(
+                &self,
+                _: &str,
+                _: &HeaderMap,
+                _: &str,
+            ) -> Result<MockInference, PublicError> {
+                unreachable!()
+            }
+            fn models(
+                &self,
+                _: &str,
+                _: &HeaderMap,
+                _: Option<&str>,
+            ) -> Result<MockModelsResponse, PublicError> {
+                Err(PublicError::ProviderUnavailable)
+            }
+        }
+        adapter.set_test_transport(Arc::new(FailTransport));
+        assert_eq!(
+            adapter.load_connected_catalog(&store).await,
+            Err(PublicError::ProviderUnavailable)
+        );
+        let stale = crate::provider::build_stale_catalog_response(&store).unwrap();
+        assert_eq!(stale.models.len(), 1);
+        assert_eq!(stale.freshness, "stale");
+        assert_eq!(stale.models[0].id, "gpt-5.5");
     }
 
     #[tokio::test]
@@ -3681,5 +3832,111 @@ mod tests {
             .await;
         assert_eq!(unrelated, Err(PublicError::ProviderUnavailable));
         let _ = store;
+    }
+
+    #[tokio::test]
+    async fn model_rejection_recovery_with_refresh_failure_keeps_identifier_unavailable() {
+        let fake = Arc::new(FakeCredentialStore::default());
+        seed_connected(&fake);
+        let adapter = ChatGptAdapter::new(fake);
+        let dir = tempfile_dir();
+        let store = SqliteStore::open(dir.join("reject-stale.sqlite3")).unwrap();
+        mark_profile_connected(&store, Some(i64::MAX / 2));
+        store
+            .replace_catalog_snapshot(
+                PROVIDER_PROFILE_ID,
+                &StoredCatalogState {
+                    credential_generation: 0,
+                    compatibility_revision: CATALOG_COMPATIBILITY_REVISION.to_owned(),
+                    etag: None,
+                    retrieved_at_unix_ms: 1,
+                    updated_at_unix_ms: 1,
+                },
+                &[
+                    tule_core::ModelCatalogEntry {
+                        model_id: "bad-model".into(),
+                        display_name: "Bad".into(),
+                        description: None,
+                        sort_order: 1,
+                        is_provider_default: false,
+                    },
+                    tule_core::ModelCatalogEntry {
+                        model_id: "good-model".into(),
+                        display_name: "Good".into(),
+                        description: None,
+                        sort_order: 2,
+                        is_provider_default: true,
+                    },
+                ],
+            )
+            .unwrap();
+        crate::provider::persist_model_selection(&store, "bad-model").unwrap();
+
+        struct RejectThenFailRefresh;
+        impl TestTransport for RejectThenFailRefresh {
+            fn exchange_token(
+                &self,
+                _: &str,
+                _: &str,
+                _: &str,
+                _: &str,
+            ) -> Result<TokenBundle, PublicError> {
+                unreachable!()
+            }
+            fn refresh_token(&self, _: &str, _: &str) -> Result<TokenBundle, PublicError> {
+                unreachable!()
+            }
+            fn inference(
+                &self,
+                _: &str,
+                _: &HeaderMap,
+                _: &str,
+            ) -> Result<MockInference, PublicError> {
+                Ok(MockInference::StatusBody {
+                    status: 400,
+                    body: "unsupported model bad-model".into(),
+                })
+            }
+            fn models(
+                &self,
+                _: &str,
+                _: &HeaderMap,
+                _: Option<&str>,
+            ) -> Result<MockModelsResponse, PublicError> {
+                Err(PublicError::RateLimited)
+            }
+        }
+        adapter.set_test_transport(Arc::new(RejectThenFailRefresh));
+        assert_eq!(
+            adapter
+                .stream(
+                    ProviderRequest {
+                        session_id: "s".into(),
+                        request_json: "{}".into(),
+                    },
+                    CancellationToken::new(),
+                    Box::new(|_| Ok(())),
+                )
+                .await,
+            Err(PublicError::ModelUnavailable)
+        );
+
+        let (catalog, selection) =
+            crate::provider::apply_model_rejection(&store, "bad-model").unwrap();
+        assert!(selection.requires_selection);
+        assert!(selection.selected_model_id.is_none());
+        assert!(!catalog.models.iter().any(|model| model.id == "bad-model"));
+        assert_eq!(
+            adapter.refresh_model_catalog(&store, true).await,
+            Err(PublicError::RateLimited)
+        );
+        let stale = crate::provider::build_stale_catalog_response(&store).unwrap();
+        assert_eq!(stale.freshness, "stale");
+        assert!(!stale.models.iter().any(|model| model.id == "bad-model"));
+        assert!(stale.models.iter().any(|model| model.id == "good-model"));
+        assert_eq!(
+            crate::provider::validate_new_session_model(&store, "bad-model"),
+            Err(PublicError::ModelUnavailable)
+        );
     }
 }

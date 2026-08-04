@@ -200,7 +200,8 @@ function App() {
             return selected;
           });
         } catch {
-          setPendingModelId(null);
+          // Failed automatic refresh surfaces as an error; last-known catalog may
+          // still arrive via provider-model-catalog-changed.
         }
       })
       .catch(() => {

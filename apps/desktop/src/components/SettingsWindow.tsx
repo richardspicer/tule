@@ -100,19 +100,24 @@ export function SettingsWindow() {
         setConnectionState(status.state);
         setSelection(nextSelection);
         try {
-          // Connected installs refresh missing/stale catalogs via get; force
-          // refresh recovers from an initial empty failure path.
-          const nextCatalog =
-            status.state === "connected"
-              ? await refreshProviderModelCatalog().catch(async (error: unknown) => {
-                  if (active) {
-                    setErrorMessage(getSafeAgentErrorMessage(error));
-                  }
-                  return getProviderModelCatalog();
-                })
-              : await getProviderModelCatalog();
-          if (active) {
-            setCatalog(nextCatalog);
+          if (status.state === "connected") {
+            // Force refresh on open; on failure surface the error and keep any
+            // last-known catalog delivered by the native stale emit/event.
+            try {
+              const nextCatalog = await refreshProviderModelCatalog();
+              if (active) {
+                setCatalog(nextCatalog);
+              }
+            } catch (error: unknown) {
+              if (active) {
+                setErrorMessage(getSafeAgentErrorMessage(error));
+              }
+            }
+          } else {
+            const nextCatalog = await getProviderModelCatalog();
+            if (active) {
+              setCatalog(nextCatalog);
+            }
           }
         } catch {
           /* bounded load failure leaves empty catalog; Refresh remains available */
@@ -160,13 +165,9 @@ export function SettingsWindow() {
           })
           .catch(async (error: unknown) => {
             setErrorMessage(getSafeAgentErrorMessage(error));
-            const [nextCatalog, nextSelection] = await Promise.all([
-              getProviderModelCatalog().catch(() => null),
-              getProviderModelSelection().catch(() => null),
-            ]);
-            if (nextCatalog !== null) {
-              setCatalog(nextCatalog);
-            }
+            // Stale catalog arrives via provider-model-catalog-changed; do not
+            // convert the failed refresh into a successful get response.
+            const nextSelection = await getProviderModelSelection().catch(() => null);
             if (nextSelection !== null) {
               setSelection(nextSelection);
             }
@@ -316,13 +317,8 @@ export function SettingsWindow() {
       setSelection(await getProviderModelSelection());
     } catch (error: unknown) {
       setErrorMessage(getSafeAgentErrorMessage(error));
-      const [nextCatalog, nextSelection] = await Promise.all([
-        getProviderModelCatalog().catch(() => null),
-        getProviderModelSelection().catch(() => null),
-      ]);
-      if (nextCatalog !== null) {
-        setCatalog(nextCatalog);
-      }
+      // Stale last-known catalog is retained from prior state / native emit.
+      const nextSelection = await getProviderModelSelection().catch(() => null);
       if (nextSelection !== null) {
         setSelection(nextSelection);
       }

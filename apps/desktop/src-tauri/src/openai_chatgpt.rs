@@ -297,7 +297,6 @@ impl ChatGptAdapter {
                     TokenPersistence::Initial,
                     PersistenceCancellation::BrowserConnect(cancel),
                 )?;
-                store.clear_catalog_read_seal();
                 self.reconnect_required.store(false, Ordering::SeqCst);
             }
             TokenBundle::InvalidGrant => return Err(PublicError::AuthenticationRequired),
@@ -717,9 +716,18 @@ impl ChatGptAdapter {
             token.zeroize();
             return Err(PublicError::Cancelled);
         }
+        let previous_account = snapshot.value(CredentialKind::AccountId);
+        let account_changed = previous_account != Some(token.account.as_bytes());
+        if account_changed && store.seal_catalog_reads().is_err() {
+            token.zeroize();
+            return Err(PublicError::AgentStorageUnavailable);
+        }
         let original_profile = profile.clone();
         profile.set_credential_metadata(None, None, now);
         if store.update_provider_profile(&profile).is_err() {
+            if account_changed {
+                let _ = store.clear_catalog_read_seal();
+            }
             token.zeroize();
             return Err(PublicError::AgentStorageUnavailable);
         }
@@ -744,6 +752,7 @@ impl ChatGptAdapter {
                         &snapshot,
                         &written,
                         &original_profile,
+                        account_changed,
                     );
                     token.zeroize();
                     if !restored {
@@ -754,8 +763,13 @@ impl ChatGptAdapter {
                 }
             }
             if cancellation.is_cancelled() {
-                let restored =
-                    self.restore_persistence_state(store, &snapshot, &written, &original_profile);
+                let restored = self.restore_persistence_state(
+                    store,
+                    &snapshot,
+                    &written,
+                    &original_profile,
+                    account_changed,
+                );
                 token.zeroize();
                 if !restored {
                     self.reconnect_required.store(true, Ordering::SeqCst);
@@ -780,6 +794,7 @@ impl ChatGptAdapter {
                             &snapshot,
                             &written,
                             &original_profile,
+                            account_changed,
                         );
                         token.zeroize();
                         if !restored {
@@ -799,6 +814,7 @@ impl ChatGptAdapter {
                         &snapshot,
                         &written,
                         &original_profile,
+                        account_changed,
                     );
                     token.zeroize();
                     if !restored {
@@ -810,8 +826,13 @@ impl ChatGptAdapter {
                 Some(guard)
             }
             PersistenceCancellation::Operation(cancel) if cancel.is_cancelled() => {
-                let restored =
-                    self.restore_persistence_state(store, &snapshot, &written, &original_profile);
+                let restored = self.restore_persistence_state(
+                    store,
+                    &snapshot,
+                    &written,
+                    &original_profile,
+                    account_changed,
+                );
                 token.zeroize();
                 if !restored {
                     self.reconnect_required.store(true, Ordering::SeqCst);
@@ -822,8 +843,13 @@ impl ChatGptAdapter {
             _ => None,
         };
         if store.update_provider_profile(&profile).is_err() {
-            let restored =
-                self.restore_persistence_state(store, &snapshot, &written, &original_profile);
+            let restored = self.restore_persistence_state(
+                store,
+                &snapshot,
+                &written,
+                &original_profile,
+                account_changed,
+            );
             token.zeroize();
             if !restored {
                 self.reconnect_required.store(true, Ordering::SeqCst);
@@ -834,14 +860,10 @@ impl ChatGptAdapter {
         if let Some(slot) = connect_commit_guard.as_mut() {
             slot.take();
         }
-        let previous_account = snapshot.value(CredentialKind::AccountId);
-        let account_changed = previous_account != Some(token.account.as_bytes());
         token.zeroize();
         if account_changed {
             match store.invalidate_catalog_for_credential_change(PROVIDER_PROFILE_ID, now) {
-                Ok(_) => {
-                    store.clear_catalog_read_seal();
-                }
+                Ok(_) => {}
                 Err(_) => {
                     // Credentials were written for the new account. Compensate back
                     // to the prior generation when possible; otherwise seal public
@@ -851,8 +873,8 @@ impl ChatGptAdapter {
                         &snapshot,
                         &written,
                         &original_profile,
+                        true,
                     ) {
-                        store.seal_catalog_reads();
                         let _ = store.scrub_catalog_entries(PROVIDER_PROFILE_ID);
                         self.reconnect_required.store(true, Ordering::SeqCst);
                         return Err(PublicError::CredentialStoreUnavailable);
@@ -932,17 +954,30 @@ impl ChatGptAdapter {
         restored
     }
 
+    fn restore_snapshot_and_catalog_access(
+        &self,
+        store: &SqliteStore,
+        snapshot: &CredentialSnapshot,
+        changed: &[CredentialKind],
+    ) -> bool {
+        self.restore_snapshot(snapshot, changed) && store.clear_catalog_read_seal().is_ok()
+    }
+
     fn restore_persistence_state(
         &self,
         store: &SqliteStore,
         snapshot: &CredentialSnapshot,
         changed: &[CredentialKind],
         profile: &ProviderProfile,
+        clear_catalog_read_seal: bool,
     ) -> bool {
         if !self.restore_snapshot(snapshot, changed) {
             return false;
         }
-        store.update_provider_profile(profile).is_ok()
+        if store.update_provider_profile(profile).is_err() {
+            return false;
+        }
+        !clear_catalog_read_seal || store.clear_catalog_read_seal().is_ok()
     }
 
     fn remove_credentials_and_metadata(
@@ -957,10 +992,15 @@ impl ChatGptAdapter {
         let original_profile = profile.clone();
         let now = unix_now_ms().map_err(|_| PublicError::AgentStorageUnavailable)?;
         let snapshot = self.credential_snapshot()?;
+        store
+            .seal_catalog_reads()
+            .map_err(|_| PublicError::AgentStorageUnavailable)?;
         let mut deleted = Vec::new();
         for kind in DELETE_CREDENTIAL_ORDER {
             if let Err(error) = self.credentials.delete(CREDENTIAL_HANDLE, kind) {
-                if restore_on_failure && !self.restore_snapshot(&snapshot, &deleted) {
+                if restore_on_failure
+                    && !self.restore_snapshot_and_catalog_access(store, &snapshot, &deleted)
+                {
                     self.reconnect_required.store(true, Ordering::SeqCst);
                 }
                 return Err(map_credential_error(error));
@@ -969,7 +1009,9 @@ impl ChatGptAdapter {
             match self.credentials.read(CREDENTIAL_HANDLE, kind) {
                 Ok(None) => {}
                 Ok(Some(_)) | Err(_) => {
-                    if restore_on_failure && !self.restore_snapshot(&snapshot, &deleted) {
+                    if restore_on_failure
+                        && !self.restore_snapshot_and_catalog_access(store, &snapshot, &deleted)
+                    {
                         self.reconnect_required.store(true, Ordering::SeqCst);
                     }
                     return Err(PublicError::CredentialStoreUnavailable);
@@ -979,7 +1021,15 @@ impl ChatGptAdapter {
 
         profile.set_credential_metadata(None, None, now);
         if store.update_provider_profile(&profile).is_err() {
-            if restore_on_failure && !self.restore_snapshot(&snapshot, &deleted) {
+            if restore_on_failure
+                && !self.restore_persistence_state(
+                    store,
+                    &snapshot,
+                    &deleted,
+                    &original_profile,
+                    true,
+                )
+            {
                 self.reconnect_required.store(true, Ordering::SeqCst);
                 return Err(PublicError::CredentialStoreUnavailable);
             }
@@ -992,19 +1042,22 @@ impl ChatGptAdapter {
             // Fail closed: never report clean disconnect while a prior catalog
             // generation may still be readable.
             if restore_on_failure
-                && !self.restore_persistence_state(store, &snapshot, &deleted, &original_profile)
+                && !self.restore_persistence_state(
+                    store,
+                    &snapshot,
+                    &deleted,
+                    &original_profile,
+                    true,
+                )
             {
-                store.seal_catalog_reads();
                 self.reconnect_required.store(true, Ordering::SeqCst);
                 return Err(PublicError::CredentialStoreUnavailable);
             }
             if !restore_on_failure {
-                store.seal_catalog_reads();
                 self.reconnect_required.store(true, Ordering::SeqCst);
             }
             return Err(PublicError::AgentStorageUnavailable);
         }
-        store.clear_catalog_read_seal();
         Ok(())
     }
 
@@ -3693,11 +3746,12 @@ mod tests {
     }
 
     #[test]
-    fn account_change_scrub_failure_still_seals_public_reads() {
+    fn account_change_scrub_failure_seals_public_reads_across_restart() {
         let fake = Arc::new(FakeCredentialStore::default());
         seed_connected(&fake);
         let dir = tempfile_dir();
-        let store = SqliteStore::open(dir.join("account-seal.sqlite3")).unwrap();
+        let path = dir.join("account-seal.sqlite3");
+        let store = SqliteStore::open(&path).unwrap();
         mark_profile_connected(&store, Some(i64::MAX / 2));
         store
             .replace_catalog_snapshot(
@@ -3739,6 +3793,7 @@ mod tests {
             adapter.connection_status_with_store(&store).state,
             ConnectionState::ReconnectRequired
         );
+        assert!(store.catalog_reads_are_sealed().unwrap());
         // Scrub failed, so sqlite still holds prior-generation rows.
         assert_eq!(
             store
@@ -3749,10 +3804,27 @@ mod tests {
                 .model_id,
             "prior-account-model"
         );
-        // Public reads remain sealed independently of scrub success.
+        // Public reads remain sealed independently of scrub success in-process.
         let public = crate::provider::build_catalog_response(&store).unwrap();
         assert!(public.models.is_empty());
         let selection = crate::provider::build_selection_response(&store).unwrap();
+        assert!(selection.selected_model_id.is_none());
+
+        drop(store);
+        let reopened = SqliteStore::open(&path).unwrap();
+        assert!(reopened.catalog_reads_are_sealed().unwrap());
+        assert_eq!(
+            reopened
+                .get_catalog_snapshot(PROVIDER_PROFILE_ID)
+                .unwrap()
+                .unwrap()
+                .entries[0]
+                .model_id,
+            "prior-account-model"
+        );
+        let public = crate::provider::build_catalog_response(&reopened).unwrap();
+        assert!(public.models.is_empty());
+        let selection = crate::provider::build_selection_response(&reopened).unwrap();
         assert!(selection.selected_model_id.is_none());
     }
 

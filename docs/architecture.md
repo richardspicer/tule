@@ -60,7 +60,10 @@ An authenticated success with no usable models is a bounded catalog failure and
 does not erase the last validated snapshot; the refresh command still surfaces
 the bounded error rather than reporting stale success. Catalog retrieval refreshes
 an expired access token under the shared provider gate, and credential-generation
-invalidation fails closed on account change or disconnect. Capability filtering
+invalidation fails closed on account change or disconnect. A durable pre-transition
+quarantine hides catalog and selection reads until invalidation commits or the
+original credential state is restored, including across process restart when
+compensation and best-effort scrubbing fail. Capability filtering
 excludes tool-only and Responses Lite models without persisting those fields.
 Connection-status commands remain separate from catalog and selected-default
 commands and events.

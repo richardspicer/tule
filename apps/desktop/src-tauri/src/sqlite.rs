@@ -33,15 +33,15 @@ const MIGRATION_SET: &[M<'static>] = &[
     M::up(include_str!(
         "../migrations/0006_provider_rejected_models.sql"
     )),
+    M::up(include_str!(
+        "../migrations/0007_provider_catalog_quarantine.sql"
+    )),
 ];
 const MIGRATIONS: Migrations<'static> = Migrations::from_slice(MIGRATION_SET);
 
 /// The single, synchronized SQLite owner used by all desktop repositories.
 pub(crate) struct SqliteStore {
     connection: Mutex<Connection>,
-    /// Infallible fail-closed gate for public catalog/selection reads after a
-    /// failed account-change compensation path. Independent of scrub success.
-    catalog_read_sealed: std::sync::atomic::AtomicBool,
     #[cfg(test)]
     fail_catalog_invalidation: std::sync::atomic::AtomicBool,
     #[cfg(test)]
@@ -63,7 +63,6 @@ impl SqliteStore {
 
         let store = Self {
             connection: Mutex::new(connection),
-            catalog_read_sealed: std::sync::atomic::AtomicBool::new(false),
             #[cfg(test)]
             fail_catalog_invalidation: std::sync::atomic::AtomicBool::new(false),
             #[cfg(test)]
@@ -76,19 +75,41 @@ impl SqliteStore {
         Ok(store)
     }
 
-    pub(crate) fn seal_catalog_reads(&self) {
-        self.catalog_read_sealed
-            .store(true, std::sync::atomic::Ordering::SeqCst);
+    /// Durably hides catalog and selection state before a credential identity
+    /// transition. Presence of the row is the seal, so it survives restart.
+    pub(crate) fn seal_catalog_reads(&self) -> Result<(), SqliteStoreError> {
+        self.connection()?
+            .execute(
+                "INSERT OR IGNORE INTO provider_model_catalog_quarantine (provider_profile_id)
+                 VALUES (?1)",
+                params![PROVIDER_PROFILE_ID],
+            )
+            .map_err(SqliteStoreError::Database)?;
+        Ok(())
     }
 
-    pub(crate) fn clear_catalog_read_seal(&self) {
-        self.catalog_read_sealed
-            .store(false, std::sync::atomic::Ordering::SeqCst);
+    pub(crate) fn clear_catalog_read_seal(&self) -> Result<(), SqliteStoreError> {
+        self.connection()?
+            .execute(
+                "DELETE FROM provider_model_catalog_quarantine
+                 WHERE provider_profile_id = ?1",
+                params![PROVIDER_PROFILE_ID],
+            )
+            .map_err(SqliteStoreError::Database)?;
+        Ok(())
     }
 
-    pub(crate) fn catalog_reads_are_sealed(&self) -> bool {
-        self.catalog_read_sealed
-            .load(std::sync::atomic::Ordering::SeqCst)
+    pub(crate) fn catalog_reads_are_sealed(&self) -> Result<bool, SqliteStoreError> {
+        self.connection()?
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM provider_model_catalog_quarantine
+                    WHERE provider_profile_id = ?1
+                 )",
+                params![PROVIDER_PROFILE_ID],
+                |row| row.get(0),
+            )
+            .map_err(SqliteStoreError::Database)
     }
 
     #[cfg(test)]
@@ -412,7 +433,7 @@ mod tests {
             .unwrap()
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 6);
+        assert_eq!(version, 7);
         drop(repository);
 
         let reopened = open_repository(&path);
@@ -422,7 +443,7 @@ mod tests {
             .unwrap()
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 6);
+        assert_eq!(version, 7);
     }
 
     #[test]
@@ -454,7 +475,7 @@ mod tests {
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
 
-        assert_eq!(version, 6);
+        assert_eq!(version, 7);
         assert_eq!(projects.len(), 1);
         assert_eq!(projects[0].id().to_string(), id);
         assert_eq!(projects[0].name().as_str(), "Existing project");
@@ -491,7 +512,7 @@ mod tests {
             .unwrap()
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 6);
+        assert_eq!(version, 7);
     }
 
     #[test]

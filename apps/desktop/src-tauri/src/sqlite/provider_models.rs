@@ -292,6 +292,15 @@ impl SqliteStore {
                 params![provider_profile_id, next, updated_at_unix_ms],
             )
             .map_err(SqliteStoreError::Database)?;
+        // Clear the pre-transition quarantine in the same transaction that
+        // makes the prior credential generation structurally unreadable.
+        transaction
+            .execute(
+                "DELETE FROM provider_model_catalog_quarantine
+                 WHERE provider_profile_id = ?1",
+                params![provider_profile_id],
+            )
+            .map_err(SqliteStoreError::Database)?;
         transaction.commit().map_err(SqliteStoreError::Database)?;
         Ok(next)
     }
@@ -497,10 +506,13 @@ mod tests {
         store
             .set_model_selection(PROVIDER_PROFILE_ID, Some("gpt-5.5"), 10)
             .unwrap();
+        store.seal_catalog_reads().unwrap();
+        assert!(store.catalog_reads_are_sealed().unwrap());
         let generation = store
             .invalidate_catalog_for_credential_change(PROVIDER_PROFILE_ID, 20)
             .unwrap();
         assert_eq!(generation, 1);
+        assert!(!store.catalog_reads_are_sealed().unwrap());
         assert_eq!(
             store
                 .get_model_selection(PROVIDER_PROFILE_ID)

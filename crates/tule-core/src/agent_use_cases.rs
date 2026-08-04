@@ -1209,7 +1209,7 @@ mod tests {
         assert!(
             prepared
                 .request_json
-                .contains("Attached untrusted source snapshot")
+                .contains(crate::ATTACHED_SOURCE_FRAME_VERSION)
         );
         assert_eq!(
             repository

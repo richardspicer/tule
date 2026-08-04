@@ -465,6 +465,7 @@ pub(crate) async fn pick_agent_text_source(
     state: State<'_, AgentState>,
 ) -> Result<PickAgentTextSourceResponse, AgentIpcError> {
     require_main_window(&webview)?;
+    let _operation = begin_draft_mutation(&state)?;
     let drafts = Arc::clone(&state.source_drafts);
     let picker = AppDialogPicker { app };
     let outcome = tauri::async_runtime::spawn_blocking(move || {
@@ -502,8 +503,20 @@ pub(crate) async fn clear_agent_text_source_draft(
     state: State<'_, AgentState>,
 ) -> Result<(), AgentIpcError> {
     require_main_window(&webview)?;
+    clear_agent_text_source_draft_inner(draft_handle.as_deref(), &state)
+}
+
+fn begin_draft_mutation(state: &AgentState) -> Result<OperationGuard, AgentIpcError> {
+    state.try_operation().map_err(AgentIpcError::from)
+}
+
+fn clear_agent_text_source_draft_inner(
+    draft_handle: Option<&str>,
+    state: &AgentState,
+) -> Result<(), AgentIpcError> {
+    let _operation = begin_draft_mutation(state)?;
     if let Some(handle) = draft_handle {
-        state.source_drafts.clear_handle(&handle);
+        state.source_drafts.clear_handle(handle);
     } else {
         state.source_drafts.clear_all();
     }
@@ -513,12 +526,29 @@ pub(crate) async fn clear_agent_text_source_draft(
 #[tauri::command(rename_all = "camelCase")]
 pub(crate) async fn set_agent_source_draft_scope(
     webview: Webview,
-    scope_key: String,
+    session_id: Option<String>,
     state: State<'_, AgentState>,
 ) -> Result<(), AgentIpcError> {
     require_main_window(&webview)?;
-    state.source_drafts.set_scope(scope_key);
-    Ok(())
+    set_agent_source_draft_scope_inner(session_id.as_deref(), &state)
+}
+
+fn set_agent_source_draft_scope_inner(
+    session_id: Option<&str>,
+    state: &AgentState,
+) -> Result<(), AgentIpcError> {
+    let _operation = begin_draft_mutation(state)?;
+    match session_id {
+        None => {
+            state.source_drafts.begin_new_session_scope();
+            Ok(())
+        }
+        Some(value) => {
+            let id = AgentSessionId::parse(value).map_err(|_| AgentIpcError::InvalidInput)?;
+            state.source_drafts.bind_session_scope(id);
+            Ok(())
+        }
+    }
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -575,9 +605,13 @@ pub(crate) async fn send_agent_message(
         String::new()
     };
     let pending_source = if let Some(handle) = source_draft_handle.as_ref() {
+        let send_target = state
+            .source_drafts
+            .send_target_for_session(session_id)
+            .ok_or(AgentIpcError::SourceDraftExpired)?;
         let draft = state
             .source_drafts
-            .get(handle)
+            .resolve_for_send(handle, &send_target)
             .ok_or(AgentIpcError::SourceDraftExpired)?;
         Some(
             draft
@@ -1011,6 +1045,53 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(changed.project_id, Some(project.id().to_string()));
+        drop(state);
+        drop(directory);
+    }
+
+    #[test]
+    fn draft_mutations_are_gated_while_send_holds_the_operation() {
+        let (directory, state) = test_state();
+        let handle = state
+            .source_drafts
+            .insert("notes.txt".into(), "original-body".into())
+            .unwrap();
+        let send_target = state.source_drafts.current_scope();
+        let held = state.try_send_operation().unwrap();
+
+        assert!(matches!(
+            begin_draft_mutation(&state),
+            Err(AgentIpcError::SessionBusy)
+        ));
+        assert!(matches!(
+            clear_agent_text_source_draft_inner(Some(&handle), &state),
+            Err(AgentIpcError::SessionBusy)
+        ));
+        assert!(matches!(
+            clear_agent_text_source_draft_inner(None, &state),
+            Err(AgentIpcError::SessionBusy)
+        ));
+        assert!(matches!(
+            set_agent_source_draft_scope_inner(None, &state),
+            Err(AgentIpcError::SessionBusy)
+        ));
+        assert!(matches!(
+            set_agent_source_draft_scope_inner(Some("not-a-uuid"), &state),
+            Err(AgentIpcError::SessionBusy)
+        ));
+
+        let draft = state.source_drafts.get(&handle).unwrap();
+        assert_eq!(draft.content, "original-body");
+        assert_eq!(draft.display_name, "notes.txt");
+        assert_eq!(
+            state
+                .source_drafts
+                .resolve_for_send(&handle, &send_target)
+                .unwrap()
+                .content,
+            "original-body"
+        );
+        drop(held);
         drop(state);
         drop(directory);
     }

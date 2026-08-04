@@ -713,9 +713,10 @@ fn reconstruct_event(row: EventRow) -> Result<AgentEvent, SqliteStoreError> {
 
 #[cfg(test)]
 mod tests {
+    use rusqlite::ErrorCode;
     use tule_core::{
         AgentEvent, AgentEventKind, AgentRepository, AgentSession, AgentTurn, AgentTurnState,
-        PROVIDER_PROFILE_ID, ProviderRequestId, Source, prepare_agent_send,
+        PROVIDER_PROFILE_ID, ProviderRequestId, Source, complete_agent_turn, prepare_agent_send,
     };
 
     use super::*;
@@ -1009,6 +1010,98 @@ mod tests {
             })
             .unwrap();
         assert_eq!(content_row, content);
+    }
+
+    #[test]
+    fn malformed_source_rows_are_rejected_on_reconstruction() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = SqliteStore::open(directory.path().join("malformed-source.sqlite3")).unwrap();
+        let source = Source::new_local_text("ok.txt", "hello").unwrap();
+        let prepared = prepare_agent_send(
+            &store,
+            None,
+            "Use attachment",
+            None,
+            "",
+            "gpt-5.5",
+            Some(&source),
+        )
+        .unwrap();
+        store
+            .connection()
+            .unwrap()
+            .execute(
+                "UPDATE agent_sources SET content_sha256 = ?1 WHERE id = ?2",
+                params!["a".repeat(64), source.id().to_string()],
+            )
+            .unwrap();
+        assert!(matches!(
+            store.list_turn_sources(&prepared.session.id()),
+            Err(SqliteStoreError::MalformedSource(
+                tule_core::SourceReconstructionError::HashMismatch
+            ))
+        ));
+        store
+            .connection()
+            .unwrap()
+            .execute(
+                "UPDATE agent_sources SET content_sha256 = ?1, display_name = ?2 WHERE id = ?3",
+                params![
+                    source.content_sha256(),
+                    "bad\nname",
+                    source.id().to_string()
+                ],
+            )
+            .unwrap();
+        assert!(matches!(
+            store.list_turn_sources(&prepared.session.id()),
+            Err(SqliteStoreError::MalformedSource(
+                tule_core::SourceReconstructionError::InvalidDisplayName
+            ))
+        ));
+    }
+
+    #[test]
+    fn source_id_is_unique_across_turn_associations() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = SqliteStore::open(directory.path().join("source-unique.sqlite3")).unwrap();
+        let source = Source::new_local_text("once.txt", "body").unwrap();
+        let first =
+            prepare_agent_send(&store, None, "First", None, "", "gpt-5.5", Some(&source)).unwrap();
+        complete_agent_turn(&store, first.turn.id(), None, None, None).unwrap();
+        let second = prepare_agent_send(
+            &store,
+            Some(first.session.id()),
+            "Second",
+            None,
+            "",
+            "gpt-5.5",
+            None,
+        )
+        .unwrap();
+        let error = store
+            .connection()
+            .unwrap()
+            .execute(
+                "INSERT INTO agent_turn_sources (turn_id, source_id, attachment_order)
+                 VALUES (?1, ?2, 0)",
+                params![second.turn.id().to_string(), source.id().to_string()],
+            )
+            .unwrap_err();
+        assert_eq!(
+            error.sqlite_error_code(),
+            Some(ErrorCode::ConstraintViolation)
+        );
+        let schema: String = store
+            .connection()
+            .unwrap()
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE name = 'agent_turn_sources'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(schema.contains("UNIQUE (source_id)"));
     }
 
     #[test]

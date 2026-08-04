@@ -60,19 +60,38 @@ describe("agents platform", () => {
   });
 
   it("rejects non-allowlisted turn states, error codes, and source shapes", async () => {
+    const hostileSources = [
+      { ...validSource, id: "not-a-uuid" },
+      { ...validSource, id: "01900000-0000-4000-8000-000000000001" },
+      { ...validSource, id: "01900000-0000-7000-c000-000000000001" },
+      { ...validSource, originKind: "folder" },
+      { ...validSource, displayName: "" },
+      { ...validSource, displayName: "bad\nname" },
+      { ...validSource, displayName: "bad\u202Ename" },
+      { ...validSource, byteCount: -1 },
+      { ...validSource, byteCount: 1.5 },
+      { ...validSource, byteCount: 64 * 1024 + 1 },
+      { ...validSource, contentSha256: "not-a-hash" },
+      { ...validSource, contentSha256: "A".repeat(64) },
+      { ...validSource, contentSha256: "a".repeat(63) },
+      { ...validSource, path: "C:\\\\secret" },
+      {
+        id: validSource.id,
+        originKind: validSource.originKind,
+        displayName: validSource.displayName,
+        byteCount: validSource.byteCount,
+        // missing contentSha256
+      },
+    ];
+
     for (const turn of [
       { state: "secret-internal-state", errorCode: null, sources: [] },
       { state: "failed", errorCode: "raw-provider-error", sources: [] },
-      {
-        state: "completed",
+      ...hostileSources.map((sources) => ({
+        state: "completed" as const,
         errorCode: null,
-        sources: [{ ...validSource, contentSha256: "not-a-hash" }],
-      },
-      {
-        state: "completed",
-        errorCode: null,
-        sources: [{ ...validSource, originKind: "folder" }],
-      },
+        sources: [sources],
+      })),
     ]) {
       invokeMock.mockResolvedValueOnce({
         session: {
@@ -190,16 +209,102 @@ describe("agents platform", () => {
     });
 
     invokeMock.mockResolvedValueOnce({
-      status: "selected",
-      draftHandle: "x",
-      displayName: "notes.txt",
-      byteCount: 12,
-      originKind: "local_text_file",
-      path: "C:\\\\secret",
+      status: "cancelled",
+      draftHandle: null,
+      displayName: null,
+      byteCount: null,
+      originKind: null,
     });
-    await expect(pickAgentTextSource()).rejects.toMatchObject({
-      code: "agent_storage_unavailable",
-    });
+    await expect(pickAgentTextSource()).resolves.toEqual({ status: "cancelled" });
+
+    const hostilePicks = [
+      {
+        status: "selected",
+        draftHandle: "x",
+        displayName: "notes.txt",
+        byteCount: 12,
+        originKind: "local_text_file",
+      },
+      {
+        status: "selected",
+        draftHandle: "DEADBEEF".repeat(4),
+        displayName: "notes.txt",
+        byteCount: 12,
+        originKind: "local_text_file",
+      },
+      {
+        status: "selected",
+        draftHandle: "deadbeef".repeat(4),
+        displayName: "",
+        byteCount: 12,
+        originKind: "local_text_file",
+      },
+      {
+        status: "selected",
+        draftHandle: "deadbeef".repeat(4),
+        displayName: "bad\nname",
+        byteCount: 12,
+        originKind: "local_text_file",
+      },
+      {
+        status: "selected",
+        draftHandle: "deadbeef".repeat(4),
+        displayName: "notes.txt",
+        byteCount: 12.5,
+        originKind: "local_text_file",
+      },
+      {
+        status: "selected",
+        draftHandle: "deadbeef".repeat(4),
+        displayName: "notes.txt",
+        byteCount: 64 * 1024 + 1,
+        originKind: "local_text_file",
+      },
+      {
+        status: "selected",
+        draftHandle: "deadbeef".repeat(4),
+        displayName: "notes.txt",
+        byteCount: 12,
+        originKind: "folder",
+      },
+      {
+        status: "selected",
+        draftHandle: "deadbeef".repeat(4),
+        displayName: "notes.txt",
+        byteCount: 12,
+        originKind: "local_text_file",
+        path: "C:\\\\secret",
+      },
+      {
+        status: "cancelled",
+        draftHandle: "deadbeef".repeat(4),
+        displayName: null,
+        byteCount: null,
+        originKind: null,
+      },
+      {
+        status: "cancelled",
+        draftHandle: null,
+        displayName: null,
+        byteCount: null,
+        originKind: null,
+        path: "C:\\\\secret",
+      },
+      { status: "cancelled" },
+      {
+        status: "other",
+        draftHandle: null,
+        displayName: null,
+        byteCount: null,
+        originKind: null,
+      },
+    ];
+    for (const payload of hostilePicks) {
+      invokeMock.mockResolvedValueOnce(payload);
+      await expect(pickAgentTextSource()).rejects.toMatchObject({
+        code: "agent_storage_unavailable",
+      });
+    }
 
     invokeMock.mockResolvedValueOnce(undefined);
     await clearAgentTextSourceDraft("handle");
@@ -207,9 +312,14 @@ describe("agents platform", () => {
       draftHandle: "handle",
     });
     invokeMock.mockResolvedValueOnce(undefined);
-    await setAgentSourceDraftScope("session-1");
+    await setAgentSourceDraftScope("01900000-0000-7000-8000-000000000001");
     expect(invokeMock).toHaveBeenCalledWith("set_agent_source_draft_scope", {
-      scopeKey: "session-1",
+      sessionId: "01900000-0000-7000-8000-000000000001",
+    });
+    invokeMock.mockResolvedValueOnce(undefined);
+    await setAgentSourceDraftScope(null);
+    expect(invokeMock).toHaveBeenCalledWith("set_agent_source_draft_scope", {
+      sessionId: null,
     });
   });
 

@@ -13,7 +13,8 @@ CREATE TABLE agent_turn_sources (
     source_id TEXT NOT NULL REFERENCES agent_sources(id),
     attachment_order INTEGER NOT NULL,
     PRIMARY KEY (turn_id, source_id),
-    UNIQUE (turn_id, attachment_order)
+    UNIQUE (turn_id, attachment_order),
+    UNIQUE (source_id)
 ) STRICT;
 
 CREATE INDEX agent_turn_sources_turn_order_index

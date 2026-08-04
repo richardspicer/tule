@@ -470,7 +470,7 @@ function App() {
     setDraft("");
     setAgentError(null);
     setPendingAttachment(null);
-    void setAgentSourceDraftScope("").catch(() => undefined);
+    void setAgentSourceDraftScope(null).catch(() => undefined);
   }
 
   async function handleSelectSession(sessionId: string) {
@@ -528,7 +528,7 @@ function App() {
     setDraft("");
     setAgentError(null);
     setPendingAttachment(null);
-    void setAgentSourceDraftScope("").catch(() => undefined);
+    void setAgentSourceDraftScope(null).catch(() => undefined);
   }
 
   function handleManageProjects() {

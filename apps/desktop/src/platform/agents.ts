@@ -147,25 +147,88 @@ function isAgentSession(value: unknown): value is AgentSession {
   );
 }
 
+const MAX_SOURCE_UTF8 = 64 * 1024;
+const SOURCE_METADATA_KEYS = [
+  "byteCount",
+  "contentSha256",
+  "displayName",
+  "id",
+  "originKind",
+] as const;
+const PICK_RESULT_KEYS = [
+  "byteCount",
+  "displayName",
+  "draftHandle",
+  "originKind",
+  "status",
+] as const;
+
+function isUuidV7(value: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(value);
+}
+
+function isCanonicalSha256(value: string): boolean {
+  return /^[0-9a-f]{64}$/.test(value);
+}
+
+function isDraftHandle(value: string): boolean {
+  return /^[0-9a-f]{32}$/.test(value);
+}
+
+function isSafeSourceDisplayName(value: string): boolean {
+  if (value.length === 0) {
+    return false;
+  }
+
+  for (const char of value) {
+    const code = char.codePointAt(0);
+    if (code === undefined) {
+      return false;
+    }
+    if (
+      code <= 0x1f ||
+      code === 0x7f ||
+      (code >= 0x80 && code <= 0x9f) ||
+      code === 0x061c ||
+      (code >= 0x200e && code <= 0x200f) ||
+      (code >= 0x202a && code <= 0x202e) ||
+      (code >= 0x2028 && code <= 0x2029) ||
+      (code >= 0x2066 && code <= 0x2069)
+    ) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+function isSourceByteCount(value: unknown): value is number {
+  return (
+    typeof value === "number" && Number.isInteger(value) && value >= 0 && value <= MAX_SOURCE_UTF8
+  );
+}
+
+function hasExactKeys(record: Record<string, unknown>, allowed: readonly string[]): boolean {
+  const keys = Object.keys(record).sort();
+  return keys.length === allowed.length && keys.every((key, index) => key === allowed[index]);
+}
+
 function isSourceMetadata(value: unknown): value is AgentSourceMetadata {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     return false;
   }
 
+  const record = value as Record<string, unknown>;
   return (
-    "id" in value &&
-    typeof value.id === "string" &&
-    "originKind" in value &&
-    value.originKind === "local_text_file" &&
-    "displayName" in value &&
-    typeof value.displayName === "string" &&
-    "byteCount" in value &&
-    typeof value.byteCount === "number" &&
-    Number.isFinite(value.byteCount) &&
-    value.byteCount >= 0 &&
-    "contentSha256" in value &&
-    typeof value.contentSha256 === "string" &&
-    /^[0-9a-f]{64}$/.test(value.contentSha256)
+    hasExactKeys(record, SOURCE_METADATA_KEYS) &&
+    typeof record.id === "string" &&
+    isUuidV7(record.id) &&
+    record.originKind === "local_text_file" &&
+    typeof record.displayName === "string" &&
+    isSafeSourceDisplayName(record.displayName) &&
+    isSourceByteCount(record.byteCount) &&
+    typeof record.contentSha256 === "string" &&
+    isCanonicalSha256(record.contentSha256)
   );
 }
 
@@ -269,10 +332,17 @@ function validatePickResult(value: unknown): PickAgentTextSourceResult {
   }
 
   const record = value as Record<string, unknown>;
-  const keys = Object.keys(record).sort();
+  if (!hasExactKeys(record, PICK_RESULT_KEYS)) {
+    throw new AgentError("agent_storage_unavailable");
+  }
+
   if (record.status === "cancelled") {
-    const allowed = ["byteCount", "displayName", "draftHandle", "originKind", "status"];
-    if (!keys.every((key) => allowed.includes(key))) {
+    if (
+      record.draftHandle !== null ||
+      record.displayName !== null ||
+      record.byteCount !== null ||
+      record.originKind !== null
+    ) {
       throw new AgentError("agent_storage_unavailable");
     }
     return { status: "cancelled" };
@@ -281,15 +351,11 @@ function validatePickResult(value: unknown): PickAgentTextSourceResult {
   if (
     record.status === "selected" &&
     typeof record.draftHandle === "string" &&
-    record.draftHandle.length > 0 &&
+    isDraftHandle(record.draftHandle) &&
     typeof record.displayName === "string" &&
-    typeof record.byteCount === "number" &&
-    Number.isFinite(record.byteCount) &&
-    record.byteCount >= 0 &&
-    record.originKind === "local_text_file" &&
-    keys.every((key) =>
-      ["byteCount", "displayName", "draftHandle", "originKind", "status"].includes(key),
-    )
+    isSafeSourceDisplayName(record.displayName) &&
+    isSourceByteCount(record.byteCount) &&
+    record.originKind === "local_text_file"
   ) {
     return {
       status: "selected",
@@ -345,8 +411,8 @@ export async function clearAgentTextSourceDraft(draftHandle: string | null): Pro
   await invokeAgentCommand("clear_agent_text_source_draft", { draftHandle });
 }
 
-export async function setAgentSourceDraftScope(scopeKey: string): Promise<void> {
-  await invokeAgentCommand("set_agent_source_draft_scope", { scopeKey });
+export async function setAgentSourceDraftScope(sessionId: string | null): Promise<void> {
+  await invokeAgentCommand("set_agent_source_draft_scope", { sessionId });
 }
 
 export async function sendAgentMessage(options: {

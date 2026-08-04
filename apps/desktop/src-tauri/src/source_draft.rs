@@ -9,20 +9,30 @@ use std::{
 };
 
 use tule_core::{
-    MAX_SOURCE_UTF8, SOURCE_ORIGIN_LOCAL_TEXT_FILE, Source, SourceValidationError,
+    AgentSessionId, MAX_SOURCE_UTF8, SOURCE_ORIGIN_LOCAL_TEXT_FILE, Source, SourceValidationError,
     validate_source_content, validate_source_display_name,
 };
+
+/// Native-owned composer scope for draft-handle binding.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ComposerScope {
+    /// Bound to a persisted Agent session.
+    Session(AgentSessionId),
+    /// Bound to one host-generated new-session generation.
+    NewSession { generation: u64 },
+}
 
 /// In-memory draft captured from one native picker selection.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SourceDraft {
     pub(crate) display_name: String,
     pub(crate) content: String,
+    scope: ComposerScope,
 }
 
 impl SourceDraft {
-    pub(crate) fn byte_count(&self) -> u64 {
-        self.content.len() as u64
+    pub(crate) fn scope(&self) -> &ComposerScope {
+        &self.scope
     }
 
     pub(crate) fn into_source(self) -> Result<Source, SourceValidationError> {
@@ -31,10 +41,21 @@ impl SourceDraft {
 }
 
 /// Process-scoped draft handles for the main-window composer.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(crate) struct SourceDraftStore {
     drafts: Mutex<HashMap<String, SourceDraft>>,
-    scope_key: Mutex<String>,
+    current_scope: Mutex<ComposerScope>,
+    next_new_session_generation: Mutex<u64>,
+}
+
+impl Default for SourceDraftStore {
+    fn default() -> Self {
+        Self {
+            drafts: Mutex::new(HashMap::new()),
+            current_scope: Mutex::new(ComposerScope::NewSession { generation: 0 }),
+            next_new_session_generation: Mutex::new(1),
+        }
+    }
 }
 
 impl SourceDraftStore {
@@ -42,14 +63,37 @@ impl SourceDraftStore {
         Self::default()
     }
 
-    /// Sets the current composer scope; changing scope invalidates all drafts.
-    pub(crate) fn set_scope(&self, scope_key: impl Into<String>) {
-        let next = scope_key.into();
-        let mut scope = self.scope_key.lock().expect("source draft scope lock");
+    pub(crate) fn current_scope(&self) -> ComposerScope {
+        self.current_scope
+            .lock()
+            .expect("source draft scope lock")
+            .clone()
+    }
+
+    /// Binds the composer to a validated session scope, invalidating prior drafts.
+    pub(crate) fn bind_session_scope(&self, session_id: AgentSessionId) {
+        let next = ComposerScope::Session(session_id);
+        let mut scope = self.current_scope.lock().expect("source draft scope lock");
         if *scope != next {
             *scope = next;
             self.drafts.lock().expect("source draft map lock").clear();
         }
+    }
+
+    /// Advances the host-owned new-session generation and invalidates prior drafts.
+    pub(crate) fn begin_new_session_scope(&self) {
+        let generation = {
+            let mut next = self
+                .next_new_session_generation
+                .lock()
+                .expect("source draft generation lock");
+            let generation = *next;
+            *next = next.saturating_add(1);
+            generation
+        };
+        *self.current_scope.lock().expect("source draft scope lock") =
+            ComposerScope::NewSession { generation };
+        self.drafts.lock().expect("source draft map lock").clear();
     }
 
     pub(crate) fn clear_all(&self) {
@@ -63,12 +107,21 @@ impl SourceDraftStore {
             .remove(handle);
     }
 
-    pub(crate) fn insert(&self, draft: SourceDraft) -> Result<String, SourceDraftError> {
+    pub(crate) fn insert(
+        &self,
+        display_name: String,
+        content: String,
+    ) -> Result<String, SourceDraftError> {
         let handle = generate_draft_handle()?;
-        self.drafts
-            .lock()
-            .expect("source draft map lock")
-            .insert(handle.clone(), draft);
+        let scope = self.current_scope();
+        self.drafts.lock().expect("source draft map lock").insert(
+            handle.clone(),
+            SourceDraft {
+                display_name,
+                content,
+                scope,
+            },
+        );
         Ok(handle)
     }
 
@@ -80,9 +133,43 @@ impl SourceDraftStore {
             .cloned()
     }
 
-    pub(crate) fn replace_with(&self, draft: SourceDraft) -> Result<String, SourceDraftError> {
+    /// Resolves a handle only when its bound scope matches the actual send target.
+    pub(crate) fn resolve_for_send(
+        &self,
+        handle: &str,
+        send_target: &ComposerScope,
+    ) -> Option<SourceDraft> {
+        let draft = self.get(handle)?;
+        if draft.scope() == send_target {
+            Some(draft)
+        } else {
+            None
+        }
+    }
+
+    pub(crate) fn replace_with(
+        &self,
+        display_name: String,
+        content: String,
+    ) -> Result<String, SourceDraftError> {
         self.clear_all();
-        self.insert(draft)
+        self.insert(display_name, content)
+    }
+
+    /// Builds the send-target scope for an optional session identifier.
+    ///
+    /// A new-session send only matches the current host new-session generation.
+    pub(crate) fn send_target_for_session(
+        &self,
+        session_id: Option<AgentSessionId>,
+    ) -> Option<ComposerScope> {
+        match session_id {
+            Some(id) => Some(ComposerScope::Session(id)),
+            None => match self.current_scope() {
+                scope @ ComposerScope::NewSession { .. } => Some(scope),
+                ComposerScope::Session(_) => None,
+            },
+        }
     }
 }
 
@@ -171,12 +258,8 @@ where
     drop(path);
     let content = std::str::from_utf8(&bytes).map_err(|_| SourceDraftError::Unsupported)?;
     validate_source_content(content).map_err(map_validation)?;
-    let draft = SourceDraft {
-        display_name: display_name.clone(),
-        content: content.to_owned(),
-    };
-    let byte_count = draft.byte_count();
-    let draft_handle = store.replace_with(draft)?;
+    let byte_count = content.len() as u64;
+    let draft_handle = store.replace_with(display_name.clone(), content.to_owned())?;
     Ok(PickSourceOutcome::Selected {
         draft_handle,
         display_name,
@@ -280,6 +363,10 @@ mod tests {
         assert_eq!(draft_handle.len(), 32);
         let draft = store.get(&draft_handle).unwrap();
         assert_eq!(draft.content, "hello\r\n");
+        assert!(matches!(
+            draft.scope(),
+            ComposerScope::NewSession { generation: 0 }
+        ));
     }
 
     #[test]
@@ -318,35 +405,93 @@ mod tests {
     }
 
     #[test]
-    fn handle_invalidation_events_and_no_wall_clock_expiry() {
+    fn cross_session_handle_cannot_be_substituted() {
         let store = SourceDraftStore::new();
-        let handle = store
-            .insert(SourceDraft {
-                display_name: "a.txt".into(),
-                content: "x".into(),
-            })
-            .unwrap();
-        assert!(store.get(&handle).is_some());
-        store.set_scope("session-1");
+        let session_a = AgentSessionId::generate();
+        let session_b = AgentSessionId::generate();
+        store.bind_session_scope(session_a);
+        let handle = store.insert("a.txt".into(), "from-a".into()).unwrap();
+        assert!(
+            store
+                .resolve_for_send(&handle, &ComposerScope::Session(session_a))
+                .is_some()
+        );
+        assert!(
+            store
+                .resolve_for_send(&handle, &ComposerScope::Session(session_b))
+                .is_none()
+        );
+        assert!(
+            store
+                .resolve_for_send(&handle, &ComposerScope::NewSession { generation: 0 })
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn repeated_new_session_scope_advances_and_invalidates() {
+        let store = SourceDraftStore::new();
+        let first = store.insert("a.txt".into(), "one".into()).unwrap();
+        store.begin_new_session_scope();
+        assert!(store.get(&first).is_none());
+        let second = store.insert("b.txt".into(), "two".into()).unwrap();
+        let generation = match store.current_scope() {
+            ComposerScope::NewSession { generation } => generation,
+            ComposerScope::Session(_) => panic!("expected new-session scope"),
+        };
+        assert!(
+            store
+                .resolve_for_send(&second, &ComposerScope::NewSession { generation })
+                .is_some()
+        );
+        store.begin_new_session_scope();
+        assert!(store.get(&second).is_none());
+        assert_ne!(
+            store.current_scope(),
+            ComposerScope::NewSession { generation }
+        );
+    }
+
+    #[test]
+    fn stale_and_reordered_scope_commands_cannot_revive_handles() {
+        let store = SourceDraftStore::new();
+        let session_a = AgentSessionId::generate();
+        let session_b = AgentSessionId::generate();
+        store.bind_session_scope(session_a);
+        let handle = store.insert("a.txt".into(), "body".into()).unwrap();
+        store.bind_session_scope(session_b);
         assert!(store.get(&handle).is_none());
-        let handle = store
-            .insert(SourceDraft {
-                display_name: "a.txt".into(),
-                content: "x".into(),
-            })
-            .unwrap();
+        store.bind_session_scope(session_a);
+        assert!(store.get(&handle).is_none());
+        assert!(
+            store
+                .resolve_for_send(&handle, &ComposerScope::Session(session_a))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn unknown_and_cleared_handles_are_expired() {
+        let store = SourceDraftStore::new();
+        assert!(
+            store
+                .resolve_for_send("deadbeef".repeat(4).as_str(), &store.current_scope())
+                .is_none()
+        );
+        let handle = store.insert("a.txt".into(), "x".into()).unwrap();
         store.clear_handle(&handle);
-        assert!(store.get(&handle).is_none());
-        let handle = store
-            .replace_with(SourceDraft {
-                display_name: "b.txt".into(),
-                content: "y".into(),
-            })
-            .unwrap();
-        store.clear_handle(&handle);
-        assert!(store.get(&handle).is_none());
+        assert!(
+            store
+                .resolve_for_send(&handle, &store.current_scope())
+                .is_none()
+        );
+        let handle = store.insert("a.txt".into(), "x".into()).unwrap();
         store.clear_all();
-        assert!(store.get("unknown").is_none());
+        assert!(
+            store
+                .resolve_for_send(&handle, &store.current_scope())
+                .is_none()
+        );
     }
 
     #[test]

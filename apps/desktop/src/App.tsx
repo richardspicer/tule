@@ -26,7 +26,18 @@ import {
   type Project,
   updateProjectInstructions,
 } from "./platform/projects";
-import { getConnectionStatus, type ConnectionState } from "./platform/provider";
+import {
+  formatModelLabel,
+  getConnectionStatus,
+  getPersistedProviderModelCatalog,
+  getProviderModelCatalog,
+  getProviderModelSelection,
+  listenProviderModelCatalogChanged,
+  listenProviderModelSelectionChanged,
+  type ConnectionState,
+  type ProviderModelCatalog,
+  type ProviderModelSelection,
+} from "./platform/provider";
 import {
   exitApplication,
   listenConnectionStatusChanged,
@@ -111,12 +122,29 @@ function App() {
   const [projectsCompact, setProjectsCompact] = useState(
     () => window.matchMedia(projectsCompactQuery).matches,
   );
+  const [catalog, setCatalog] = useState<ProviderModelCatalog | null>(null);
+  const [selection, setSelection] = useState<ProviderModelSelection | null>(null);
+  const [pendingModelId, setPendingModelId] = useState<string | null>(null);
 
   const activeSession = sessions.find((session) => session.id === activeSessionId) ?? null;
   const contextProjectId = activeSession?.projectId ?? pendingProjectId;
   const sessionTitle = activeSession?.title ?? "New session";
-  const modelLabel = "GPT-5.5";
+  const modelLocked = activeSession !== null;
+  const catalogModels = catalog?.models ?? [];
+  const catalogHasModel = (modelId: string | null | undefined): modelId is string =>
+    typeof modelId === "string" && catalogModels.some((model) => model.id === modelId);
+  const sessionModelId = modelLocked
+    ? (activeSession?.modelId ?? null)
+    : catalogHasModel(pendingModelId)
+      ? pendingModelId
+      : catalogHasModel(selection?.selectedModelId)
+        ? selection.selectedModelId
+        : null;
+  const modelLabel =
+    sessionModelId === null ? "Choose a model" : formatModelLabel(sessionModelId, catalogModels);
   const connected = connectionState === "connected";
+  const hasValidNewSessionModel = catalogHasModel(sessionModelId);
+  const newSessionNeedsModel = !modelLocked && !hasValidNewSessionModel;
 
   useEffect(() => {
     let active = true;
@@ -147,51 +175,106 @@ function App() {
 
   useEffect(() => {
     let active = true;
+    const cleanups: (() => void)[] = [];
 
-    getConnectionStatus()
-      .then((status) => {
-        if (active) {
-          setConnectionState(status.state);
+    void (async () => {
+      // Register listeners before catalog load so a stale emit cannot race past
+      // initial subscription, then recover via the cache-only path on failure.
+      const [unlistenAppearance, unlistenCatalog, unlistenSelection, unlistenConnection] =
+        await Promise.all([
+          listenAppearanceChanged((preference) => {
+            setTheme(preference);
+            applyThemePreference(preference);
+          }),
+          listenProviderModelCatalogChanged((next) => {
+            setCatalog(next);
+            setPendingModelId((current) => {
+              if (current !== null && next.models.some((model) => model.id === current)) {
+                return current;
+              }
+              return null;
+            });
+          }),
+          listenProviderModelSelectionChanged((next) => {
+            setSelection(next);
+            setPendingModelId((current) => {
+              if (next.selectedModelId === null && next.requiresSelection) {
+                return null;
+              }
+              return current ?? next.selectedModelId;
+            });
+          }),
+          listenConnectionStatusChanged((status) => {
+            setConnectionState(status.state);
+          }),
+        ]);
+      if (!active) {
+        unlistenAppearance();
+        unlistenCatalog();
+        unlistenSelection();
+        unlistenConnection();
+        return;
+      }
+      cleanups.push(unlistenAppearance, unlistenCatalog, unlistenSelection, unlistenConnection);
+
+      try {
+        const [status, nextSelection] = await Promise.all([
+          getConnectionStatus(),
+          getProviderModelSelection(),
+        ]);
+        if (!active) {
+          return;
         }
-      })
-      .catch(() => {
+        setConnectionState(status.state);
+        setSelection(nextSelection);
+        try {
+          const nextCatalog = await getProviderModelCatalog();
+          if (!active) {
+            return;
+          }
+          setCatalog(nextCatalog);
+          const selected =
+            nextSelection.selectedModelId !== null &&
+            nextCatalog.models.some((model) => model.id === nextSelection.selectedModelId)
+              ? nextSelection.selectedModelId
+              : null;
+          setPendingModelId((current) => {
+            if (current !== null && nextCatalog.models.some((model) => model.id === current)) {
+              return current;
+            }
+            return selected;
+          });
+        } catch (error: unknown) {
+          if (!active) {
+            return;
+          }
+          setAgentError(getSafeAgentErrorMessage(error));
+          const stale = await getPersistedProviderModelCatalog().catch(() => null);
+          if (!active || stale === null) {
+            return;
+          }
+          setCatalog(stale);
+          const selected =
+            nextSelection.selectedModelId !== null &&
+            stale.models.some((model) => model.id === nextSelection.selectedModelId)
+              ? nextSelection.selectedModelId
+              : null;
+          setPendingModelId((current) => {
+            if (current !== null && stale.models.some((model) => model.id === current)) {
+              return current;
+            }
+            return selected;
+          });
+        }
+      } catch {
         if (active) {
           setConnectionState("unavailable_in_this_build");
         }
-      });
+      }
+    })();
 
     return () => {
       active = false;
-    };
-  }, []);
-
-  useEffect(() => {
-    let disposed = false;
-    const cleanups: (() => void)[] = [];
-
-    void listenAppearanceChanged((preference) => {
-      setTheme(preference);
-      applyThemePreference(preference);
-    }).then((unlisten) => {
-      if (disposed) {
-        unlisten();
-      } else {
-        cleanups.push(unlisten);
-      }
-    });
-
-    void listenConnectionStatusChanged((status) => {
-      setConnectionState(status.state);
-    }).then((unlisten) => {
-      if (disposed) {
-        unlisten();
-      } else {
-        cleanups.push(unlisten);
-      }
-    });
-
-    return () => {
-      disposed = true;
       for (const cleanup of cleanups) {
         cleanup();
       }
@@ -374,6 +457,7 @@ function App() {
     setMainView("agent");
     setActiveSessionId(null);
     setPendingProjectId(null);
+    setPendingModelId(selection?.selectedModelId ?? null);
     setTurns([]);
     setDraft("");
     setAgentError(null);
@@ -472,7 +556,8 @@ function App() {
       sendingRef.current ||
       sessionLoadPendingRef.current ||
       sessionProjectChangePendingRef.current ||
-      draft.trim().length === 0
+      draft.trim().length === 0 ||
+      (!modelLocked && !hasValidNewSessionModel)
     ) {
       return;
     }
@@ -500,6 +585,7 @@ function App() {
         sessionId: activeSessionId,
         userText,
         projectId: contextProjectId,
+        modelId: activeSessionId === null ? sessionModelId : null,
         onEvent: (event) => {
           if (event.kind === "started") {
             nativeActiveTurnIdRef.current = event.turn_id;
@@ -833,18 +919,32 @@ function App() {
               projectId={contextProjectId}
               projects={projects}
               modelLabel={modelLabel}
+              modelOptions={(catalog?.models ?? []).map((model) => ({
+                id: model.id,
+                displayName: model.displayName,
+              }))}
+              selectedModelId={sessionModelId}
+              modelLocked={modelLocked}
               turns={turns}
               draft={draft}
               connected={connected}
               sending={sending}
-              sendBlocked={sessionLoadPending || sessionProjectChangePending}
+              sendBlocked={
+                sessionLoadPending || sessionProjectChangePending || newSessionNeedsModel
+              }
               cancelRequested={cancelRequested}
               activeTurnId={activeTurnId}
-              errorMessage={agentError}
+              errorMessage={
+                agentError ??
+                (newSessionNeedsModel && connected
+                  ? "Choose a model before sending the first message."
+                  : null)
+              }
               onDraftChange={setDraft}
               onSend={() => void handleSend()}
               onCancel={handleCancel}
               onProjectChange={(projectId) => void handleChangePersistedProject(projectId)}
+              onModelChange={setPendingModelId}
               onOpenProvidersSettings={() => void openSettingsWindow("providers")}
             />
           )}

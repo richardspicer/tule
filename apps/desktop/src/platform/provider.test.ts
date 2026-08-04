@@ -5,8 +5,12 @@ import {
   disconnectChatgpt,
   getConnectionStatus,
   getProviderErrorCode,
+  getProviderModelCatalog,
+  getProviderModelSelection,
   isStaleConnectCancellation,
   ProviderError,
+  setProviderModelSelection,
+  validateProviderModelCatalog,
 } from "./provider";
 
 const invokeMock = vi.hoisted(() => vi.fn());
@@ -68,5 +72,55 @@ describe("provider platform", () => {
     await expect(getConnectionStatus()).rejects.toMatchObject({
       code: "provider_unavailable",
     });
+  });
+
+  it("validates bounded catalog and selection contracts", async () => {
+    invokeMock.mockResolvedValueOnce({
+      providerId: "openai-chatgpt-compat",
+      models: [
+        {
+          id: "gpt-5.5",
+          displayName: "GPT-5.5",
+          description: "safe",
+          isProviderDefault: true,
+        },
+      ],
+      freshness: "current",
+      retrievedAtUnixMs: 10,
+      compatibilityRevision: "1.0.0",
+    });
+    await expect(getProviderModelCatalog()).resolves.toMatchObject({
+      freshness: "current",
+      models: [{ id: "gpt-5.5" }],
+    });
+
+    invokeMock.mockResolvedValueOnce({
+      providerId: "openai-chatgpt-compat",
+      selectedModelId: "gpt-5.5",
+      requiresSelection: false,
+    });
+    await expect(getProviderModelSelection()).resolves.toMatchObject({
+      selectedModelId: "gpt-5.5",
+    });
+
+    invokeMock.mockResolvedValueOnce({
+      providerId: "openai-chatgpt-compat",
+      selectedModelId: "other",
+      requiresSelection: false,
+    });
+    await expect(setProviderModelSelection("other")).resolves.toMatchObject({
+      selectedModelId: "other",
+    });
+    expect(invokeMock).toHaveBeenCalledWith("set_provider_model_selection", {
+      modelId: "other",
+    });
+
+    expect(() =>
+      validateProviderModelCatalog({
+        providerId: "openai-chatgpt-compat",
+        models: [{ id: "x" }],
+        freshness: "current",
+      }),
+    ).toThrow(ProviderError);
   });
 });

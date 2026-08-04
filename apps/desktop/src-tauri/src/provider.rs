@@ -4,6 +4,19 @@ use std::{future::Future, pin::Pin};
 
 use serde::Serialize;
 use tokio_util::sync::CancellationToken;
+use tule_core::{
+    PROVIDER_PROFILE_ID, SelectedDefaultResolution, catalog_freshness, model_id_in_catalog,
+    resolve_selected_default, validate_model_id,
+};
+
+use crate::sqlite::SqliteStore;
+
+pub(crate) const PROVIDER_MODEL_CATALOG_CHANGED_EVENT: &str = "provider-model-catalog-changed";
+pub(crate) const PROVIDER_MODEL_SELECTION_CHANGED_EVENT: &str = "provider-model-selection-changed";
+
+/// Stored selected-default marker that forces an explicit new choice without
+/// falling back to the built-in catalog default.
+const REQUIRES_EXPLICIT_CHOICE: &str = "__requires_choice__";
 
 /// Every error which may cross the native IPC boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -24,6 +37,7 @@ pub(crate) enum PublicError {
     Interrupted,
     CredentialStoreUnavailable,
     AgentStorageUnavailable,
+    ModelUnavailable,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -42,6 +56,33 @@ pub(crate) struct ConnectionStatus {
     pub(crate) state: ConnectionState,
     pub(crate) provider_id: &'static str,
     pub(crate) model: &'static str,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ProviderModelEntryResponse {
+    pub(crate) id: String,
+    pub(crate) display_name: String,
+    pub(crate) description: Option<String>,
+    pub(crate) is_provider_default: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ProviderModelCatalogResponse {
+    pub(crate) provider_id: String,
+    pub(crate) models: Vec<ProviderModelEntryResponse>,
+    pub(crate) freshness: String,
+    pub(crate) retrieved_at_unix_ms: Option<i64>,
+    pub(crate) compatibility_revision: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ProviderModelSelectionResponse {
+    pub(crate) provider_id: String,
+    pub(crate) selected_model_id: Option<String>,
+    pub(crate) requires_selection: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -75,6 +116,209 @@ pub(crate) trait ProviderAdapter: Send + Sync {
         cancel: CancellationToken,
         on_event: ProviderEventSink,
     ) -> ProviderFuture<'a>;
+}
+
+fn unix_now_ms() -> Result<i64, PublicError> {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| PublicError::AgentStorageUnavailable)?
+        .as_millis()
+        .try_into()
+        .map_err(|_| PublicError::AgentStorageUnavailable)
+}
+
+/// Marks a persisted catalog as visibly stale for failure/recovery surfaces.
+pub(crate) fn build_stale_catalog_response(
+    store: &SqliteStore,
+) -> Result<ProviderModelCatalogResponse, PublicError> {
+    let mut response = build_catalog_response(store)?;
+    response.freshness = "stale".to_owned();
+    Ok(response)
+}
+
+pub(crate) fn build_catalog_response(
+    store: &SqliteStore,
+) -> Result<ProviderModelCatalogResponse, PublicError> {
+    if store
+        .catalog_reads_are_sealed()
+        .map_err(|_| PublicError::AgentStorageUnavailable)?
+    {
+        return Ok(ProviderModelCatalogResponse {
+            provider_id: PROVIDER_PROFILE_ID.to_owned(),
+            models: Vec::new(),
+            freshness: "stale".to_owned(),
+            retrieved_at_unix_ms: None,
+            compatibility_revision: None,
+        });
+    }
+    let snapshot = store
+        .get_catalog_snapshot(PROVIDER_PROFILE_ID)
+        .map_err(|_| PublicError::AgentStorageUnavailable)?;
+    let Some(snapshot) = snapshot else {
+        return Ok(ProviderModelCatalogResponse {
+            provider_id: PROVIDER_PROFILE_ID.to_owned(),
+            models: Vec::new(),
+            freshness: "stale".to_owned(),
+            retrieved_at_unix_ms: None,
+            compatibility_revision: None,
+        });
+    };
+    let now = unix_now_ms()?;
+    let freshness = catalog_freshness(snapshot.state.retrieved_at_unix_ms, now);
+    Ok(ProviderModelCatalogResponse {
+        provider_id: PROVIDER_PROFILE_ID.to_owned(),
+        models: snapshot
+            .entries
+            .into_iter()
+            .map(|entry| ProviderModelEntryResponse {
+                id: entry.model_id,
+                display_name: entry.display_name,
+                description: entry.description,
+                is_provider_default: entry.is_provider_default,
+            })
+            .collect(),
+        freshness: freshness.as_str().to_owned(),
+        retrieved_at_unix_ms: Some(snapshot.state.retrieved_at_unix_ms),
+        compatibility_revision: Some(snapshot.state.compatibility_revision),
+    })
+}
+
+pub(crate) fn build_selection_response(
+    store: &SqliteStore,
+) -> Result<ProviderModelSelectionResponse, PublicError> {
+    if store
+        .catalog_reads_are_sealed()
+        .map_err(|_| PublicError::AgentStorageUnavailable)?
+    {
+        return Ok(ProviderModelSelectionResponse {
+            provider_id: PROVIDER_PROFILE_ID.to_owned(),
+            selected_model_id: None,
+            requires_selection: false,
+        });
+    }
+    let selection = store
+        .get_model_selection(PROVIDER_PROFILE_ID)
+        .map_err(|_| PublicError::AgentStorageUnavailable)?;
+    let entries = store
+        .get_catalog_snapshot(PROVIDER_PROFILE_ID)
+        .map_err(|_| PublicError::AgentStorageUnavailable)?
+        .map(|snapshot| snapshot.entries)
+        .unwrap_or_default();
+    if selection.selected_model_id.as_deref() == Some(REQUIRES_EXPLICIT_CHOICE) {
+        return Ok(ProviderModelSelectionResponse {
+            provider_id: PROVIDER_PROFILE_ID.to_owned(),
+            selected_model_id: None,
+            requires_selection: !entries.is_empty(),
+        });
+    }
+    let resolution = resolve_selected_default(selection.selected_model_id.as_deref(), &entries);
+    match resolution {
+        SelectedDefaultResolution::Available(model_id) => Ok(ProviderModelSelectionResponse {
+            provider_id: PROVIDER_PROFILE_ID.to_owned(),
+            selected_model_id: Some(model_id),
+            requires_selection: false,
+        }),
+        SelectedDefaultResolution::RequiresChoice => {
+            let requires_selection = !entries.is_empty() || selection.selected_model_id.is_some();
+            Ok(ProviderModelSelectionResponse {
+                provider_id: PROVIDER_PROFILE_ID.to_owned(),
+                selected_model_id: selection
+                    .selected_model_id
+                    .filter(|model_id| model_id != REQUIRES_EXPLICIT_CHOICE),
+                requires_selection,
+            })
+        }
+    }
+}
+
+pub(crate) fn persist_model_selection(
+    store: &SqliteStore,
+    model_id: &str,
+) -> Result<ProviderModelSelectionResponse, PublicError> {
+    let model_id = validate_model_id(model_id)
+        .map(str::to_owned)
+        .map_err(|_| PublicError::ModelUnavailable)?;
+    let snapshot = store
+        .get_catalog_snapshot(PROVIDER_PROFILE_ID)
+        .map_err(|_| PublicError::AgentStorageUnavailable)?;
+    let entries = snapshot
+        .as_ref()
+        .map(|item| item.entries.as_slice())
+        .unwrap_or(&[]);
+    if store
+        .is_model_rejected(PROVIDER_PROFILE_ID, &model_id)
+        .map_err(|_| PublicError::AgentStorageUnavailable)?
+    {
+        return Err(PublicError::ModelUnavailable);
+    }
+    if !model_id_in_catalog(&model_id, entries) {
+        return Err(PublicError::ModelUnavailable);
+    }
+    let now = unix_now_ms()?;
+    // Selected-default persistence is authoritative and separate from profile
+    // display metadata (`visible_model_id`).
+    store
+        .set_model_selection(PROVIDER_PROFILE_ID, Some(&model_id), now)
+        .map_err(|_| PublicError::AgentStorageUnavailable)?;
+    build_selection_response(store)
+}
+
+/// Records a provider model rejection and clears any matching selected default.
+///
+/// The rejected identifier remains unavailable for new-session choice for the
+/// current credential generation, even when a later catalog refresh returns it.
+pub(crate) fn apply_model_rejection(
+    store: &SqliteStore,
+    rejected_model_id: &str,
+) -> Result<(ProviderModelCatalogResponse, ProviderModelSelectionResponse), PublicError> {
+    let rejected_model_id = validate_model_id(rejected_model_id)
+        .map(str::to_owned)
+        .map_err(|_| PublicError::ModelUnavailable)?;
+    let now = unix_now_ms()?;
+    store
+        .record_rejected_model(PROVIDER_PROFILE_ID, &rejected_model_id, now)
+        .map_err(|_| PublicError::AgentStorageUnavailable)?;
+    let selection = store
+        .get_model_selection(PROVIDER_PROFILE_ID)
+        .map_err(|_| PublicError::AgentStorageUnavailable)?;
+    let resolved = build_selection_response(store)?;
+    if resolved.selected_model_id.as_deref() == Some(rejected_model_id.as_str())
+        || selection.selected_model_id.as_deref() == Some(rejected_model_id.as_str())
+    {
+        store
+            .set_model_selection(PROVIDER_PROFILE_ID, Some(REQUIRES_EXPLICIT_CHOICE), now)
+            .map_err(|_| PublicError::AgentStorageUnavailable)?;
+    }
+    let catalog = build_catalog_response(store)?;
+    let selection = build_selection_response(store)?;
+    Ok((catalog, selection))
+}
+
+/// Ensures a new-session model is present in the last validated catalog.
+pub(crate) fn validate_new_session_model(
+    store: &SqliteStore,
+    model_id: &str,
+) -> Result<String, PublicError> {
+    let model_id = validate_model_id(model_id)
+        .map(str::to_owned)
+        .map_err(|_| PublicError::ModelUnavailable)?;
+    if store
+        .is_model_rejected(PROVIDER_PROFILE_ID, &model_id)
+        .map_err(|_| PublicError::AgentStorageUnavailable)?
+    {
+        return Err(PublicError::ModelUnavailable);
+    }
+    let snapshot = store
+        .get_catalog_snapshot(PROVIDER_PROFILE_ID)
+        .map_err(|_| PublicError::AgentStorageUnavailable)?;
+    let Some(snapshot) = snapshot else {
+        return Err(PublicError::ModelUnavailable);
+    };
+    if !model_id_in_catalog(&model_id, &snapshot.entries) {
+        return Err(PublicError::ModelUnavailable);
+    }
+    Ok(model_id)
 }
 
 #[cfg(test)]
@@ -130,12 +374,168 @@ impl ProviderAdapter for FakeProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sqlite::{SqliteStore, StoredCatalogState};
+    use tule_core::{AgentRepository, ModelCatalogEntry};
 
     #[test]
     fn public_errors_serialize_without_internal_detail() {
         assert_eq!(
             serde_json::to_string(&PublicError::UnsupportedProviderOutput).unwrap(),
             "\"unsupported_provider_output\""
+        );
+    }
+
+    fn tempfile_dir() -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "tule-provider-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    #[test]
+    fn selected_default_write_is_atomic_and_separate_from_display_metadata() {
+        let dir = tempfile_dir();
+        let store = SqliteStore::open(dir.join("selection.sqlite3")).unwrap();
+        let before = store
+            .get_provider_profile(PROVIDER_PROFILE_ID)
+            .unwrap()
+            .unwrap()
+            .visible_model_id()
+            .to_owned();
+        store
+            .replace_catalog_snapshot(
+                PROVIDER_PROFILE_ID,
+                &StoredCatalogState {
+                    credential_generation: 0,
+                    compatibility_revision: "1.0.0".into(),
+                    etag: None,
+                    retrieved_at_unix_ms: 1,
+                    updated_at_unix_ms: 1,
+                },
+                &[ModelCatalogEntry {
+                    model_id: "other-model".into(),
+                    display_name: "Other".into(),
+                    description: None,
+                    sort_order: 1,
+                    is_provider_default: false,
+                }],
+            )
+            .unwrap();
+
+        let selection = persist_model_selection(&store, "other-model").unwrap();
+        assert_eq!(selection.selected_model_id.as_deref(), Some("other-model"));
+        assert_eq!(
+            store
+                .get_provider_profile(PROVIDER_PROFILE_ID)
+                .unwrap()
+                .unwrap()
+                .visible_model_id(),
+            before
+        );
+
+        store.set_fail_model_selection_write(true);
+        assert_eq!(
+            persist_model_selection(&store, "other-model"),
+            Err(PublicError::AgentStorageUnavailable)
+        );
+        assert_eq!(
+            store
+                .get_model_selection(PROVIDER_PROFILE_ID)
+                .unwrap()
+                .selected_model_id
+                .as_deref(),
+            Some("other-model")
+        );
+    }
+
+    #[test]
+    fn model_rejection_recovery_clears_default_and_blocks_repeated_selection() {
+        let dir = tempfile_dir();
+        let store = SqliteStore::open(dir.join("reject-recovery.sqlite3")).unwrap();
+        let entries = vec![
+            ModelCatalogEntry {
+                model_id: "bad-model".into(),
+                display_name: "Bad".into(),
+                description: None,
+                sort_order: 1,
+                is_provider_default: false,
+            },
+            ModelCatalogEntry {
+                model_id: "good-model".into(),
+                display_name: "Good".into(),
+                description: None,
+                sort_order: 2,
+                is_provider_default: true,
+            },
+        ];
+        store
+            .replace_catalog_snapshot(
+                PROVIDER_PROFILE_ID,
+                &StoredCatalogState {
+                    credential_generation: 0,
+                    compatibility_revision: "1.0.0".into(),
+                    etag: None,
+                    retrieved_at_unix_ms: 1,
+                    updated_at_unix_ms: 1,
+                },
+                &entries,
+            )
+            .unwrap();
+        persist_model_selection(&store, "bad-model").unwrap();
+
+        let (catalog, selection) = apply_model_rejection(&store, "bad-model").unwrap();
+        assert!(selection.selected_model_id.is_none());
+        assert!(selection.requires_selection);
+        assert_eq!(
+            catalog
+                .models
+                .iter()
+                .map(|model| model.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["good-model"]
+        );
+        assert_eq!(
+            validate_new_session_model(&store, "bad-model"),
+            Err(PublicError::ModelUnavailable)
+        );
+        assert_eq!(
+            persist_model_selection(&store, "bad-model"),
+            Err(PublicError::ModelUnavailable)
+        );
+
+        // Refresh returning the same identifier must not re-offer it.
+        store
+            .replace_catalog_snapshot(
+                PROVIDER_PROFILE_ID,
+                &StoredCatalogState {
+                    credential_generation: 0,
+                    compatibility_revision: "1.0.0".into(),
+                    etag: Some("\"v2\"".into()),
+                    retrieved_at_unix_ms: 2,
+                    updated_at_unix_ms: 2,
+                },
+                &entries,
+            )
+            .unwrap();
+        let after_refresh = build_catalog_response(&store).unwrap();
+        assert!(
+            !after_refresh
+                .models
+                .iter()
+                .any(|model| model.id == "bad-model")
+        );
+        assert_eq!(
+            validate_new_session_model(&store, "bad-model"),
+            Err(PublicError::ModelUnavailable)
+        );
+        assert_eq!(
+            validate_new_session_model(&store, "good-model").as_deref(),
+            Ok("good-model")
         );
     }
 }

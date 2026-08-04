@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 export type ConnectionState =
   "disconnected" | "connecting" | "connected" | "reconnect_required" | "unavailable_in_this_build";
@@ -7,6 +8,29 @@ export interface ConnectionStatus {
   state: ConnectionState;
   providerId: string;
   model: string;
+}
+
+export interface ProviderModelEntry {
+  id: string;
+  displayName: string;
+  description: string | null;
+  isProviderDefault: boolean;
+}
+
+export type CatalogFreshness = "current" | "stale";
+
+export interface ProviderModelCatalog {
+  providerId: string;
+  models: ProviderModelEntry[];
+  freshness: CatalogFreshness;
+  retrievedAtUnixMs: number | null;
+  compatibilityRevision: string | null;
+}
+
+export interface ProviderModelSelection {
+  providerId: string;
+  selectedModelId: string | null;
+  requiresSelection: boolean;
 }
 
 export type ProviderErrorCode =
@@ -23,7 +47,8 @@ export type ProviderErrorCode =
   | "cancelled"
   | "interrupted"
   | "credential_store_unavailable"
-  | "agent_storage_unavailable";
+  | "agent_storage_unavailable"
+  | "model_unavailable";
 
 const providerErrorCodes: readonly ProviderErrorCode[] = [
   "not_connected",
@@ -40,6 +65,7 @@ const providerErrorCodes: readonly ProviderErrorCode[] = [
   "interrupted",
   "credential_store_unavailable",
   "agent_storage_unavailable",
+  "model_unavailable",
 ];
 
 const connectionStates: readonly ConnectionState[] = [
@@ -49,6 +75,8 @@ const connectionStates: readonly ConnectionState[] = [
   "reconnect_required",
   "unavailable_in_this_build",
 ];
+
+const catalogFreshnessValues: readonly CatalogFreshness[] = ["current", "stale"];
 
 export class ProviderError extends Error {
   readonly code: ProviderErrorCode;
@@ -96,9 +124,81 @@ export function validateConnectionStatusExport(value: unknown): ConnectionStatus
   return value;
 }
 
-async function invokeProviderCommand(command: string): Promise<unknown> {
+function isProviderModelEntry(value: unknown): value is ProviderModelEntry {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return false;
+  }
+
+  return (
+    "id" in value &&
+    typeof value.id === "string" &&
+    "displayName" in value &&
+    typeof value.displayName === "string" &&
+    "description" in value &&
+    (value.description === null || typeof value.description === "string") &&
+    "isProviderDefault" in value &&
+    typeof value.isProviderDefault === "boolean"
+  );
+}
+
+function isProviderModelCatalog(value: unknown): value is ProviderModelCatalog {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return false;
+  }
+
+  return (
+    "providerId" in value &&
+    typeof value.providerId === "string" &&
+    "models" in value &&
+    Array.isArray(value.models) &&
+    value.models.every(isProviderModelEntry) &&
+    "freshness" in value &&
+    typeof value.freshness === "string" &&
+    catalogFreshnessValues.includes(value.freshness as CatalogFreshness) &&
+    "retrievedAtUnixMs" in value &&
+    (value.retrievedAtUnixMs === null || typeof value.retrievedAtUnixMs === "number") &&
+    "compatibilityRevision" in value &&
+    (value.compatibilityRevision === null || typeof value.compatibilityRevision === "string")
+  );
+}
+
+export function validateProviderModelCatalog(value: unknown): ProviderModelCatalog {
+  if (!isProviderModelCatalog(value)) {
+    throw new ProviderError("provider_unavailable");
+  }
+
+  return value;
+}
+
+function isProviderModelSelection(value: unknown): value is ProviderModelSelection {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return false;
+  }
+
+  return (
+    "providerId" in value &&
+    typeof value.providerId === "string" &&
+    "selectedModelId" in value &&
+    (value.selectedModelId === null || typeof value.selectedModelId === "string") &&
+    "requiresSelection" in value &&
+    typeof value.requiresSelection === "boolean"
+  );
+}
+
+export function validateProviderModelSelection(value: unknown): ProviderModelSelection {
+  if (!isProviderModelSelection(value)) {
+    throw new ProviderError("provider_unavailable");
+  }
+
+  return value;
+}
+
+async function invokeProviderCommand(
+  command: string,
+  args?: Record<string, unknown>,
+): Promise<unknown> {
   try {
-    return await invoke(command);
+    return args === undefined ? await invoke(command) : await invoke(command, args);
   } catch (error: unknown) {
     throw toProviderError(error);
   }
@@ -127,4 +227,54 @@ export function isStaleConnectCancellation(error: unknown): boolean {
 
 export async function disconnectChatgpt(): Promise<ConnectionStatus> {
   return validateConnectionStatusExport(await invokeProviderCommand("disconnect_chatgpt"));
+}
+
+export async function getProviderModelCatalog(): Promise<ProviderModelCatalog> {
+  return validateProviderModelCatalog(await invokeProviderCommand("get_provider_model_catalog"));
+}
+
+/** Cache-only recovery after a failed automatic refresh; never performs network I/O. */
+export async function getPersistedProviderModelCatalog(): Promise<ProviderModelCatalog> {
+  return validateProviderModelCatalog(
+    await invokeProviderCommand("get_persisted_provider_model_catalog"),
+  );
+}
+
+export async function refreshProviderModelCatalog(): Promise<ProviderModelCatalog> {
+  return validateProviderModelCatalog(
+    await invokeProviderCommand("refresh_provider_model_catalog"),
+  );
+}
+
+export async function getProviderModelSelection(): Promise<ProviderModelSelection> {
+  return validateProviderModelSelection(
+    await invokeProviderCommand("get_provider_model_selection"),
+  );
+}
+
+export async function setProviderModelSelection(modelId: string): Promise<ProviderModelSelection> {
+  return validateProviderModelSelection(
+    await invokeProviderCommand("set_provider_model_selection", { modelId }),
+  );
+}
+
+export async function listenProviderModelCatalogChanged(
+  onCatalog: (catalog: ProviderModelCatalog) => void,
+): Promise<UnlistenFn> {
+  return listen("provider-model-catalog-changed", (event) => {
+    onCatalog(validateProviderModelCatalog(event.payload));
+  });
+}
+
+export async function listenProviderModelSelectionChanged(
+  onSelection: (selection: ProviderModelSelection) => void,
+): Promise<UnlistenFn> {
+  return listen("provider-model-selection-changed", (event) => {
+    onSelection(validateProviderModelSelection(event.payload));
+  });
+}
+
+export function formatModelLabel(modelId: string, catalog: readonly ProviderModelEntry[]): string {
+  const match = catalog.find((entry) => entry.id === modelId);
+  return match?.displayName ?? modelId;
 }

@@ -1,6 +1,7 @@
 //! Shared serialized SQLite persistence for Projects and Agent conversations.
 
 mod agents;
+mod provider_models;
 
 use std::{
     error::Error,
@@ -19,6 +20,8 @@ use tule_core::{
 
 use crate::preferences::AppearancePreference;
 
+pub(crate) use provider_models::StoredCatalogState;
+
 pub(crate) const DATABASE_FILENAME: &str = "tule.sqlite3";
 
 const MIGRATION_SET: &[M<'static>] = &[
@@ -26,12 +29,25 @@ const MIGRATION_SET: &[M<'static>] = &[
     M::up(include_str!("../migrations/0002_project_instructions.sql")),
     M::up(include_str!("../migrations/0003_agent_conversations.sql")),
     M::up(include_str!("../migrations/0004_desktop_preferences.sql")),
+    M::up(include_str!("../migrations/0005_provider_models.sql")),
+    M::up(include_str!(
+        "../migrations/0006_provider_rejected_models.sql"
+    )),
+    M::up(include_str!(
+        "../migrations/0007_provider_catalog_quarantine.sql"
+    )),
 ];
 const MIGRATIONS: Migrations<'static> = Migrations::from_slice(MIGRATION_SET);
 
 /// The single, synchronized SQLite owner used by all desktop repositories.
 pub(crate) struct SqliteStore {
     connection: Mutex<Connection>,
+    #[cfg(test)]
+    fail_catalog_invalidation: std::sync::atomic::AtomicBool,
+    #[cfg(test)]
+    fail_model_selection_write: std::sync::atomic::AtomicBool,
+    #[cfg(test)]
+    fail_catalog_scrub: std::sync::atomic::AtomicBool,
 }
 
 impl SqliteStore {
@@ -47,9 +63,71 @@ impl SqliteStore {
 
         let store = Self {
             connection: Mutex::new(connection),
+            #[cfg(test)]
+            fail_catalog_invalidation: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            fail_model_selection_write: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            fail_catalog_scrub: std::sync::atomic::AtomicBool::new(false),
         };
         store.ensure_builtin_provider_profile()?;
+        store.ensure_builtin_model_selection()?;
         Ok(store)
+    }
+
+    /// Durably hides catalog and selection state before a credential identity
+    /// transition. Presence of the row is the seal, so it survives restart.
+    pub(crate) fn seal_catalog_reads(&self) -> Result<(), SqliteStoreError> {
+        self.connection()?
+            .execute(
+                "INSERT OR IGNORE INTO provider_model_catalog_quarantine (provider_profile_id)
+                 VALUES (?1)",
+                params![PROVIDER_PROFILE_ID],
+            )
+            .map_err(SqliteStoreError::Database)?;
+        Ok(())
+    }
+
+    pub(crate) fn clear_catalog_read_seal(&self) -> Result<(), SqliteStoreError> {
+        self.connection()?
+            .execute(
+                "DELETE FROM provider_model_catalog_quarantine
+                 WHERE provider_profile_id = ?1",
+                params![PROVIDER_PROFILE_ID],
+            )
+            .map_err(SqliteStoreError::Database)?;
+        Ok(())
+    }
+
+    pub(crate) fn catalog_reads_are_sealed(&self) -> Result<bool, SqliteStoreError> {
+        self.connection()?
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM provider_model_catalog_quarantine
+                    WHERE provider_profile_id = ?1
+                 )",
+                params![PROVIDER_PROFILE_ID],
+                |row| row.get(0),
+            )
+            .map_err(SqliteStoreError::Database)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_fail_catalog_invalidation(&self, fail: bool) {
+        self.fail_catalog_invalidation
+            .store(fail, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_fail_model_selection_write(&self, fail: bool) {
+        self.fail_model_selection_write
+            .store(fail, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_fail_catalog_scrub(&self, fail: bool) {
+        self.fail_catalog_scrub
+            .store(fail, std::sync::atomic::Ordering::SeqCst);
     }
 
     pub(super) fn connection(&self) -> Result<MutexGuard<'_, Connection>, SqliteStoreError> {
@@ -355,7 +433,7 @@ mod tests {
             .unwrap()
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 4);
+        assert_eq!(version, 7);
         drop(repository);
 
         let reopened = open_repository(&path);
@@ -365,7 +443,7 @@ mod tests {
             .unwrap()
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 4);
+        assert_eq!(version, 7);
     }
 
     #[test]
@@ -397,7 +475,7 @@ mod tests {
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
 
-        assert_eq!(version, 4);
+        assert_eq!(version, 7);
         assert_eq!(projects.len(), 1);
         assert_eq!(projects[0].id().to_string(), id);
         assert_eq!(projects[0].name().as_str(), "Existing project");
@@ -434,7 +512,7 @@ mod tests {
             .unwrap()
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 4);
+        assert_eq!(version, 7);
     }
 
     #[test]
@@ -449,7 +527,7 @@ mod tests {
             )
             .unwrap();
         connection
-            .pragma_update(None, "user_version", 4_i64)
+            .pragma_update(None, "user_version", 7_i64)
             .unwrap();
         drop(connection);
 
@@ -462,7 +540,7 @@ mod tests {
         let sentinel: String = connection
             .query_row("SELECT value FROM future_sentinel", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 4);
+        assert_eq!(version, 7);
         assert_eq!(sentinel, "preserve me");
     }
 

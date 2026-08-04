@@ -5,8 +5,9 @@ use std::{collections::HashMap, error::Error, fmt};
 use crate::{
     AgentContextError, AgentEvent, AgentEventKind, AgentInputError, AgentOutputLimitError,
     AgentRepository, AgentSession, AgentSessionId, AgentTurn, AgentTurnFinishError, AgentTurnId,
-    AgentTurnState, CompletedTurnContext, IllegalAgentTurnTransition, ProjectId, ProjectTimeError,
-    ProviderRequestId, assemble_responses_request_json, derive_session_title, validate_user_text,
+    AgentTurnState, CompletedTurnContext, IllegalAgentTurnTransition, InvalidModelId, ProjectId,
+    ProjectTimeError, ProviderRequestId, assemble_responses_request_json, derive_session_title,
+    validate_model_id, validate_user_text,
 };
 
 /// Result of preparing a first or follow-up send before network transmission.
@@ -23,12 +24,17 @@ pub struct PreparedAgentSend {
 }
 
 /// Starts a send against an existing session or creates one on first valid send.
+///
+/// For a new session, `model_id` is validated and frozen onto the durable session
+/// and first turn. For an existing session, the stored session model is used and
+/// `model_id` is ignored so later turns cannot switch models.
 pub fn prepare_agent_send<R>(
     repository: &R,
     session_id: Option<AgentSessionId>,
     user_text: &str,
     project_id: Option<ProjectId>,
     saved_project_instructions: &str,
+    model_id: &str,
 ) -> Result<PreparedAgentSend, PrepareAgentSendError>
 where
     R: AgentRepository + ?Sized,
@@ -56,6 +62,16 @@ where
         return Err(PrepareAgentSendError::ProjectAssociationMismatch);
     }
 
+    let frozen_model_id = if let Some(session) = existing_session.as_ref() {
+        validate_model_id(session.model_id())
+            .map(str::to_owned)
+            .map_err(PrepareAgentSendError::ModelUnavailable)?
+    } else {
+        validate_model_id(model_id)
+            .map(str::to_owned)
+            .map_err(PrepareAgentSendError::ModelUnavailable)?
+    };
+
     let completed_history = if let Some(session) = existing_session.as_ref() {
         let turns = repository
             .list_turns(&session.id())
@@ -73,6 +89,7 @@ where
         } else {
             Some(saved_project_instructions)
         },
+        &frozen_model_id,
     )
     .map_err(PrepareAgentSendError::from)?;
 
@@ -90,6 +107,7 @@ where
             project_id,
             saved_project_instructions,
             provider_request_id,
+            frozen_model_id,
         )
         .map_err(PrepareAgentSendError::Time)?;
         session
@@ -117,7 +135,8 @@ where
     }
 
     let title = derive_session_title(user_text);
-    let session = AgentSession::new(title, project_id).map_err(PrepareAgentSendError::Time)?;
+    let session = AgentSession::new(title, project_id, frozen_model_id.clone())
+        .map_err(PrepareAgentSendError::Time)?;
     let turn = AgentTurn::new_pending(
         session.id(),
         0,
@@ -125,6 +144,7 @@ where
         project_id,
         saved_project_instructions,
         provider_request_id,
+        frozen_model_id,
     )
     .map_err(PrepareAgentSendError::Time)?;
     let session_created = AgentEvent::new(session.id(), None, 0, AgentEventKind::SessionCreated)
@@ -415,6 +435,8 @@ pub enum PrepareAgentSendError {
     SessionNotFound,
     /// The requested Project differs from the session's prospective association.
     ProjectAssociationMismatch,
+    /// The model identifier is missing, malformed, or unavailable for selection.
+    ModelUnavailable(InvalidModelId),
     /// Clock failure.
     Time(ProjectTimeError),
     /// Repository failure.
@@ -454,6 +476,7 @@ impl fmt::Display for PrepareAgentSendError {
             Self::ProjectAssociationMismatch => {
                 formatter.write_str("agent session Project association does not match")
             }
+            Self::ModelUnavailable(error) => error.fmt(formatter),
             Self::Time(error) => error.fmt(formatter),
             Self::Repository(error) => error.fmt(formatter),
         }
@@ -464,6 +487,7 @@ impl Error for PrepareAgentSendError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::InvalidInput(error) => Some(error),
+            Self::ModelUnavailable(error) => Some(error),
             Self::Time(error) => Some(error),
             Self::Repository(error) => Some(error.as_ref()),
             Self::ContextLimit { .. }
@@ -944,8 +968,8 @@ mod tests {
     #[test]
     fn first_send_creates_session_pending_turn_and_events() {
         let repository = FakeAgentRepository::default();
-        let prepared =
-            prepare_agent_send(&repository, None, "Hello Agent", None, "").expect("prepare");
+        let prepared = prepare_agent_send(&repository, None, "Hello Agent", None, "", "gpt-5.5")
+            .expect("prepare");
         assert!(prepared.created_session);
         assert_eq!(prepared.session.title(), "Hello Agent");
         assert_eq!(prepared.turn.state(), AgentTurnState::Pending);
@@ -959,15 +983,16 @@ mod tests {
     #[test]
     fn one_inflight_turn_blocks_second_send() {
         let repository = FakeAgentRepository::default();
-        prepare_agent_send(&repository, None, "First", None, "").unwrap();
-        let error = prepare_agent_send(&repository, None, "Second", None, "").unwrap_err();
+        prepare_agent_send(&repository, None, "First", None, "", "gpt-5.5").unwrap();
+        let error =
+            prepare_agent_send(&repository, None, "Second", None, "", "gpt-5.5").unwrap_err();
         assert!(matches!(error, PrepareAgentSendError::SessionBusy));
     }
 
     #[test]
     fn streaming_completion_and_history_selection() {
         let repository = FakeAgentRepository::default();
-        let prepared = prepare_agent_send(&repository, None, "First", None, "").unwrap();
+        let prepared = prepare_agent_send(&repository, None, "First", None, "", "gpt-5.5").unwrap();
         let turn = apply_agent_delta(&repository, prepared.turn.id(), "Hi").unwrap();
         assert_eq!(turn.state(), AgentTurnState::Streaming);
         let completed =
@@ -981,9 +1006,15 @@ mod tests {
                 .count(),
             1
         );
-        let cancelled_prep =
-            prepare_agent_send(&repository, Some(prepared.session.id()), "Second", None, "")
-                .unwrap();
+        let cancelled_prep = prepare_agent_send(
+            &repository,
+            Some(prepared.session.id()),
+            "Second",
+            None,
+            "",
+            "gpt-5.5",
+        )
+        .unwrap();
         cancel_agent_turn(&repository, cancelled_prep.turn.id()).unwrap();
         let history =
             completed_history_from_turns(&repository.list_turns(&prepared.session.id()).unwrap());
@@ -994,7 +1025,7 @@ mod tests {
     #[test]
     fn startup_interruption_marks_inflight_once() {
         let repository = FakeAgentRepository::default();
-        let prepared = prepare_agent_send(&repository, None, "Hang", None, "").unwrap();
+        let prepared = prepare_agent_send(&repository, None, "Hang", None, "", "gpt-5.5").unwrap();
         apply_agent_delta(&repository, prepared.turn.id(), "partial").unwrap();
         let interrupted = interrupt_inflight_turns(&repository).unwrap();
         assert_eq!(interrupted.len(), 1);
@@ -1006,7 +1037,7 @@ mod tests {
     #[test]
     fn prospective_project_change_records_event() {
         let repository = FakeAgentRepository::default();
-        let prepared = prepare_agent_send(&repository, None, "Hello", None, "").unwrap();
+        let prepared = prepare_agent_send(&repository, None, "Hello", None, "", "gpt-5.5").unwrap();
         complete_agent_turn(&repository, prepared.turn.id(), None, None, None).unwrap();
         let project_id = ProjectId::generate();
         let session =
@@ -1025,7 +1056,7 @@ mod tests {
     #[test]
     fn existing_session_rejects_unconfirmed_project_context() {
         let repository = FakeAgentRepository::default();
-        let prepared = prepare_agent_send(&repository, None, "Hello", None, "").unwrap();
+        let prepared = prepare_agent_send(&repository, None, "Hello", None, "", "gpt-5.5").unwrap();
         complete_agent_turn(&repository, prepared.turn.id(), None, None, None).unwrap();
         let event_count = repository
             .list_events(&prepared.session.id())
@@ -1038,6 +1069,7 @@ mod tests {
             "Use different context",
             Some(ProjectId::generate()),
             "unconfirmed instructions",
+            "gpt-5.5",
         )
         .unwrap_err();
 
@@ -1056,5 +1088,29 @@ mod tests {
                 .len(),
             event_count
         );
+    }
+
+    #[test]
+    fn new_session_freezes_model_and_follow_ups_reuse_it() {
+        let repository = FakeAgentRepository::default();
+        let prepared =
+            prepare_agent_send(&repository, None, "First", None, "", "other-model").unwrap();
+        assert_eq!(prepared.session.model_id(), "other-model");
+        assert_eq!(prepared.turn.model_id(), "other-model");
+        assert!(prepared.request_json.contains("\"model\":\"other-model\""));
+        complete_agent_turn(&repository, prepared.turn.id(), None, None, None).unwrap();
+
+        let follow_up = prepare_agent_send(
+            &repository,
+            Some(prepared.session.id()),
+            "Second",
+            None,
+            "",
+            "ignored-client-model",
+        )
+        .unwrap();
+        assert_eq!(follow_up.turn.model_id(), "other-model");
+        assert!(follow_up.request_json.contains("\"model\":\"other-model\""));
+        assert!(!follow_up.request_json.contains("ignored-client-model"));
     }
 }

@@ -3,9 +3,18 @@ import {
   cancelChatgptConnect,
   connectChatgpt,
   disconnectChatgpt,
+  formatModelLabel,
   getConnectionStatus,
+  getProviderModelCatalog,
+  getProviderModelSelection,
   isStaleConnectCancellation,
+  listenProviderModelCatalogChanged,
+  listenProviderModelSelectionChanged,
+  refreshProviderModelCatalog,
+  setProviderModelSelection,
   type ConnectionState,
+  type ProviderModelCatalog,
+  type ProviderModelSelection,
 } from "../platform/provider";
 import {
   listenConnectionStatusChanged,
@@ -38,18 +47,32 @@ function connectionLabel(state: ConnectionState): string {
   }
 }
 
+function freshnessLabel(catalog: ProviderModelCatalog | null): string {
+  if (catalog === null || catalog.models.length === 0) {
+    return "No catalog";
+  }
+  return catalog.freshness === "current" ? "Current" : "Last known";
+}
+
 export function SettingsWindow() {
   const titleId = useId();
+  const modelSelectId = useId();
   const [category, setCategory] = useState<SettingsCategory>("providers");
   const [theme, setTheme] = useState<ThemePreference>("system");
   const [connectionState, setConnectionState] = useState<ConnectionState>("disconnected");
-  const [model, setModel] = useState("gpt-5.5");
+  const [catalog, setCatalog] = useState<ProviderModelCatalog | null>(null);
+  const [selection, setSelection] = useState<ProviderModelSelection | null>(null);
   const [busy, setBusy] = useState(false);
   const [cancelRequested, setCancelRequested] = useState(false);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [appearanceError, setAppearanceError] = useState<string | null>(null);
-  const displayModel = model === "gpt-5.5" ? "GPT-5.5" : model;
+
+  const selectedModelId = selection?.selectedModelId ?? "";
+  const displayModel =
+    selectedModelId === ""
+      ? "Choose a model"
+      : formatModelLabel(selectedModelId, catalog?.models ?? []);
 
   useEffect(() => {
     let active = true;
@@ -69,11 +92,35 @@ export function SettingsWindow() {
       }
     });
 
-    void getConnectionStatus()
-      .then((status) => {
-        if (active) {
-          setConnectionState(status.state);
-          setModel(status.model);
+    void Promise.all([getConnectionStatus(), getProviderModelSelection()])
+      .then(async ([status, nextSelection]) => {
+        if (!active) {
+          return;
+        }
+        setConnectionState(status.state);
+        setSelection(nextSelection);
+        try {
+          if (status.state === "connected") {
+            // Force refresh on open; on failure surface the error and keep any
+            // last-known catalog delivered by the native stale emit/event.
+            try {
+              const nextCatalog = await refreshProviderModelCatalog();
+              if (active) {
+                setCatalog(nextCatalog);
+              }
+            } catch (error: unknown) {
+              if (active) {
+                setErrorMessage(getSafeAgentErrorMessage(error));
+              }
+            }
+          } else {
+            const nextCatalog = await getProviderModelCatalog();
+            if (active) {
+              setCatalog(nextCatalog);
+            }
+          }
+        } catch {
+          /* bounded load failure leaves empty catalog; Refresh remains available */
         }
       })
       .catch(() => {
@@ -104,13 +151,48 @@ export function SettingsWindow() {
 
     void listenConnectionStatusChanged((status) => {
       setConnectionState(status.state);
-      setModel(status.model);
       if (status.state !== "connecting") {
         setCancelRequested(false);
         setStatusMessage((current) =>
           current === "Cancelling browser connection…" ? null : current,
         );
       }
+      if (status.state === "connected") {
+        void refreshProviderModelCatalog()
+          .then(async (nextCatalog) => {
+            setCatalog(nextCatalog);
+            setSelection(await getProviderModelSelection());
+          })
+          .catch(async (error: unknown) => {
+            setErrorMessage(getSafeAgentErrorMessage(error));
+            // Stale catalog arrives via provider-model-catalog-changed; do not
+            // convert the failed refresh into a successful get response.
+            const nextSelection = await getProviderModelSelection().catch(() => null);
+            if (nextSelection !== null) {
+              setSelection(nextSelection);
+            }
+          });
+      }
+    }).then((unlisten) => {
+      if (disposed) {
+        unlisten();
+      } else {
+        cleanups.push(unlisten);
+      }
+    });
+
+    void listenProviderModelCatalogChanged((next) => {
+      setCatalog(next);
+    }).then((unlisten) => {
+      if (disposed) {
+        unlisten();
+      } else {
+        cleanups.push(unlisten);
+      }
+    });
+
+    void listenProviderModelSelectionChanged((next) => {
+      setSelection(next);
     }).then((unlisten) => {
       if (disposed) {
         unlisten();
@@ -146,9 +228,14 @@ export function SettingsWindow() {
     try {
       const status = await connectChatgpt();
       setConnectionState(status.state);
-      setModel(status.model);
       setStatusMessage(null);
       setErrorMessage(null);
+      const [nextCatalog, nextSelection] = await Promise.all([
+        getProviderModelCatalog(),
+        getProviderModelSelection(),
+      ]);
+      setCatalog(nextCatalog);
+      setSelection(nextSelection);
     } catch (error: unknown) {
       if (getAgentErrorCode(error) === "cancelled") {
         setStatusMessage("Browser connection cancelled.");
@@ -160,7 +247,6 @@ export function SettingsWindow() {
       const status = await getConnectionStatus().catch(() => null);
       if (status !== null) {
         setConnectionState(status.state);
-        setModel(status.model);
       } else {
         setConnectionState("disconnected");
       }
@@ -187,7 +273,6 @@ export function SettingsWindow() {
         const status = await getConnectionStatus().catch(() => null);
         if (status !== null) {
           setConnectionState(status.state);
-          setModel(status.model);
         }
         setCancelRequested(false);
         setStatusMessage(null);
@@ -207,7 +292,12 @@ export function SettingsWindow() {
     try {
       const status = await disconnectChatgpt();
       setConnectionState(status.state);
-      setModel(status.model);
+      const [nextCatalog, nextSelection] = await Promise.all([
+        getProviderModelCatalog(),
+        getProviderModelSelection(),
+      ]);
+      setCatalog(nextCatalog);
+      setSelection(nextSelection);
       if (status.state === "disconnected") {
         setStatusMessage("Removed from this device");
       }
@@ -215,6 +305,35 @@ export function SettingsWindow() {
       setErrorMessage(getSafeAgentErrorMessage(error));
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function handleRefreshCatalog() {
+    setBusy(true);
+    setErrorMessage(null);
+    try {
+      const nextCatalog = await refreshProviderModelCatalog();
+      setCatalog(nextCatalog);
+      setSelection(await getProviderModelSelection());
+    } catch (error: unknown) {
+      setErrorMessage(getSafeAgentErrorMessage(error));
+      // Stale last-known catalog is retained from prior state / native emit.
+      const nextSelection = await getProviderModelSelection().catch(() => null);
+      if (nextSelection !== null) {
+        setSelection(nextSelection);
+      }
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleDefaultModelChange(modelId: string) {
+    setErrorMessage(null);
+    try {
+      const next = await setProviderModelSelection(modelId);
+      setSelection(next);
+    } catch (error: unknown) {
+      setErrorMessage(getSafeAgentErrorMessage(error));
     }
   }
 
@@ -234,6 +353,8 @@ export function SettingsWindow() {
   const connecting = connectionState === "connecting";
   const canConnect = connectionState === "disconnected" || connectionState === "reconnect_required";
   const canDisconnect = connectionState === "connected";
+  const canSelectModel = connectionState === "connected" && (catalog?.models.length ?? 0) > 0;
+  const canRefreshModels = connectionState === "connected";
 
   return (
     <div className="settings-window" aria-labelledby={titleId}>
@@ -275,9 +396,51 @@ export function SettingsWindow() {
               <strong>{connectionLabel(connectionState)}</strong>
             </p>
             <p className="settings-meta">
-              <span>Model</span>
+              <span>Default model</span>
               <strong>{displayModel}</strong>
             </p>
+            <p className="settings-meta">
+              <span>Catalog</span>
+              <strong>{freshnessLabel(catalog)}</strong>
+            </p>
+            {canSelectModel ? (
+              <>
+                <label className="settings-field-label" htmlFor={modelSelectId}>
+                  Default model for new sessions
+                </label>
+                <select
+                  id={modelSelectId}
+                  value={selectedModelId}
+                  disabled={busy}
+                  onChange={(event) => void handleDefaultModelChange(event.currentTarget.value)}
+                >
+                  {selection?.requiresSelection || selectedModelId === "" ? (
+                    <option value="" disabled>
+                      Choose a model
+                    </option>
+                  ) : null}
+                  {(catalog?.models ?? []).map((model) => (
+                    <option key={model.id} value={model.id}>
+                      {model.displayName}
+                    </option>
+                  ))}
+                </select>
+              </>
+            ) : canRefreshModels ? (
+              <p className="settings-disclosure">
+                No usable models are available yet. Refresh to recover the catalog.
+              </p>
+            ) : null}
+            {canRefreshModels ? (
+              <button
+                className="secondary-action"
+                type="button"
+                disabled={busy}
+                onClick={() => void handleRefreshCatalog()}
+              >
+                Refresh models
+              </button>
+            ) : null}
             {connecting ? (
               <button
                 className="secondary-action"

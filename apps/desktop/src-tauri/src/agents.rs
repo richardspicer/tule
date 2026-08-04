@@ -9,14 +9,18 @@ use std::{
 };
 
 use serde::Serialize;
-use tauri::{State, ipc::Channel};
+use tauri::{AppHandle, Emitter, State, ipc::Channel};
 use tokio_util::sync::CancellationToken;
 use tule_core::{
     AgentRepository, AgentSession, AgentSessionId, AgentTurn, ProjectId, ProjectRepository,
 };
 
 use crate::{
-    provider::{ProviderAdapter, ProviderEvent, PublicError},
+    provider::{
+        PROVIDER_MODEL_CATALOG_CHANGED_EVENT, PROVIDER_MODEL_SELECTION_CHANGED_EVENT,
+        ProviderAdapter, ProviderEvent, PublicError, apply_model_rejection,
+        build_selection_response, build_stale_catalog_response,
+    },
     sqlite::SqliteStore,
 };
 
@@ -161,6 +165,7 @@ fn map_prepare(error: tule_core::PrepareAgentSendError) -> PublicError {
         tule_core::PrepareAgentSendError::SessionBusy => PublicError::SessionBusy,
         tule_core::PrepareAgentSendError::SessionNotFound => PublicError::InvalidInput,
         tule_core::PrepareAgentSendError::ProjectAssociationMismatch => PublicError::InvalidInput,
+        tule_core::PrepareAgentSendError::ModelUnavailable(_) => PublicError::ModelUnavailable,
         tule_core::PrepareAgentSendError::Time(_)
         | tule_core::PrepareAgentSendError::Repository(_) => PublicError::AgentStorageUnavailable,
     }
@@ -186,6 +191,7 @@ fn public_error_code(error: PublicError) -> &'static str {
         PublicError::Interrupted => "interrupted",
         PublicError::CredentialStoreUnavailable => "credential_store_unavailable",
         PublicError::AgentStorageUnavailable => "agent_storage_unavailable",
+        PublicError::ModelUnavailable => "model_unavailable",
     }
 }
 
@@ -299,9 +305,11 @@ pub(crate) async fn get_agent_session(
 
 #[tauri::command(rename_all = "camelCase")]
 pub(crate) async fn send_agent_message(
+    app: AppHandle,
     session_id: Option<String>,
     user_text: String,
     project_id: Option<String>,
+    model_id: Option<String>,
     channel: Channel<AgentStreamEvent>,
     state: State<'_, AgentState>,
 ) -> Result<(), PublicError> {
@@ -336,12 +344,20 @@ pub(crate) async fn send_agent_message(
         }
         _ => return Err(PublicError::NotConnected),
     }
+    let frozen_model_id = if session_id.is_none() {
+        let requested = model_id.ok_or(PublicError::ModelUnavailable)?;
+        crate::provider::validate_new_session_model(store.as_ref(), &requested)?
+    } else {
+        // Existing sessions ignore client-supplied model identifiers.
+        String::new()
+    };
     let prepared = tule_core::prepare_agent_send(
         store.as_ref(),
         session_id,
         &user_text,
         project_id,
         &project_instructions,
+        &frozen_model_id,
     )
     .map_err(map_prepare)?;
     let turn_id = prepared.turn.id();
@@ -412,6 +428,7 @@ pub(crate) async fn send_agent_message(
     let terminal_meta_cb = Arc::clone(&terminal_meta);
     let output_limit_terminal = Arc::new(Mutex::new(None::<AgentTurn>));
     let output_limit_terminal_cb = Arc::clone(&output_limit_terminal);
+    let rejected_model_id = prepared.session.model_id().to_owned();
     let result = state
         .provider
         .stream(
@@ -467,6 +484,7 @@ pub(crate) async fn send_agent_message(
             }),
         )
         .await;
+    let model_rejected = matches!(result, Err(PublicError::ModelUnavailable));
     let (completed, response_id, input_tokens, output_tokens) = terminal_meta
         .lock()
         .map(|guard| (guard.0, guard.1.clone(), guard.2, guard.3))
@@ -488,12 +506,45 @@ pub(crate) async fn send_agent_message(
             cancelled: token.is_cancelled(),
         },
     )?;
+    if model_rejected {
+        let adapter = state.chatgpt();
+        recover_after_model_rejection(&app, adapter.as_deref(), store.as_ref(), &rejected_model_id)
+            .await;
+    }
     channel
         .send(AgentStreamEvent::Terminal {
             turn: terminal.into(),
         })
         .map_err(|_| PublicError::ProviderUnavailable)?;
     Ok(())
+}
+
+async fn recover_after_model_rejection(
+    app: &AppHandle,
+    adapter: Option<&crate::openai_chatgpt::ChatGptAdapter>,
+    store: &SqliteStore,
+    rejected_model_id: &str,
+) {
+    let Ok((mut catalog, mut selection)) = apply_model_rejection(store, rejected_model_id) else {
+        return;
+    };
+    if let Some(adapter) = adapter {
+        match adapter.refresh_model_catalog(store, true).await {
+            Ok(refreshed) => {
+                catalog = refreshed;
+            }
+            Err(_) => {
+                if let Ok(stale) = build_stale_catalog_response(store) {
+                    catalog = stale;
+                }
+            }
+        }
+        if let Ok(next_selection) = build_selection_response(store) {
+            selection = next_selection;
+        }
+    }
+    let _ = app.emit(PROVIDER_MODEL_CATALOG_CHANGED_EVENT, &catalog);
+    let _ = app.emit(PROVIDER_MODEL_SELECTION_CHANGED_EVENT, &selection);
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -590,7 +641,8 @@ mod tests {
     fn accumulated_output_limit_reuses_the_existing_terminal_turn() {
         let (directory, store) = test_store();
         let prepared =
-            tule_core::prepare_agent_send(store.as_ref(), None, "Hello", None, "").unwrap();
+            tule_core::prepare_agent_send(store.as_ref(), None, "Hello", None, "", "gpt-5.5")
+                .unwrap();
         tule_core::apply_agent_delta(
             store.as_ref(),
             prepared.turn.id(),
@@ -636,6 +688,7 @@ mod tests {
                 "Try again",
                 None,
                 "",
+                "gpt-5.5",
             )
             .is_ok()
         );
@@ -647,7 +700,8 @@ mod tests {
     fn pre_stream_failure_terminalizes_pending_turn_once() {
         let (directory, store) = test_store();
         let prepared =
-            tule_core::prepare_agent_send(store.as_ref(), None, "Hello", None, "").unwrap();
+            tule_core::prepare_agent_send(store.as_ref(), None, "Hello", None, "", "gpt-5.5")
+                .unwrap();
 
         let terminal = fail_with_public_error(
             store.as_ref(),
@@ -675,7 +729,8 @@ mod tests {
     async fn project_association_change_uses_the_application_operation_gate() {
         let (directory, state) = test_state();
         let prepared =
-            tule_core::prepare_agent_send(state.store.as_ref(), None, "Hello", None, "").unwrap();
+            tule_core::prepare_agent_send(state.store.as_ref(), None, "Hello", None, "", "gpt-5.5")
+                .unwrap();
         tule_core::complete_agent_turn(state.store.as_ref(), prepared.turn.id(), None, None, None)
             .unwrap();
         let project = tule_core::create_project(state.store.as_ref(), "Context").unwrap();
@@ -716,7 +771,8 @@ mod tests {
     async fn cancellation_wins_while_pre_stream_refresh_is_pending() {
         let (directory, store) = test_store();
         let prepared =
-            tule_core::prepare_agent_send(store.as_ref(), None, "Hello", None, "").unwrap();
+            tule_core::prepare_agent_send(store.as_ref(), None, "Hello", None, "", "gpt-5.5")
+                .unwrap();
         let token = CancellationToken::new();
         let cancel = token.clone();
         let outcome = tokio::time::timeout(

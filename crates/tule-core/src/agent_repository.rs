@@ -111,6 +111,16 @@ impl ProviderProfile {
         self.access_token_expires_at_unix_ms = access_token_expires_at_unix_ms;
         self.updated_at_unix_ms = updated_at_unix_ms;
     }
+
+    /// Updates the non-secret visible model label used as display metadata.
+    pub fn set_visible_model_id(
+        &mut self,
+        visible_model_id: impl Into<String>,
+        updated_at_unix_ms: i64,
+    ) {
+        self.visible_model_id = visible_model_id.into();
+        self.updated_at_unix_ms = updated_at_unix_ms;
+    }
 }
 
 /// Storage operations required by Agent use cases.

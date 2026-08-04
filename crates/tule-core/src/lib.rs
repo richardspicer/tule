@@ -5,6 +5,7 @@ mod agent;
 mod agent_repository;
 mod agent_use_cases;
 mod project;
+mod provider_catalog;
 mod repository;
 mod use_cases;
 
@@ -28,6 +29,12 @@ pub use agent_use_cases::{
 pub use project::{
     InvalidProjectId, InvalidProjectName, Project, ProjectId, ProjectName,
     ProjectReconstructionError, ProjectTimeError,
+};
+pub use provider_catalog::{
+    CATALOG_DESCRIPTION_MAX_SCALARS, CATALOG_TTL_MS, CatalogCandidate, CatalogFreshness,
+    InvalidModelId, MODEL_ID_MAX_UTF8, ModelCatalogEntry, SelectedDefaultResolution,
+    catalog_freshness, is_usable_catalog_candidate, model_id_in_catalog, resolve_selected_default,
+    select_usable_catalog_entries, validate_model_id,
 };
 pub use repository::ProjectRepository;
 pub use use_cases::{

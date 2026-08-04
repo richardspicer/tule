@@ -622,7 +622,7 @@ mod tests {
             "gpt-5.5"
         );
 
-        let session = AgentSession::new("Unicode session", None).unwrap();
+        let session = AgentSession::new("Unicode session", None, "gpt-5.5").unwrap();
         let mut turn = AgentTurn::new_pending(
             session.id(),
             0,
@@ -630,6 +630,7 @@ mod tests {
             None,
             "keep\r\nexact",
             ProviderRequestId::generate(),
+            "gpt-5.5",
         )
         .unwrap();
         let created =
@@ -715,7 +716,8 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let store = SqliteStore::open(directory.path().join("association.sqlite3")).unwrap();
         let project = tule_core::create_project(&store, "Project context").unwrap();
-        let prepared = tule_core::prepare_agent_send(&store, None, "Hello", None, "").unwrap();
+        let prepared =
+            tule_core::prepare_agent_send(&store, None, "Hello", None, "", "gpt-5.5").unwrap();
         tule_core::complete_agent_turn(&store, prepared.turn.id(), None, None, None).unwrap();
 
         let mut changed = store.find_session(&prepared.session.id()).unwrap().unwrap();
@@ -753,7 +755,8 @@ mod tests {
     fn stale_terminal_write_cannot_change_terminal_kind() {
         let directory = tempfile::tempdir().unwrap();
         let store = SqliteStore::open(directory.path().join("terminal-cas.sqlite3")).unwrap();
-        let prepared = tule_core::prepare_agent_send(&store, None, "Hello", None, "").unwrap();
+        let prepared =
+            tule_core::prepare_agent_send(&store, None, "Hello", None, "", "gpt-5.5").unwrap();
         let mut stale = prepared.turn.clone();
         let completed =
             tule_core::complete_agent_turn(&store, prepared.turn.id(), None, None, None).unwrap();
@@ -799,7 +802,8 @@ mod tests {
         let mut turn_ids = Vec::new();
 
         for index in 0..2 {
-            let mut session = AgentSession::new(format!("Session {index}"), None).unwrap();
+            let mut session =
+                AgentSession::new(format!("Session {index}"), None, "gpt-5.5").unwrap();
             let mut turn = AgentTurn::new_pending(
                 session.id(),
                 0,
@@ -807,6 +811,7 @@ mod tests {
                 None,
                 "",
                 ProviderRequestId::generate(),
+                "gpt-5.5",
             )
             .unwrap();
             let created =

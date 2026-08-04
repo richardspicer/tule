@@ -42,6 +42,10 @@ describe("AgentWorkspace", () => {
         projectId={null}
         projects={[]}
         modelLabel="GPT-5.5"
+        modelOptions={[{ id: "gpt-5.5", displayName: "GPT-5.5" }]}
+        selectedModelId="gpt-5.5"
+        modelLocked={false}
+        onModelChange={() => undefined}
         turns={[]}
         draft=""
         connected={false}
@@ -73,6 +77,10 @@ describe("AgentWorkspace", () => {
         projectId={null}
         projects={[]}
         modelLabel="GPT-5.5"
+        modelOptions={[{ id: "gpt-5.5", displayName: "GPT-5.5" }]}
+        selectedModelId="gpt-5.5"
+        modelLocked={false}
+        onModelChange={() => undefined}
         turns={[baseTurn]}
         draft=""
         connected
@@ -101,6 +109,10 @@ describe("AgentWorkspace", () => {
         projectId={null}
         projects={[{ id: "p1", displayName: "Research" }]}
         modelLabel="GPT-5.5"
+        modelOptions={[{ id: "gpt-5.5", displayName: "GPT-5.5" }]}
+        selectedModelId="gpt-5.5"
+        modelLocked={false}
+        onModelChange={() => undefined}
         turns={[{ ...baseTurn, state: "streaming", agentText: "Hel" }]}
         draft="Next"
         connected
@@ -129,6 +141,10 @@ describe("AgentWorkspace", () => {
         projectId="p1"
         projects={[{ id: "p1", displayName: "Research" }]}
         modelLabel="GPT-5.5"
+        modelOptions={[{ id: "gpt-5.5", displayName: "GPT-5.5" }]}
+        selectedModelId="gpt-5.5"
+        modelLocked={false}
+        onModelChange={() => undefined}
         turns={[{ ...baseTurn, state: "streaming", agentText: "Hello" }]}
         draft=""
         connected
@@ -160,6 +176,10 @@ describe("AgentWorkspace", () => {
         projectId={null}
         projects={[]}
         modelLabel="GPT-5.5"
+        modelOptions={[{ id: "gpt-5.5", displayName: "GPT-5.5" }]}
+        selectedModelId="gpt-5.5"
+        modelLocked={false}
+        onModelChange={() => undefined}
         turns={[]}
         draft={"line\n".repeat(20)}
         connected
@@ -191,6 +211,10 @@ describe("AgentWorkspace", () => {
         projectId={null}
         projects={[]}
         modelLabel="GPT-5.5"
+        modelOptions={[{ id: "gpt-5.5", displayName: "GPT-5.5" }]}
+        selectedModelId="gpt-5.5"
+        modelLocked={false}
+        onModelChange={() => undefined}
         turns={[{ ...baseTurn, state: "streaming", agentText: "Hello" }]}
         draft=""
         connected
@@ -219,6 +243,10 @@ describe("AgentWorkspace", () => {
         projectId={null}
         projects={[]}
         modelLabel="GPT-5.5"
+        modelOptions={[{ id: "gpt-5.5", displayName: "GPT-5.5" }]}
+        selectedModelId="gpt-5.5"
+        modelLocked={false}
+        onModelChange={() => undefined}
         turns={[{ ...baseTurn, state: "streaming", agentText: "Hello there" }]}
         draft=""
         connected
@@ -252,6 +280,10 @@ describe("AgentWorkspace", () => {
         projectId={null}
         projects={[]}
         modelLabel="GPT-5.5"
+        modelOptions={[{ id: "gpt-5.5", displayName: "GPT-5.5" }]}
+        selectedModelId="gpt-5.5"
+        modelLocked={false}
+        onModelChange={() => undefined}
         turns={[{ ...baseTurn, state: "streaming", agentText: "Hello there friend" }]}
         draft=""
         connected
@@ -285,6 +317,10 @@ describe("AgentWorkspace", () => {
         projectId={null}
         projects={[]}
         modelLabel="GPT-5.5"
+        modelOptions={[{ id: "gpt-5.5", displayName: "GPT-5.5" }]}
+        selectedModelId="gpt-5.5"
+        modelLocked={false}
+        onModelChange={() => undefined}
         turns={[{ ...baseTurn, state: "completed", agentText: "Hello there friend" }]}
         draft=""
         connected
@@ -315,6 +351,10 @@ describe("AgentWorkspace", () => {
           { id: "p2", displayName: "Atlas" },
         ]}
         modelLabel="GPT-5.5"
+        modelOptions={[{ id: "gpt-5.5", displayName: "GPT-5.5" }]}
+        selectedModelId="gpt-5.5"
+        modelLocked={false}
+        onModelChange={() => undefined}
         turns={[
           {
             id: "t1",

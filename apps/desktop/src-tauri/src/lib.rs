@@ -19,7 +19,12 @@ use preferences::{DesktopPreferenceState, get_appearance_preference, set_appeara
 use projects::{
     ProjectStorageState, create_project, list_projects, open_project, update_project_instructions,
 };
-use provider::{ConnectionStatus, PublicError};
+use provider::{
+    ConnectionStatus, PROVIDER_MODEL_CATALOG_CHANGED_EVENT, PROVIDER_MODEL_SELECTION_CHANGED_EVENT,
+    ProviderModelCatalogResponse, ProviderModelSelectionResponse, PublicError,
+    build_catalog_response, build_selection_response, build_stale_catalog_response,
+    persist_model_selection,
+};
 use settings_window::{
     CONNECTION_STATUS_CHANGED_EVENT, SettingsLaunchState, exit_application, open_settings_window,
     take_settings_launch_category,
@@ -72,6 +77,32 @@ fn current_connection_status(state: &AgentState) -> ConnectionStatus {
 
 fn emit_connection_status(app: &tauri::AppHandle, status: &ConnectionStatus) {
     let _ = app.emit(CONNECTION_STATUS_CHANGED_EVENT, status);
+}
+
+fn emit_catalog_status(app: &tauri::AppHandle, catalog: &ProviderModelCatalogResponse) {
+    let _ = app.emit(PROVIDER_MODEL_CATALOG_CHANGED_EVENT, catalog);
+}
+
+fn emit_selection_status(app: &tauri::AppHandle, selection: &ProviderModelSelectionResponse) {
+    let _ = app.emit(PROVIDER_MODEL_SELECTION_CHANGED_EVENT, selection);
+}
+
+fn emit_model_surfaces(app: &tauri::AppHandle, store: &SqliteStore) {
+    if let Ok(catalog) = build_catalog_response(store) {
+        emit_catalog_status(app, &catalog);
+    }
+    if let Ok(selection) = build_selection_response(store) {
+        emit_selection_status(app, &selection);
+    }
+}
+
+fn emit_stale_model_surfaces(app: &tauri::AppHandle, store: &SqliteStore) {
+    if let Ok(catalog) = build_stale_catalog_response(store) {
+        emit_catalog_status(app, &catalog);
+    }
+    if let Ok(selection) = build_selection_response(store) {
+        emit_selection_status(app, &selection);
+    }
 }
 
 /// Selects the status that connect terminal paths emit without altering
@@ -148,11 +179,30 @@ async fn connect_chatgpt(
         .await;
     // Emit the authoritative terminal status on success and failure without
     // replacing the original command error.
-    settle_connect_chatgpt(
+    let settled = settle_connect_chatgpt(
         |status| emit_connection_status(&app, status),
         result,
         current_connection_status(&state),
-    )
+    );
+    if settled
+        .as_ref()
+        .is_ok_and(|status| status.state == provider::ConnectionState::Connected)
+        && let Some(adapter) = state.chatgpt()
+    {
+        match adapter
+            .refresh_model_catalog(state.store.as_ref(), true)
+            .await
+        {
+            Ok(catalog) => {
+                emit_catalog_status(&app, &catalog);
+                if let Ok(selection) = build_selection_response(state.store.as_ref()) {
+                    emit_selection_status(&app, &selection);
+                }
+            }
+            Err(_) => emit_stale_model_surfaces(&app, state.store.as_ref()),
+        }
+    }
+    settled
 }
 
 #[tauri::command]
@@ -186,7 +236,106 @@ async fn disconnect_chatgpt(
     };
     let status = adapter.disconnect(state.store.as_ref())?;
     emit_connection_status(&app, &status);
+    emit_model_surfaces(&app, state.store.as_ref());
     Ok(status)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn get_provider_model_catalog(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AgentState>,
+) -> Result<ProviderModelCatalogResponse, PublicError> {
+    if let Some(adapter) = state.chatgpt() {
+        let connected = matches!(
+            adapter
+                .connection_status_with_store(state.store.as_ref())
+                .state,
+            provider::ConnectionState::Connected
+        );
+        if connected {
+            match adapter.load_connected_catalog(state.store.as_ref()).await {
+                Ok(catalog) => {
+                    emit_catalog_status(&app, &catalog);
+                    if let Ok(selection) = build_selection_response(state.store.as_ref()) {
+                        emit_selection_status(&app, &selection);
+                    }
+                    return Ok(catalog);
+                }
+                Err(error) => {
+                    // Retain/emit last-known as visibly stale, but never convert a
+                    // failed refresh into a successful catalog response.
+                    emit_stale_model_surfaces(&app, state.store.as_ref());
+                    return Err(error);
+                }
+            }
+        }
+    }
+    let store = StdArc::clone(&state.store);
+    tauri::async_runtime::spawn_blocking(move || build_catalog_response(store.as_ref()))
+        .await
+        .map_err(|_| PublicError::AgentStorageUnavailable)?
+}
+
+/// Cache-only catalog read used after a failed automatic refresh so the UI can
+/// retain last-known models without treating the refresh as success.
+#[tauri::command(rename_all = "camelCase")]
+async fn get_persisted_provider_model_catalog(
+    state: tauri::State<'_, AgentState>,
+) -> Result<ProviderModelCatalogResponse, PublicError> {
+    let store = StdArc::clone(&state.store);
+    tauri::async_runtime::spawn_blocking(move || build_stale_catalog_response(store.as_ref()))
+        .await
+        .map_err(|_| PublicError::AgentStorageUnavailable)?
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn refresh_provider_model_catalog(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AgentState>,
+) -> Result<ProviderModelCatalogResponse, PublicError> {
+    let adapter = state.chatgpt().ok_or(PublicError::ProviderUnavailable)?;
+    match adapter
+        .refresh_model_catalog(state.store.as_ref(), true)
+        .await
+    {
+        Ok(catalog) => {
+            emit_catalog_status(&app, &catalog);
+            if let Ok(selection) = build_selection_response(state.store.as_ref()) {
+                emit_selection_status(&app, &selection);
+            }
+            Ok(catalog)
+        }
+        Err(error) => {
+            emit_stale_model_surfaces(&app, state.store.as_ref());
+            Err(error)
+        }
+    }
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn get_provider_model_selection(
+    state: tauri::State<'_, AgentState>,
+) -> Result<ProviderModelSelectionResponse, PublicError> {
+    let store = StdArc::clone(&state.store);
+    tauri::async_runtime::spawn_blocking(move || build_selection_response(store.as_ref()))
+        .await
+        .map_err(|_| PublicError::AgentStorageUnavailable)?
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn set_provider_model_selection(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AgentState>,
+    model_id: String,
+) -> Result<ProviderModelSelectionResponse, PublicError> {
+    let store = StdArc::clone(&state.store);
+    let selection = tauri::async_runtime::spawn_blocking(move || {
+        persist_model_selection(store.as_ref(), &model_id)
+    })
+    .await
+    .map_err(|_| PublicError::AgentStorageUnavailable)??;
+    emit_selection_status(&app, &selection);
+    Ok(selection)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -230,6 +379,11 @@ pub fn run() {
             connect_chatgpt,
             cancel_chatgpt_connect,
             disconnect_chatgpt,
+            get_provider_model_catalog,
+            get_persisted_provider_model_catalog,
+            refresh_provider_model_catalog,
+            get_provider_model_selection,
+            set_provider_model_selection,
             get_appearance_preference,
             set_appearance_preference,
             open_settings_window,

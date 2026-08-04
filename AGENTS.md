@@ -24,6 +24,8 @@ These instructions apply to the entire repository.
 
 ## Public Change History
 
+- Open authorized pull requests ready for review. TULE's GitHub automation requests Codex review when a pull request is created. Create a draft only when the user explicitly requests one; this repository rule overrides generic publishing-workflow defaults.
+- Treat a user request to address review comments as authorization to implement every unresolved actionable comment, reply with the result, and resolve each addressed thread. Leave ambiguous or conflicting comments open and report them.
 - Keep pull-request titles and descriptions and commit subjects and bodies concise, product-facing, and understandable without repository knowledge.
 - Never include implementation file names, directory paths, migration file names, machine-local paths, or private planning-artifact names in pull-request or commit prose.
 - Describe changes through behavior, intent, user or developer impact, architectural or trust boundaries, and verification outcomes.

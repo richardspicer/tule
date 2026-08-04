@@ -634,6 +634,11 @@ pub(crate) async fn send_agent_message(
     if let Some(handle) = source_draft_handle.as_ref() {
         state.source_drafts.clear_handle(handle);
     }
+    // Adopt the send's persisted session as the composer scope so an immediate
+    // follow-up attachment binds to the same target without a navigation round-trip.
+    state
+        .source_drafts
+        .bind_session_scope(prepared.session.id());
     let turn_id = prepared.turn.id();
     let token = CancellationToken::new();
     *state
@@ -1045,6 +1050,70 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(changed.project_id, Some(project.id().to_string()));
+        drop(state);
+        drop(directory);
+    }
+
+    #[test]
+    fn send_adopts_persisted_session_scope_for_immediate_follow_up_attachment() {
+        use crate::source_draft::ComposerScope;
+
+        let (directory, state) = test_state();
+        let first_handle = state
+            .source_drafts
+            .insert("first.txt".into(), "first-body".into())
+            .unwrap();
+        let new_session_scope = state.source_drafts.current_scope();
+        assert!(matches!(
+            new_session_scope,
+            ComposerScope::NewSession { .. }
+        ));
+        let draft = state
+            .source_drafts
+            .resolve_for_send(&first_handle, &new_session_scope)
+            .unwrap();
+        let source = draft.into_source().unwrap();
+        let prepared = tule_core::prepare_agent_send(
+            state.store.as_ref(),
+            None,
+            "First turn",
+            None,
+            "",
+            "gpt-5.5",
+            Some(&source),
+        )
+        .unwrap();
+        state.source_drafts.clear_handle(&first_handle);
+        state
+            .source_drafts
+            .bind_session_scope(prepared.session.id());
+
+        let follow_handle = state
+            .source_drafts
+            .insert("follow.txt".into(), "follow-body".into())
+            .unwrap();
+        assert!(
+            state
+                .source_drafts
+                .resolve_for_send(
+                    &follow_handle,
+                    &ComposerScope::Session(prepared.session.id())
+                )
+                .is_some()
+        );
+        assert!(
+            state
+                .source_drafts
+                .resolve_for_send(&follow_handle, &new_session_scope)
+                .is_none()
+        );
+        let other = AgentSessionId::generate();
+        assert!(
+            state
+                .source_drafts
+                .resolve_for_send(&follow_handle, &ComposerScope::Session(other))
+                .is_none()
+        );
         drop(state);
         drop(directory);
     }

@@ -323,6 +323,7 @@ function App() {
           }
           setActiveSessionId(newest.id);
           setPendingProjectId(newest.projectId);
+          void setAgentSourceDraftScope(newest.id).catch(() => undefined);
           sessionLoadPendingRef.current = true;
           setSessionLoadPending(true);
           try {
@@ -578,6 +579,7 @@ function App() {
 
     const userText = draft;
     const attachment = pendingAttachment;
+    let establishedSessionId = activeSessionId;
     sendingRef.current = true;
     setSending(true);
     clearAgentCancellation();
@@ -618,6 +620,7 @@ function App() {
         onEvent: (event) => {
           if (event.kind === "started") {
             nativeActiveTurnIdRef.current = event.turn_id;
+            establishedSessionId = event.session_id;
             setActiveSessionId(event.session_id);
             setActiveTurnId(event.turn_id);
             setTurns((current) =>
@@ -654,6 +657,11 @@ function App() {
           }
         },
       });
+      if (establishedSessionId !== null) {
+        // After send releases the operation gate, align React-driven scope with
+        // the persisted session adopted for follow-up attachments.
+        await setAgentSourceDraftScope(establishedSessionId).catch(() => undefined);
+      }
       const sessionsNow = await listAgentSessions();
       setSessions(sessionsNow);
       setPendingAttachment(null);

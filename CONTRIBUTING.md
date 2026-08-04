@@ -28,6 +28,8 @@ purpose and avoid adding infrastructure before the product needs it.
   execution, or unrestricted filesystem access to frontend code.
 - Keep dependencies and native capabilities minimal. Explain every addition in
   the pull request.
+- New dependencies must use a license permitted by dependency review. Expanding
+  that policy requires explicit owner approval; do not bypass or disable the check.
 
 ## Tests and Verification
 

@@ -276,6 +276,18 @@ async fn get_provider_model_catalog(
         .map_err(|_| PublicError::AgentStorageUnavailable)?
 }
 
+/// Cache-only catalog read used after a failed automatic refresh so the UI can
+/// retain last-known models without treating the refresh as success.
+#[tauri::command(rename_all = "camelCase")]
+async fn get_persisted_provider_model_catalog(
+    state: tauri::State<'_, AgentState>,
+) -> Result<ProviderModelCatalogResponse, PublicError> {
+    let store = StdArc::clone(&state.store);
+    tauri::async_runtime::spawn_blocking(move || build_stale_catalog_response(store.as_ref()))
+        .await
+        .map_err(|_| PublicError::AgentStorageUnavailable)?
+}
+
 #[tauri::command(rename_all = "camelCase")]
 async fn refresh_provider_model_catalog(
     app: tauri::AppHandle,
@@ -368,6 +380,7 @@ pub fn run() {
             cancel_chatgpt_connect,
             disconnect_chatgpt,
             get_provider_model_catalog,
+            get_persisted_provider_model_catalog,
             refresh_provider_model_catalog,
             get_provider_model_selection,
             set_provider_model_selection,

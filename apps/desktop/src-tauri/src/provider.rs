@@ -140,6 +140,15 @@ pub(crate) fn build_stale_catalog_response(
 pub(crate) fn build_catalog_response(
     store: &SqliteStore,
 ) -> Result<ProviderModelCatalogResponse, PublicError> {
+    if store.catalog_reads_are_sealed() {
+        return Ok(ProviderModelCatalogResponse {
+            provider_id: PROVIDER_PROFILE_ID.to_owned(),
+            models: Vec::new(),
+            freshness: "stale".to_owned(),
+            retrieved_at_unix_ms: None,
+            compatibility_revision: None,
+        });
+    }
     let snapshot = store
         .get_catalog_snapshot(PROVIDER_PROFILE_ID)
         .map_err(|_| PublicError::AgentStorageUnavailable)?;
@@ -175,6 +184,13 @@ pub(crate) fn build_catalog_response(
 pub(crate) fn build_selection_response(
     store: &SqliteStore,
 ) -> Result<ProviderModelSelectionResponse, PublicError> {
+    if store.catalog_reads_are_sealed() {
+        return Ok(ProviderModelSelectionResponse {
+            provider_id: PROVIDER_PROFILE_ID.to_owned(),
+            selected_model_id: None,
+            requires_selection: false,
+        });
+    }
     let selection = store
         .get_model_selection(PROVIDER_PROFILE_ID)
         .map_err(|_| PublicError::AgentStorageUnavailable)?;

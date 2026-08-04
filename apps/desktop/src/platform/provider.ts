@@ -233,6 +233,13 @@ export async function getProviderModelCatalog(): Promise<ProviderModelCatalog> {
   return validateProviderModelCatalog(await invokeProviderCommand("get_provider_model_catalog"));
 }
 
+/** Cache-only recovery after a failed automatic refresh; never performs network I/O. */
+export async function getPersistedProviderModelCatalog(): Promise<ProviderModelCatalog> {
+  return validateProviderModelCatalog(
+    await invokeProviderCommand("get_persisted_provider_model_catalog"),
+  );
+}
+
 export async function refreshProviderModelCatalog(): Promise<ProviderModelCatalog> {
   return validateProviderModelCatalog(
     await invokeProviderCommand("refresh_provider_model_catalog"),

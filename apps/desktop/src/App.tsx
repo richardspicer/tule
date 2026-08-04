@@ -29,6 +29,7 @@ import {
 import {
   formatModelLabel,
   getConnectionStatus,
+  getPersistedProviderModelCatalog,
   getProviderModelCatalog,
   getProviderModelSelection,
   listenProviderModelCatalogChanged,
@@ -174,9 +175,53 @@ function App() {
 
   useEffect(() => {
     let active = true;
+    const cleanups: (() => void)[] = [];
 
-    void Promise.all([getConnectionStatus(), getProviderModelSelection()])
-      .then(async ([status, nextSelection]) => {
+    void (async () => {
+      // Register listeners before catalog load so a stale emit cannot race past
+      // initial subscription, then recover via the cache-only path on failure.
+      const [unlistenAppearance, unlistenCatalog, unlistenSelection, unlistenConnection] =
+        await Promise.all([
+          listenAppearanceChanged((preference) => {
+            setTheme(preference);
+            applyThemePreference(preference);
+          }),
+          listenProviderModelCatalogChanged((next) => {
+            setCatalog(next);
+            setPendingModelId((current) => {
+              if (current !== null && next.models.some((model) => model.id === current)) {
+                return current;
+              }
+              return null;
+            });
+          }),
+          listenProviderModelSelectionChanged((next) => {
+            setSelection(next);
+            setPendingModelId((current) => {
+              if (next.selectedModelId === null && next.requiresSelection) {
+                return null;
+              }
+              return current ?? next.selectedModelId;
+            });
+          }),
+          listenConnectionStatusChanged((status) => {
+            setConnectionState(status.state);
+          }),
+        ]);
+      if (!active) {
+        unlistenAppearance();
+        unlistenCatalog();
+        unlistenSelection();
+        unlistenConnection();
+        return;
+      }
+      cleanups.push(unlistenAppearance, unlistenCatalog, unlistenSelection, unlistenConnection);
+
+      try {
+        const [status, nextSelection] = await Promise.all([
+          getConnectionStatus(),
+          getProviderModelSelection(),
+        ]);
         if (!active) {
           return;
         }
@@ -199,82 +244,37 @@ function App() {
             }
             return selected;
           });
-        } catch {
-          // Failed automatic refresh surfaces as an error; last-known catalog may
-          // still arrive via provider-model-catalog-changed.
+        } catch (error: unknown) {
+          if (!active) {
+            return;
+          }
+          setAgentError(getSafeAgentErrorMessage(error));
+          const stale = await getPersistedProviderModelCatalog().catch(() => null);
+          if (!active || stale === null) {
+            return;
+          }
+          setCatalog(stale);
+          const selected =
+            nextSelection.selectedModelId !== null &&
+            stale.models.some((model) => model.id === nextSelection.selectedModelId)
+              ? nextSelection.selectedModelId
+              : null;
+          setPendingModelId((current) => {
+            if (current !== null && stale.models.some((model) => model.id === current)) {
+              return current;
+            }
+            return selected;
+          });
         }
-      })
-      .catch(() => {
+      } catch {
         if (active) {
           setConnectionState("unavailable_in_this_build");
         }
-      });
+      }
+    })();
 
     return () => {
       active = false;
-    };
-  }, []);
-
-  useEffect(() => {
-    let disposed = false;
-    const cleanups: (() => void)[] = [];
-
-    void listenAppearanceChanged((preference) => {
-      setTheme(preference);
-      applyThemePreference(preference);
-    }).then((unlisten) => {
-      if (disposed) {
-        unlisten();
-      } else {
-        cleanups.push(unlisten);
-      }
-    });
-
-    void listenProviderModelCatalogChanged((next) => {
-      setCatalog(next);
-      setPendingModelId((current) => {
-        if (current !== null && next.models.some((model) => model.id === current)) {
-          return current;
-        }
-        return null;
-      });
-    }).then((unlisten) => {
-      if (disposed) {
-        unlisten();
-      } else {
-        cleanups.push(unlisten);
-      }
-    });
-
-    void listenProviderModelSelectionChanged((next) => {
-      setSelection(next);
-      setPendingModelId((current) => {
-        if (next.selectedModelId === null && next.requiresSelection) {
-          // Cleared default (for example after model rejection) requires a new choice.
-          return null;
-        }
-        return current ?? next.selectedModelId;
-      });
-    }).then((unlisten) => {
-      if (disposed) {
-        unlisten();
-      } else {
-        cleanups.push(unlisten);
-      }
-    });
-
-    void listenConnectionStatusChanged((status) => {
-      setConnectionState(status.state);
-    }).then((unlisten) => {
-      if (disposed) {
-        unlisten();
-      } else {
-        cleanups.push(unlisten);
-      }
-    });
-
-    return () => {
-      disposed = true;
       for (const cleanup of cleanups) {
         cleanup();
       }

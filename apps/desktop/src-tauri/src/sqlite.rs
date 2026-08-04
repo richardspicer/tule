@@ -39,10 +39,15 @@ const MIGRATIONS: Migrations<'static> = Migrations::from_slice(MIGRATION_SET);
 /// The single, synchronized SQLite owner used by all desktop repositories.
 pub(crate) struct SqliteStore {
     connection: Mutex<Connection>,
+    /// Infallible fail-closed gate for public catalog/selection reads after a
+    /// failed account-change compensation path. Independent of scrub success.
+    catalog_read_sealed: std::sync::atomic::AtomicBool,
     #[cfg(test)]
     fail_catalog_invalidation: std::sync::atomic::AtomicBool,
     #[cfg(test)]
     fail_model_selection_write: std::sync::atomic::AtomicBool,
+    #[cfg(test)]
+    fail_catalog_scrub: std::sync::atomic::AtomicBool,
 }
 
 impl SqliteStore {
@@ -58,14 +63,32 @@ impl SqliteStore {
 
         let store = Self {
             connection: Mutex::new(connection),
+            catalog_read_sealed: std::sync::atomic::AtomicBool::new(false),
             #[cfg(test)]
             fail_catalog_invalidation: std::sync::atomic::AtomicBool::new(false),
             #[cfg(test)]
             fail_model_selection_write: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            fail_catalog_scrub: std::sync::atomic::AtomicBool::new(false),
         };
         store.ensure_builtin_provider_profile()?;
         store.ensure_builtin_model_selection()?;
         Ok(store)
+    }
+
+    pub(crate) fn seal_catalog_reads(&self) {
+        self.catalog_read_sealed
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub(crate) fn clear_catalog_read_seal(&self) {
+        self.catalog_read_sealed
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub(crate) fn catalog_reads_are_sealed(&self) -> bool {
+        self.catalog_read_sealed
+            .load(std::sync::atomic::Ordering::SeqCst)
     }
 
     #[cfg(test)]
@@ -77,6 +100,12 @@ impl SqliteStore {
     #[cfg(test)]
     pub(crate) fn set_fail_model_selection_write(&self, fail: bool) {
         self.fail_model_selection_write
+            .store(fail, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_fail_catalog_scrub(&self, fail: bool) {
+        self.fail_catalog_scrub
             .store(fail, std::sync::atomic::Ordering::SeqCst);
     }
 

@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
 import type { AgentSession, AgentSessionDetail, AgentStreamEvent } from "./platform/agents";
 import { ProjectStorageError, type Project } from "./platform/projects";
-import type { ProviderModelCatalog } from "./platform/provider";
+import { ProviderError, type ProviderModelCatalog } from "./platform/provider";
 
 interface NativeCloseRequestedEvent {
   preventDefault: () => void;
@@ -19,6 +19,7 @@ const {
   getApplicationInfoMock,
   getAgentSessionMock,
   getConnectionStatusMock,
+  getPersistedProviderModelCatalogMock,
   getProviderModelCatalogMock,
   getProviderModelSelectionMock,
   listAgentSessionsMock,
@@ -43,6 +44,7 @@ const {
   getApplicationInfoMock: vi.fn(),
   getAgentSessionMock: vi.fn(),
   getConnectionStatusMock: vi.fn(),
+  getPersistedProviderModelCatalogMock: vi.fn(),
   getProviderModelCatalogMock: vi.fn(),
   getProviderModelSelectionMock: vi.fn(),
   listAgentSessionsMock: vi.fn(),
@@ -96,6 +98,7 @@ vi.mock("./platform/provider", async (importOriginal) => {
   return {
     ...actual,
     getConnectionStatus: getConnectionStatusMock,
+    getPersistedProviderModelCatalog: getPersistedProviderModelCatalogMock,
     getProviderModelCatalog: getProviderModelCatalogMock,
     getProviderModelSelection: getProviderModelSelectionMock,
     listenProviderModelCatalogChanged: listenProviderModelCatalogChangedMock,
@@ -147,6 +150,7 @@ describe("App", () => {
     updateProjectInstructionsMock.mockReset();
     listAgentSessionsMock.mockReset();
     getConnectionStatusMock.mockReset();
+    getPersistedProviderModelCatalogMock.mockReset();
     getProviderModelCatalogMock.mockReset();
     getProviderModelSelectionMock.mockReset();
     loadThemePreferenceMock.mockReset();
@@ -176,6 +180,13 @@ describe("App", () => {
       freshness: "current",
       retrievedAtUnixMs: 1,
       compatibilityRevision: "1.0.0",
+    });
+    getPersistedProviderModelCatalogMock.mockResolvedValue({
+      providerId: "openai-chatgpt-compat",
+      models: [],
+      freshness: "stale",
+      retrievedAtUnixMs: null,
+      compatibilityRevision: null,
     });
     getProviderModelSelectionMock.mockResolvedValue({
       providerId: "openai-chatgpt-compat",
@@ -547,6 +558,40 @@ describe("App", () => {
     await waitFor(() => expect(context).toHaveValue(""));
     expect(confirm).toHaveBeenLastCalledWith("Use No project for future messages in this session?");
     expect(setAgentSessionProjectMock).toHaveBeenLastCalledWith(session.id, null);
+  });
+
+  it("shows stale catalog models and the provider error after startup refresh failure", async () => {
+    getConnectionStatusMock.mockResolvedValue({
+      state: "connected",
+      providerId: "openai-chatgpt-compat",
+      model: "gpt-5.5",
+    });
+    getProviderModelCatalogMock.mockRejectedValue(new ProviderError("provider_unavailable"));
+    getPersistedProviderModelCatalogMock.mockResolvedValue({
+      providerId: "openai-chatgpt-compat",
+      models: [
+        {
+          id: "gpt-5.5",
+          displayName: "GPT-5.5",
+          description: null,
+          isProviderDefault: true,
+        },
+      ],
+      freshness: "stale",
+      retrievedAtUnixMs: 1,
+      compatibilityRevision: "1.0.0",
+    });
+    getProviderModelSelectionMock.mockResolvedValue({
+      providerId: "openai-chatgpt-compat",
+      selectedModelId: "gpt-5.5",
+      requiresSelection: false,
+    });
+
+    render(<App />);
+
+    expect(await screen.findByRole("option", { name: "GPT-5.5" })).toBeInTheDocument();
+    expect(screen.getByText("The provider is unavailable. Try again.")).toBeInTheDocument();
+    expect(getPersistedProviderModelCatalogMock).toHaveBeenCalled();
   });
 
   it("blocks Send on a new session without a valid catalog model", async () => {

@@ -165,6 +165,10 @@ impl SqliteStore {
             .filter(|entry| !rejected.iter().any(|model_id| model_id == &entry.model_id))
             .cloned()
             .collect::<Vec<_>>();
+        if entries.is_empty() {
+            // Refuse to persist an empty post-filter snapshot over a usable one.
+            return Err(SqliteStoreError::Database(rusqlite::Error::InvalidQuery));
+        }
         let mut connection = self.connection()?;
         let transaction = connection
             .transaction()
@@ -172,6 +176,18 @@ impl SqliteStore {
         replace_catalog_snapshot_tx(&transaction, provider_profile_id, state, &entries)?;
         transaction.commit().map_err(SqliteStoreError::Database)?;
         Ok(())
+    }
+
+    pub(crate) fn filter_rejected_catalog_entries(
+        &self,
+        provider_profile_id: &str,
+        entries: Vec<ModelCatalogEntry>,
+    ) -> Result<Vec<ModelCatalogEntry>, SqliteStoreError> {
+        let rejected = self.rejected_model_ids(provider_profile_id)?;
+        Ok(entries
+            .into_iter()
+            .filter(|entry| !rejected.iter().any(|model_id| model_id == &entry.model_id))
+            .collect())
     }
 
     pub(crate) fn touch_catalog_retrieval(
@@ -286,6 +302,13 @@ impl SqliteStore {
         &self,
         provider_profile_id: &str,
     ) -> Result<(), SqliteStoreError> {
+        #[cfg(test)]
+        if self
+            .fail_catalog_scrub
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(SqliteStoreError::Database(rusqlite::Error::InvalidQuery));
+        }
         let connection = self.connection()?;
         connection
             .execute(

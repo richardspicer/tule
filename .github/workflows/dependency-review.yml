@@ -29,6 +29,6 @@ jobs:
         with:
           fail-on-severity: high
           fail-on-scopes: runtime, development, unknown
-          license-check: false
+          license-check: true
           comment-summary-in-pr: never
           show-openssf-scorecard: false

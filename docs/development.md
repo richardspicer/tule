@@ -60,7 +60,7 @@ Follow only the remediation for failed checks, restart the terminal when a tool 
 6. Run the doctor until it exits with code `0`.
 7. Run repository checks through the committed scripts, which invoke the exact Corepack-managed pnpm version.
 
-The direct pnpm shim does not need to be enabled. Provider credentials are not part of the repository; configure them separately through the operating-system credential store when provider support is introduced.
+The direct pnpm shim does not need to be enabled. Provider credentials are not part of the repository; configure connections through TULE Settings, where credentials remain in the operating-system credential store.
 
 ## Validate the foundation
 

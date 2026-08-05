@@ -211,6 +211,49 @@ describe("AgentWorkspace", () => {
     expect(screen.queryByRole("button", { name: "Open Settings" })).not.toBeInTheDocument();
   });
 
+  it("attaches a link from the composer entry without submitting the send form", () => {
+    const onAttachLink = vi.fn();
+    const onSend = vi.fn();
+    render(
+      <AgentWorkspace
+        title="Hello"
+        projectId={null}
+        projects={[]}
+        modelLabel="GPT-5.5"
+        modelOptions={[{ id: "gpt-5.5", displayName: "GPT-5.5" }]}
+        selectedModelId="gpt-5.5"
+        modelLocked={false}
+        onModelChange={() => undefined}
+        turns={[]}
+        draft="Ask with context"
+        pendingAttachment={null}
+        connected
+        sending={false}
+        sendBlocked={false}
+        cancelRequested={false}
+        activeTurnId={null}
+        errorMessage={null}
+        onDraftChange={vi.fn()}
+        onSend={onSend}
+        onCancel={vi.fn()}
+        onAttach={vi.fn()}
+        onAttachFolder={vi.fn()}
+        onAttachLink={onAttachLink}
+        onRemoveAttachment={vi.fn()}
+        onProjectChange={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Attach link" }));
+    const linkField = screen.getByLabelText("HTTPS link to attach");
+    fireEvent.change(linkField, { target: { value: "https://example.com/readme.txt" } });
+    fireEvent.click(screen.getByRole("button", { name: "Fetch" }));
+
+    expect(onAttachLink).toHaveBeenCalledWith("https://example.com/readme.txt");
+    expect(onSend).not.toHaveBeenCalled();
+    expect(screen.queryByLabelText("HTTPS link to attach")).not.toBeInTheDocument();
+  });
+
   it("keeps Cancel and Sending as visible text while streaming", () => {
     render(
       <AgentWorkspace

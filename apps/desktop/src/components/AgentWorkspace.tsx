@@ -264,8 +264,7 @@ export function AgentWorkspace({
     setLinkDraft("");
   }
 
-  function handleSubmitLinkEntry(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
+  function submitLinkEntry() {
     const trimmed = linkDraft.trim();
     if (trimmed.length === 0 || sending) {
       return;
@@ -273,6 +272,14 @@ export function AgentWorkspace({
     setLinkEntryOpen(false);
     setLinkDraft("");
     onAttachLink(trimmed);
+  }
+
+  function handleLinkEntryKeyDown(event: KeyboardEvent<HTMLInputElement>) {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      event.stopPropagation();
+      submitLinkEntry();
+    }
   }
 
   return (
@@ -442,7 +449,7 @@ export function AgentWorkspace({
                 </div>
               )}
               {linkEntryOpen ? (
-                <form className="composer-link-entry" onSubmit={handleSubmitLinkEntry}>
+                <div className="composer-link-entry">
                   <label className="sr-only" htmlFor={linkFieldId}>
                     HTTPS link to attach
                   </label>
@@ -456,8 +463,14 @@ export function AgentWorkspace({
                     value={linkDraft}
                     disabled={sending}
                     onChange={(event) => setLinkDraft(event.currentTarget.value)}
+                    onKeyDown={handleLinkEntryKeyDown}
                   />
-                  <button className="secondary-action" type="submit" disabled={sending}>
+                  <button
+                    className="secondary-action"
+                    type="button"
+                    disabled={sending}
+                    onClick={submitLinkEntry}
+                  >
                     Fetch
                   </button>
                   <button
@@ -468,7 +481,7 @@ export function AgentWorkspace({
                   >
                     Cancel
                   </button>
-                </form>
+                </div>
               ) : null}
               <div className="composer-actions">
                 <Tooltip label={attachmentActionLabel(pendingAttachment, "file")}>

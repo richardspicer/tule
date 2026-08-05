@@ -845,6 +845,8 @@ function App() {
     setTurns([]);
     setDraft("");
     setAgentError(null);
+    setPendingAttachment(null);
+    void setAgentSourceDraftScope(null).catch(() => undefined);
   }
 
   async function handleChangePersistedProject(projectId: string | null) {

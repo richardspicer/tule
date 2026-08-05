@@ -386,6 +386,58 @@ describe("App", () => {
     expect(screen.getAllByText("Atlas").length).toBeGreaterThan(0);
   });
 
+  it("clears the prior session attachment when Use with Agents starts a project session", async () => {
+    const user = userEvent.setup();
+    const session: AgentSession = {
+      id: "22222222-2222-7222-8222-222222222222",
+      title: "Existing session",
+      projectId: null,
+      modelId: "gpt-5.5",
+    };
+    const project: Project = {
+      id: "11111111-1111-7111-8111-111111111111",
+      displayName: "Atlas",
+      instructions: "Keep answers short",
+    };
+    listAgentSessionsMock.mockResolvedValue([session]);
+    getAgentSessionMock.mockResolvedValue({ session, turns: [] });
+    getConnectionStatusMock.mockResolvedValue({
+      state: "connected",
+      providerId: "openai-chatgpt-compat",
+      model: "gpt-5.5",
+    });
+    listProjectsMock.mockResolvedValue([project]);
+    openProjectMock.mockResolvedValue(project);
+    pickAgentTextSourceMock.mockResolvedValue({
+      status: "selected",
+      attachment: {
+        draftHandle: "deadbeef".repeat(4),
+        displayName: "notes.txt",
+        byteCount: 5,
+        originKind: "local_text_file",
+      },
+    });
+
+    render(<App />);
+    expect(await screen.findByRole("heading", { name: "Existing session" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Attach a text file" }));
+    expect(await screen.findByText(/Captured snapshot: notes\.txt/)).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Manage projects" }));
+    const atlasButtons = screen.getAllByRole("button", { name: /Atlas/ });
+    const atlasOpen = atlasButtons[atlasButtons.length - 1];
+    expect(atlasOpen).toBeDefined();
+    await user.click(atlasOpen);
+    await waitFor(() => expect(openProjectMock).toHaveBeenCalled());
+    setAgentSourceDraftScopeMock.mockClear();
+
+    await user.click(await screen.findByRole("button", { name: "Use with Agents" }));
+
+    expect(screen.getByRole("heading", { name: "New session" })).toBeInTheDocument();
+    expect(screen.queryByText(/Captured snapshot: notes\.txt/)).not.toBeInTheDocument();
+    expect(setAgentSourceDraftScopeMock).toHaveBeenCalledWith(null);
+  });
+
   it("opens New project creation in the detail region", async () => {
     const user = userEvent.setup();
     createProjectMock.mockRejectedValue(new ProjectStorageError("invalid_project_name"));

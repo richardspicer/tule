@@ -35,8 +35,7 @@ const baseTurn: AgentTurn = {
 };
 
 describe("AgentWorkspace", () => {
-  it("blocks composer when disconnected and deep-links Providers settings", () => {
-    const onOpenProvidersSettings = vi.fn();
+  it("blocks composer when disconnected with a message-only prompt", () => {
     render(
       <AgentWorkspace
         title="New session"
@@ -63,16 +62,14 @@ describe("AgentWorkspace", () => {
         onAttachFolder={vi.fn()}
         onRemoveAttachment={vi.fn()}
         onProjectChange={vi.fn()}
-        onOpenProvidersSettings={onOpenProvidersSettings}
+        onOpenProvidersSettings={vi.fn()}
       />,
     );
 
     expect(screen.getByRole("img", { name: "TULE" })).toBeInTheDocument();
-    expect(
-      screen.getByText("Connect ChatGPT in Settings to message the Agent."),
-    ).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Open Settings" }));
-    expect(onOpenProvidersSettings).toHaveBeenCalled();
+    expect(screen.getByText("Add a Provider to get started.")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Open Settings" })).not.toBeInTheDocument();
+    expect(screen.getByText("Provider")).toBeInTheDocument();
   });
 
   it("exposes attachment controls and transcript metadata accessibly", () => {

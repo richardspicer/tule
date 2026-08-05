@@ -476,6 +476,8 @@ export async function sendAgentMessage(options: {
   }
 }
 
+export const AGENT_COMPOSER_UNAVAILABLE_MESSAGE = "Add a Provider to get started.";
+
 export function getSafeAgentErrorMessageForCode(code: AgentErrorCode): string {
   switch (code) {
     case "not_connected":

@@ -250,8 +250,7 @@ textarea:focus-visible {
 }
 
 .primary-action,
-.secondary-action,
-.icon-button {
+.secondary-action {
   min-height: var(--control-min);
   border-radius: var(--radius);
   border: 1px solid var(--divider);
@@ -264,8 +263,23 @@ textarea:focus-visible {
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  min-height: var(--control-min);
   width: var(--control-min);
   padding: 0;
+  border: 0;
+  border-radius: var(--radius);
+  background: transparent;
+  cursor: pointer;
+  color: var(--text);
+}
+
+.icon-button:hover:not(:disabled) {
+  background: var(--raised);
+}
+
+.icon-button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
 }
 
 .chrome-icon,
@@ -501,10 +515,6 @@ textarea:focus-visible {
   z-index: 1;
 }
 
-.jump-to-latest-button {
-  background: var(--panel);
-}
-
 .workspace-error,
 .project-error {
   margin: 0 16px 8px;
@@ -554,8 +564,11 @@ textarea:focus-visible {
 }
 
 .composer-send {
+  color: var(--accent);
+}
+
+.composer-send:hover:not(:disabled) {
   background: var(--accent);
-  border-color: var(--accent);
   color: #fff;
 }
 
@@ -586,8 +599,6 @@ textarea:focus-visible {
 .composer-unavailable {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 12px;
   min-height: 64px;
 }
 

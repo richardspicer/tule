@@ -9,6 +9,7 @@ import {
   type UIEvent,
 } from "react";
 import {
+  AGENT_COMPOSER_UNAVAILABLE_MESSAGE,
   formatSourceAttachmentSummary,
   getSafeAgentErrorMessageForCode,
   sourceAttachmentKindLabel,
@@ -122,7 +123,6 @@ export function AgentWorkspace({
   onRemoveAttachment,
   onProjectChange,
   onModelChange,
-  onOpenProvidersSettings,
 }: AgentWorkspaceProps) {
   const titleId = useId();
   const modelSelectId = useId();
@@ -237,7 +237,7 @@ export function AgentWorkspace({
               ))}
             </select>
             <span aria-hidden="true">·</span>
-            <span>ChatGPT subscription</span>
+            <span>Provider</span>
             <span aria-hidden="true">·</span>
             {modelLocked || modelOptions.length === 0 ? (
               <span>{modelLabel}</span>
@@ -433,10 +433,7 @@ export function AgentWorkspace({
             </form>
           ) : (
             <div className="composer-unavailable">
-              <p>Connect ChatGPT in Settings to message the Agent.</p>
-              <button className="secondary-action" type="button" onClick={onOpenProvidersSettings}>
-                Open Settings
-              </button>
+              <p>{AGENT_COMPOSER_UNAVAILABLE_MESSAGE}</p>
             </div>
           )}
         </div>

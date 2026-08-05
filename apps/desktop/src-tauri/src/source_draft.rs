@@ -366,6 +366,10 @@ fn collect_shallow_folder_members(
         if bytes.contains(&0) {
             continue;
         }
+        // Cap already filled: fail closed without reading remaining siblings.
+        if eligible.len() >= MAX_FOLDER_MEMBERS {
+            return Err(SourceDraftError::Unsupported);
+        }
         eligible.push((basename, bytes));
     }
     Ok(eligible)
@@ -713,6 +717,31 @@ mod tests {
             capture_picked_folder(&store, &picker, &reader),
             Err(SourceDraftError::Unsupported)
         ));
+
+        let large = tempfile::tempdir().unwrap();
+        let total_files = MAX_FOLDER_MEMBERS + 20;
+        for index in 0..total_files {
+            std::fs::write(large.path().join(format!("f{index:03}.txt")), "x").unwrap();
+        }
+        struct CountingReader {
+            reads: Mutex<usize>,
+        }
+        impl SourceFileReader for CountingReader {
+            fn read_regular_file(&self, path: &Path) -> Result<Vec<u8>, SourceDraftError> {
+                *self.reads.lock().unwrap() += 1;
+                NativeSourceFileReader.read_regular_file(path)
+            }
+        }
+        let counting = CountingReader {
+            reads: Mutex::new(0),
+        };
+        assert!(matches!(
+            collect_shallow_folder_members(large.path(), &counting),
+            Err(SourceDraftError::Unsupported)
+        ));
+        let reads = *counting.reads.lock().unwrap();
+        assert_eq!(reads, MAX_FOLDER_MEMBERS + 1);
+        assert!(reads < total_files);
 
         let members = vec![("big.txt".to_owned(), vec![b'a'; MAX_SOURCE_UTF8])];
         let fake_reader = FakeFolderReader {

@@ -1231,6 +1231,7 @@ mod tests {
             display_name: "hostile.txt".to_owned(),
             byte_count: content.len() as u64,
             content_sha256: crate::hash_source_bytes(content.as_bytes()),
+            member_count: 1,
             content: content.to_owned(),
         };
         let json = assemble_responses_request_json(
@@ -1266,6 +1267,7 @@ mod tests {
             display_name: "big.txt".to_owned(),
             byte_count: huge.len() as u64,
             content_sha256: "b".repeat(64),
+            member_count: 1,
             content: huge,
         };
         let error =

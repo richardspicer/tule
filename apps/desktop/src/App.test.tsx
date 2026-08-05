@@ -34,6 +34,7 @@ const {
   openProjectMock,
   openSettingsWindowMock,
   pickAgentTextSourceMock,
+  pickAgentTextFolderSourceMock,
   sendAgentMessageMock,
   setAgentSessionProjectMock,
   setAgentSourceDraftScopeMock,
@@ -62,6 +63,7 @@ const {
   openProjectMock: vi.fn(),
   openSettingsWindowMock: vi.fn(),
   pickAgentTextSourceMock: vi.fn(),
+  pickAgentTextFolderSourceMock: vi.fn(),
   sendAgentMessageMock: vi.fn(),
   setAgentSessionProjectMock: vi.fn(),
   setAgentSourceDraftScopeMock: vi.fn(),
@@ -122,6 +124,7 @@ vi.mock("./platform/agents", async (importOriginal) => {
     cancelAgentTurn: cancelAgentTurnMock,
     setAgentSessionProject: setAgentSessionProjectMock,
     pickAgentTextSource: pickAgentTextSourceMock,
+    pickAgentTextFolderSource: pickAgentTextFolderSourceMock,
     clearAgentTextSourceDraft: clearAgentTextSourceDraftMock,
     setAgentSourceDraftScope: setAgentSourceDraftScopeMock,
   };
@@ -155,12 +158,14 @@ describe("App", () => {
     openProjectMock.mockReset();
     openSettingsWindowMock.mockReset();
     pickAgentTextSourceMock.mockReset();
+    pickAgentTextFolderSourceMock.mockReset();
     sendAgentMessageMock.mockReset();
     setAgentSessionProjectMock.mockReset();
     setAgentSourceDraftScopeMock.mockReset();
     syncConnectionStatusMock.mockReset();
     clearAgentTextSourceDraftMock.mockResolvedValue(undefined);
     pickAgentTextSourceMock.mockResolvedValue({ status: "cancelled" });
+    pickAgentTextFolderSourceMock.mockResolvedValue({ status: "cancelled" });
     setAgentSourceDraftScopeMock.mockResolvedValue(undefined);
     updateProjectInstructionsMock.mockReset();
     listAgentSessionsMock.mockReset();
@@ -415,13 +420,14 @@ describe("App", () => {
         displayName: "notes.txt",
         byteCount: 5,
         originKind: "local_text_file",
+        memberCount: 1,
       },
     });
 
     render(<App />);
     expect(await screen.findByRole("heading", { name: "Existing session" })).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Attach a text file" }));
-    expect(await screen.findByText(/Captured snapshot: notes\.txt/)).toBeInTheDocument();
+    expect(await screen.findByText(/Captured file snapshot: notes\.txt/)).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Manage projects" }));
     const atlasButtons = screen.getAllByRole("button", { name: /Atlas/ });
@@ -434,7 +440,7 @@ describe("App", () => {
     await user.click(await screen.findByRole("button", { name: "Use with Agents" }));
 
     expect(screen.getByRole("heading", { name: "New session" })).toBeInTheDocument();
-    expect(screen.queryByText(/Captured snapshot: notes\.txt/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Captured file snapshot: notes\.txt/)).not.toBeInTheDocument();
     expect(setAgentSourceDraftScopeMock).toHaveBeenCalledWith(null);
   });
 
@@ -516,6 +522,7 @@ describe("App", () => {
         displayName: "notes.txt",
         byteCount: 5,
         originKind: "local_text_file",
+        memberCount: 1,
       },
     });
     sendAgentMessageMock.mockImplementation(
@@ -545,6 +552,7 @@ describe("App", () => {
                 displayName: "notes.txt",
                 byteCount: 5,
                 contentSha256: "a".repeat(64),
+                memberCount: 1,
               },
             ],
           },
@@ -560,7 +568,7 @@ describe("App", () => {
     await waitFor(() => expect(setAgentSourceDraftScopeMock).toHaveBeenCalledWith(session.id));
 
     await user.click(screen.getByRole("button", { name: "Attach a text file" }));
-    expect(await screen.findByText(/Captured snapshot: notes\.txt/)).toBeInTheDocument();
+    expect(await screen.findByText(/Captured file snapshot: notes\.txt/)).toBeInTheDocument();
     const composer = screen.getByRole("textbox", { name: "Message the Agent" });
     await user.type(composer, "Use the file");
     await user.click(screen.getByRole("button", { name: "Send" }));
@@ -627,6 +635,7 @@ describe("App", () => {
                   displayName: "follow.txt",
                   byteCount: 4,
                   contentSha256: "b".repeat(64),
+                  memberCount: 1,
                 },
               ],
             },
@@ -641,6 +650,7 @@ describe("App", () => {
         displayName: "follow.txt",
         byteCount: 4,
         originKind: "local_text_file",
+        memberCount: 1,
       },
     });
 
@@ -652,7 +662,7 @@ describe("App", () => {
     await waitFor(() => expect(setAgentSourceDraftScopeMock).toHaveBeenCalledWith(sessionId));
 
     await user.click(screen.getByRole("button", { name: "Attach a text file" }));
-    expect(await screen.findByText(/Captured snapshot: follow\.txt/)).toBeInTheDocument();
+    expect(await screen.findByText(/Captured file snapshot: follow\.txt/)).toBeInTheDocument();
     await user.type(screen.getByRole("textbox", { name: "Message the Agent" }), "With file");
     await user.click(screen.getByRole("button", { name: "Send" }));
 

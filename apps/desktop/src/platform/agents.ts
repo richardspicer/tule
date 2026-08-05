@@ -25,7 +25,7 @@ const agentTurnStates: readonly AgentTurnState[] = [
   "interrupted",
 ];
 
-export type SourceOriginKind = "local_text_file";
+export type SourceOriginKind = "local_text_file" | "local_text_folder";
 
 export interface AgentSourceMetadata {
   id: string;
@@ -33,6 +33,7 @@ export interface AgentSourceMetadata {
   displayName: string;
   byteCount: number;
   contentSha256: string;
+  memberCount: number;
 }
 
 export interface AgentTurn {
@@ -72,6 +73,7 @@ export interface PendingSourceAttachment {
   displayName: string;
   byteCount: number;
   originKind: SourceOriginKind;
+  memberCount: number;
 }
 
 export type PickAgentTextSourceResult =
@@ -148,17 +150,20 @@ function isAgentSession(value: unknown): value is AgentSession {
 }
 
 const MAX_SOURCE_UTF8 = 64 * 1024;
+const MAX_FOLDER_MEMBERS = 32;
 const SOURCE_METADATA_KEYS = [
   "byteCount",
   "contentSha256",
   "displayName",
   "id",
+  "memberCount",
   "originKind",
 ] as const;
 const PICK_RESULT_KEYS = [
   "byteCount",
   "displayName",
   "draftHandle",
+  "memberCount",
   "originKind",
   "status",
 ] as const;
@@ -213,6 +218,20 @@ function hasExactKeys(record: Record<string, unknown>, allowed: readonly string[
   return keys.length === allowed.length && keys.every((key, index) => key === allowed[index]);
 }
 
+function isSourceOriginKind(value: unknown): value is SourceOriginKind {
+  return value === "local_text_file" || value === "local_text_folder";
+}
+
+function isMemberCount(value: unknown, originKind: SourceOriginKind): value is number {
+  if (typeof value !== "number" || !Number.isInteger(value)) {
+    return false;
+  }
+  if (originKind === "local_text_file") {
+    return value === 1;
+  }
+  return value >= 1 && value <= MAX_FOLDER_MEMBERS;
+}
+
 function isSourceMetadata(value: unknown): value is AgentSourceMetadata {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     return false;
@@ -223,12 +242,13 @@ function isSourceMetadata(value: unknown): value is AgentSourceMetadata {
     hasExactKeys(record, SOURCE_METADATA_KEYS) &&
     typeof record.id === "string" &&
     isUuidV7(record.id) &&
-    record.originKind === "local_text_file" &&
+    isSourceOriginKind(record.originKind) &&
     typeof record.displayName === "string" &&
     isSafeSourceDisplayName(record.displayName) &&
     isSourceByteCount(record.byteCount) &&
     typeof record.contentSha256 === "string" &&
-    isCanonicalSha256(record.contentSha256)
+    isCanonicalSha256(record.contentSha256) &&
+    isMemberCount(record.memberCount, record.originKind)
   );
 }
 
@@ -341,7 +361,8 @@ function validatePickResult(value: unknown): PickAgentTextSourceResult {
       record.draftHandle !== null ||
       record.displayName !== null ||
       record.byteCount !== null ||
-      record.originKind !== null
+      record.originKind !== null ||
+      record.memberCount !== null
     ) {
       throw new AgentError("agent_storage_unavailable");
     }
@@ -355,7 +376,8 @@ function validatePickResult(value: unknown): PickAgentTextSourceResult {
     typeof record.displayName === "string" &&
     isSafeSourceDisplayName(record.displayName) &&
     isSourceByteCount(record.byteCount) &&
-    record.originKind === "local_text_file"
+    isSourceOriginKind(record.originKind) &&
+    isMemberCount(record.memberCount, record.originKind)
   ) {
     return {
       status: "selected",
@@ -363,7 +385,8 @@ function validatePickResult(value: unknown): PickAgentTextSourceResult {
         draftHandle: record.draftHandle,
         displayName: record.displayName,
         byteCount: record.byteCount,
-        originKind: "local_text_file",
+        originKind: record.originKind,
+        memberCount: record.memberCount,
       },
     };
   }
@@ -405,6 +428,10 @@ export async function cancelAgentTurn(turnId: string): Promise<void> {
 
 export async function pickAgentTextSource(): Promise<PickAgentTextSourceResult> {
   return validatePickResult(await invokeAgentCommand("pick_agent_text_source"));
+}
+
+export async function pickAgentTextFolderSource(): Promise<PickAgentTextSourceResult> {
+  return validatePickResult(await invokeAgentCommand("pick_agent_text_folder_source"));
 }
 
 export async function clearAgentTextSourceDraft(draftHandle: string | null): Promise<void> {
@@ -482,13 +509,13 @@ export function getSafeAgentErrorMessageForCode(code: AgentErrorCode): string {
     case "provider_unavailable":
       return "The provider is unavailable. Try again.";
     case "source_unreadable":
-      return "That file could not be read.";
+      return "That attachment could not be read.";
     case "source_unsupported":
-      return "That file is not supported as a text attachment.";
+      return "That attachment is not supported.";
     case "source_too_large":
-      return "That file is too large to attach.";
+      return "That attachment is too large.";
     case "source_draft_expired":
-      return "The attachment is no longer available. Choose the file again.";
+      return "The attachment is no longer available. Choose it again.";
   }
 }
 
@@ -502,4 +529,22 @@ export function formatSourceByteCount(byteCount: number): string {
   }
 
   return `${(byteCount / 1024).toFixed(byteCount < 10 * 1024 ? 1 : 0)} KB`;
+}
+
+export function formatSourceAttachmentSummary(
+  attachment: Pick<
+    PendingSourceAttachment,
+    "originKind" | "displayName" | "byteCount" | "memberCount"
+  >,
+): string {
+  const size = formatSourceByteCount(attachment.byteCount);
+  if (attachment.originKind === "local_text_folder") {
+    const files = attachment.memberCount === 1 ? "1 file" : `${attachment.memberCount} files`;
+    return `${attachment.displayName} (${size}, ${files})`;
+  }
+  return `${attachment.displayName} (${size})`;
+}
+
+export function sourceAttachmentKindLabel(originKind: SourceOriginKind): string {
+  return originKind === "local_text_folder" ? "folder" : "file";
 }

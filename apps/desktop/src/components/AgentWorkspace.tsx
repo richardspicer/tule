@@ -90,8 +90,7 @@ function attachmentActionLabel(
   if (pendingAttachment === null) {
     return kind === "folder" ? "Attach folder" : "Attach file";
   }
-  const pendingKind =
-    pendingAttachment.originKind === "local_text_folder" ? "folder" : "file";
+  const pendingKind = pendingAttachment.originKind === "local_text_folder" ? "folder" : "file";
   if (pendingKind === kind) {
     return kind === "folder" ? "Replace folder" : "Replace file";
   }

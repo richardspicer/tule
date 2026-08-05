@@ -426,7 +426,7 @@ describe("App", () => {
 
     render(<App />);
     expect(await screen.findByRole("heading", { name: "Existing session" })).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "Attach a text file" }));
+    await user.click(screen.getByRole("button", { name: "Attach file" }));
     expect(await screen.findByText(/Captured file snapshot: notes\.txt/)).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Manage projects" }));
@@ -567,7 +567,7 @@ describe("App", () => {
     expect(await screen.findByRole("heading", { name: "Existing session" })).toBeInTheDocument();
     await waitFor(() => expect(setAgentSourceDraftScopeMock).toHaveBeenCalledWith(session.id));
 
-    await user.click(screen.getByRole("button", { name: "Attach a text file" }));
+    await user.click(screen.getByRole("button", { name: "Attach file" }));
     expect(await screen.findByText(/Captured file snapshot: notes\.txt/)).toBeInTheDocument();
     const composer = screen.getByRole("textbox", { name: "Message the Agent" });
     await user.type(composer, "Use the file");
@@ -661,7 +661,7 @@ describe("App", () => {
 
     await waitFor(() => expect(setAgentSourceDraftScopeMock).toHaveBeenCalledWith(sessionId));
 
-    await user.click(screen.getByRole("button", { name: "Attach a text file" }));
+    await user.click(screen.getByRole("button", { name: "Attach file" }));
     expect(await screen.findByText(/Captured file snapshot: follow\.txt/)).toBeInTheDocument();
     await user.type(screen.getByRole("textbox", { name: "Message the Agent" }), "With file");
     await user.click(screen.getByRole("button", { name: "Send" }));

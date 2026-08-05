@@ -543,9 +543,25 @@ textarea:focus-visible {
 .composer-actions {
   display: flex;
   justify-content: flex-end;
+  align-items: center;
   flex-wrap: wrap;
-  gap: 8px;
+  gap: 6px;
   margin-top: 8px;
+}
+
+.composer-icon {
+  color: var(--text);
+}
+
+.composer-send {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+.composer-send:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
 }
 
 .composer-attachment {

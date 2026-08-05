@@ -113,3 +113,69 @@ export function ProjectsIcon({ className }: IconProps) {
     </svg>
   );
 }
+
+export function SendIcon({ className }: IconProps) {
+  return (
+    <svg className={className} viewBox="0 0 16 16" width="16" height="16" aria-hidden="true">
+      <path
+        d="M3.5 8.5 12.5 4 8 12.5 7 9.5 3.5 8.5Z"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.5"
+        strokeLinejoin="round"
+        strokeLinecap="round"
+      />
+    </svg>
+  );
+}
+
+export function AttachFileIcon({ className }: IconProps) {
+  return (
+    <svg className={className} viewBox="0 0 16 16" width="16" height="16" aria-hidden="true">
+      <path
+        d="M5.5 2.5h4l2 2v8.5a1 1 0 0 1-1 1h-6a1 1 0 0 1-1-1v-10a1 1 0 0 1 1-1Z"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.5"
+        strokeLinejoin="round"
+      />
+      <path
+        d="M9.5 2.5V5h2.5"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.5"
+        strokeLinejoin="round"
+        strokeLinecap="round"
+      />
+    </svg>
+  );
+}
+
+export function AttachFolderIcon({ className }: IconProps) {
+  return (
+    <svg className={className} viewBox="0 0 16 16" width="16" height="16" aria-hidden="true">
+      <path
+        d="M2.5 4.75h4.25L8 6.25h5.5v6.5h-11V4.75Z"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.5"
+        strokeLinejoin="round"
+        strokeLinecap="round"
+      />
+    </svg>
+  );
+}
+
+export function RemoveIcon({ className }: IconProps) {
+  return (
+    <svg className={className} viewBox="0 0 16 16" width="16" height="16" aria-hidden="true">
+      <path
+        d="M4.75 4.75 11.25 11.25M11.25 4.75 4.75 11.25"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.5"
+        strokeLinecap="round"
+      />
+    </svg>
+  );
+}

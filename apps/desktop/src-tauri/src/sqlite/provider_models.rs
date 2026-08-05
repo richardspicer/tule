@@ -428,7 +428,7 @@ impl SqliteStore {
             .execute(
                 "INSERT INTO provider_model_selection (
                     provider_profile_id, selected_model_id, updated_at_unix_ms
-                 ) VALUES (?1, 'gpt-5.5', ?2)
+                 ) VALUES (?1, 'grok-3', ?2)
                  ON CONFLICT(provider_profile_id) DO NOTHING",
                 params![PROVIDER_PROFILE_ID, now],
             )

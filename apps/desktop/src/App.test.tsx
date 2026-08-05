@@ -184,15 +184,15 @@ describe("App", () => {
     getApplicationInfoMock.mockResolvedValue({ name: "TULE", version: "0.1.0" });
     getConnectionStatusMock.mockResolvedValue({
       state: "disconnected",
-      providerId: "openai-chatgpt-compat",
-      model: "gpt-5.5",
+      providerId: "xai-subscription-oauth",
+      model: "grok-3",
     });
     getProviderModelCatalogMock.mockResolvedValue({
-      providerId: "openai-chatgpt-compat",
+      providerId: "xai-subscription-oauth",
       models: [
         {
-          id: "gpt-5.5",
-          displayName: "GPT-5.5",
+          id: "grok-3",
+          displayName: "Grok 3",
           description: null,
           isProviderDefault: true,
         },
@@ -202,15 +202,15 @@ describe("App", () => {
       compatibilityRevision: "1.0.0",
     });
     getPersistedProviderModelCatalogMock.mockResolvedValue({
-      providerId: "openai-chatgpt-compat",
+      providerId: "xai-subscription-oauth",
       models: [],
       freshness: "stale",
       retrievedAtUnixMs: null,
       compatibilityRevision: null,
     });
     getProviderModelSelectionMock.mockResolvedValue({
-      providerId: "openai-chatgpt-compat",
-      selectedModelId: "gpt-5.5",
+      providerId: "xai-subscription-oauth",
+      selectedModelId: "grok-3",
       requiresSelection: false,
     });
     loadThemePreferenceMock.mockResolvedValue("system");
@@ -222,8 +222,8 @@ describe("App", () => {
     exitApplicationMock.mockResolvedValue(undefined);
     syncConnectionStatusMock.mockResolvedValue({
       state: "reconnect_required",
-      providerId: "openai-chatgpt-compat",
-      model: "gpt-5.5",
+      providerId: "xai-subscription-oauth",
+      model: "grok-3",
     });
     listProjectsMock.mockResolvedValue([]);
     listAgentSessionsMock.mockResolvedValue([]);
@@ -271,8 +271,8 @@ describe("App", () => {
     act(() => {
       emitStatus?.({
         state: "connected",
-        providerId: "openai-chatgpt-compat",
-        model: "gpt-5.5",
+        providerId: "xai-subscription-oauth",
+        model: "grok-3",
       });
     });
 
@@ -388,7 +388,7 @@ describe("App", () => {
       id: "22222222-2222-7222-8222-222222222222",
       title: "Existing session",
       projectId: null,
-      modelId: "gpt-5.5",
+      modelId: "grok-3",
     };
     const project: Project = {
       id: "11111111-1111-7111-8111-111111111111",
@@ -399,8 +399,8 @@ describe("App", () => {
     getAgentSessionMock.mockResolvedValue({ session, turns: [] });
     getConnectionStatusMock.mockResolvedValue({
       state: "connected",
-      providerId: "openai-chatgpt-compat",
-      model: "gpt-5.5",
+      providerId: "xai-subscription-oauth",
+      model: "grok-3",
     });
     listProjectsMock.mockResolvedValue([project]);
     openProjectMock.mockResolvedValue(project);
@@ -451,7 +451,7 @@ describe("App", () => {
       id: "22222222-2222-7222-8222-222222222222",
       title: "Existing session",
       projectId: null,
-      modelId: "gpt-5.5",
+      modelId: "grok-3",
     };
     listAgentSessionsMock.mockResolvedValue([session]);
     getAgentSessionMock.mockResolvedValue({
@@ -484,7 +484,7 @@ describe("App", () => {
       id: "22222222-2222-7222-8222-222222222222",
       title: "Existing session",
       projectId: null,
-      modelId: "gpt-5.5",
+      modelId: "grok-3",
     };
     listAgentSessionsMock.mockResolvedValue([session]);
     getAgentSessionMock.mockResolvedValue({
@@ -503,8 +503,8 @@ describe("App", () => {
     });
     getConnectionStatusMock.mockResolvedValue({
       state: "connected",
-      providerId: "openai-chatgpt-compat",
-      model: "gpt-5.5",
+      providerId: "xai-subscription-oauth",
+      model: "grok-3",
     });
     pickAgentTextSourceMock.mockResolvedValue({
       status: "selected",
@@ -573,8 +573,8 @@ describe("App", () => {
     const sessionId = "22222222-2222-7222-8222-222222222222";
     getConnectionStatusMock.mockResolvedValue({
       state: "connected",
-      providerId: "openai-chatgpt-compat",
-      model: "gpt-5.5",
+      providerId: "xai-subscription-oauth",
+      model: "grok-3",
     });
     listAgentSessionsMock.mockResolvedValue([]);
     sendAgentMessageMock
@@ -672,7 +672,7 @@ describe("App", () => {
       id: "22222222-2222-7222-8222-222222222222",
       title: "Existing session",
       projectId: null,
-      modelId: "gpt-5.5",
+      modelId: "grok-3",
     };
     let resolveDetail: ((detail: AgentSessionDetail) => void) | undefined;
     listAgentSessionsMock.mockResolvedValue([session]);
@@ -713,13 +713,13 @@ describe("App", () => {
       id: "22222222-2222-7222-8222-222222222222",
       title: "First session",
       projectId: null,
-      modelId: "gpt-5.5",
+      modelId: "grok-3",
     };
     const second: AgentSession = {
       id: "33333333-3333-7333-8333-333333333333",
       title: "Second session",
       projectId: null,
-      modelId: "gpt-5.5",
+      modelId: "grok-3",
     };
     let resolveFirst: ((detail: AgentSessionDetail) => void) | undefined;
     let resolveSecond: ((detail: AgentSessionDetail) => void) | undefined;
@@ -789,7 +789,7 @@ describe("App", () => {
       id: "22222222-2222-7222-8222-222222222222",
       title: "Existing session",
       projectId: null,
-      modelId: "gpt-5.5",
+      modelId: "grok-3",
     };
     listProjectsMock.mockResolvedValue([project]);
     listAgentSessionsMock.mockResolvedValue([session]);
@@ -820,16 +820,16 @@ describe("App", () => {
   it("shows stale catalog models and the provider error after startup refresh failure", async () => {
     getConnectionStatusMock.mockResolvedValue({
       state: "connected",
-      providerId: "openai-chatgpt-compat",
-      model: "gpt-5.5",
+      providerId: "xai-subscription-oauth",
+      model: "grok-3",
     });
     getProviderModelCatalogMock.mockRejectedValue(new ProviderError("provider_unavailable"));
     getPersistedProviderModelCatalogMock.mockResolvedValue({
-      providerId: "openai-chatgpt-compat",
+      providerId: "xai-subscription-oauth",
       models: [
         {
-          id: "gpt-5.5",
-          displayName: "GPT-5.5",
+          id: "grok-3",
+          displayName: "Grok 3",
           description: null,
           isProviderDefault: true,
         },
@@ -839,14 +839,14 @@ describe("App", () => {
       compatibilityRevision: "1.0.0",
     });
     getProviderModelSelectionMock.mockResolvedValue({
-      providerId: "openai-chatgpt-compat",
-      selectedModelId: "gpt-5.5",
+      providerId: "xai-subscription-oauth",
+      selectedModelId: "grok-3",
       requiresSelection: false,
     });
 
     render(<App />);
 
-    expect(await screen.findByRole("option", { name: "GPT-5.5" })).toBeInTheDocument();
+    expect(await screen.findByRole("option", { name: "Grok 3" })).toBeInTheDocument();
     expect(screen.getByText("The provider is unavailable. Try again.")).toBeInTheDocument();
     expect(getPersistedProviderModelCatalogMock).toHaveBeenCalled();
   });
@@ -855,18 +855,18 @@ describe("App", () => {
     const user = userEvent.setup();
     getConnectionStatusMock.mockResolvedValue({
       state: "connected",
-      providerId: "openai-chatgpt-compat",
-      model: "gpt-5.5",
+      providerId: "xai-subscription-oauth",
+      model: "grok-3",
     });
     getProviderModelCatalogMock.mockResolvedValue({
-      providerId: "openai-chatgpt-compat",
+      providerId: "xai-subscription-oauth",
       models: [],
       freshness: "stale",
       retrievedAtUnixMs: null,
       compatibilityRevision: null,
     });
     getProviderModelSelectionMock.mockResolvedValue({
-      providerId: "openai-chatgpt-compat",
+      providerId: "xai-subscription-oauth",
       selectedModelId: null,
       requiresSelection: true,
     });
@@ -892,15 +892,15 @@ describe("App", () => {
     );
     getConnectionStatusMock.mockResolvedValue({
       state: "connected",
-      providerId: "openai-chatgpt-compat",
-      model: "gpt-5.5",
+      providerId: "xai-subscription-oauth",
+      model: "grok-3",
     });
     getProviderModelCatalogMock.mockResolvedValue({
-      providerId: "openai-chatgpt-compat",
+      providerId: "xai-subscription-oauth",
       models: [
         {
-          id: "gpt-5.5",
-          displayName: "GPT-5.5",
+          id: "grok-3",
+          displayName: "Grok 3",
           description: null,
           isProviderDefault: true,
         },
@@ -911,10 +911,10 @@ describe("App", () => {
     });
 
     render(<App />);
-    expect(await screen.findByRole("option", { name: "GPT-5.5" })).toBeInTheDocument();
+    expect(await screen.findByRole("option", { name: "Grok 3" })).toBeInTheDocument();
 
     emitCatalog?.({
-      providerId: "openai-chatgpt-compat",
+      providerId: "xai-subscription-oauth",
       models: [
         {
           id: "other-model",
@@ -929,7 +929,7 @@ describe("App", () => {
     });
 
     await waitFor(() => {
-      expect(screen.queryByRole("option", { name: "GPT-5.5" })).not.toBeInTheDocument();
+      expect(screen.queryByRole("option", { name: "Grok 3" })).not.toBeInTheDocument();
       expect(
         screen.getByText("Choose a model before sending the first message."),
       ).toBeInTheDocument();
@@ -948,7 +948,7 @@ describe("App", () => {
       id: "22222222-2222-7222-8222-222222222222",
       title: "Existing session",
       projectId: null,
-      modelId: "gpt-5.5",
+      modelId: "grok-3",
     };
     let resolveProjectChange: ((updated: AgentSession) => void) | undefined;
     setAgentSessionProjectMock.mockReturnValue(
@@ -958,8 +958,8 @@ describe("App", () => {
     );
     getConnectionStatusMock.mockResolvedValue({
       state: "connected",
-      providerId: "openai-chatgpt-compat",
-      model: "gpt-5.5",
+      providerId: "xai-subscription-oauth",
+      model: "grok-3",
     });
     listProjectsMock.mockResolvedValue([project]);
     listAgentSessionsMock.mockResolvedValue([session]);
@@ -1053,8 +1053,8 @@ describe("App", () => {
     const user = userEvent.setup();
     getConnectionStatusMock.mockResolvedValue({
       state: "connected",
-      providerId: "openai-chatgpt-compat",
-      model: "gpt-5.5",
+      providerId: "xai-subscription-oauth",
+      model: "grok-3",
     });
     sendAgentMessageMock.mockImplementation(
       (options: { onEvent: (event: AgentStreamEvent) => void }) => {
@@ -1091,8 +1091,8 @@ describe("App", () => {
     let resolveSend: (() => void) | undefined;
     getConnectionStatusMock.mockResolvedValue({
       state: "connected",
-      providerId: "openai-chatgpt-compat",
-      model: "gpt-5.5",
+      providerId: "xai-subscription-oauth",
+      model: "grok-3",
     });
     sendAgentMessageMock.mockImplementation(
       (options: { onEvent: (event: AgentStreamEvent) => void }) => {

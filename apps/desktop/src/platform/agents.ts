@@ -481,7 +481,7 @@ export const AGENT_COMPOSER_UNAVAILABLE_MESSAGE = "Add a Provider to get started
 export function getSafeAgentErrorMessageForCode(code: AgentErrorCode): string {
   switch (code) {
     case "not_connected":
-      return "Connect ChatGPT in Settings to message the Agent.";
+      return "Connect your xAI subscription in Settings to message the Agent.";
     case "invalid_input":
       return "Enter a valid message.";
     case "context_limit":
@@ -489,9 +489,9 @@ export function getSafeAgentErrorMessageForCode(code: AgentErrorCode): string {
     case "session_busy":
       return "Another Agent turn is already in progress.";
     case "authentication_required":
-      return "Reconnect ChatGPT in Settings to continue.";
+      return "Reconnect your xAI subscription in Settings to continue.";
     case "entitlement_unavailable":
-      return "ChatGPT access is unavailable for this account.";
+      return "xAI subscription access is unavailable for this account.";
     case "rate_limited":
       return "The provider rate limit was reached. Try again later.";
     case "unsupported_provider_output":

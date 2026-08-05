@@ -1,11 +1,10 @@
-//! Experimental, fixed-contract ChatGPT subscription compatibility adapter.
+//! Fixed-contract xAI SuperGrok / X Premium subscription OAuth adapter (RFC 8628 device-code).
 //!
 //! Endpoint values are compile-time constants. A `cfg(test)` transport seam may
 //! supply bounded mock responses while asserting production destinations; the
 //! seam does not compile into release binaries.
 
 use std::{
-    collections::HashMap,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -15,18 +14,14 @@ use std::{
 
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use futures_util::StreamExt;
-use oauth2::{CsrfToken, PkceCodeChallenge};
 use reqwest::{
     Client, StatusCode,
-    header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue, USER_AGENT},
+    header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue, USER_AGENT},
     redirect::Policy,
 };
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    net::TcpListener,
-    time::timeout,
-};
+use tokio::time::sleep;
 use tule_core::{
     AgentRepository, CATALOG_TTL_MS, CatalogCandidate, PROVIDER_PROFILE_ID, ProviderProfile,
     catalog_freshness, select_usable_catalog_entries,
@@ -44,26 +39,48 @@ use crate::{
 };
 use tokio_util::sync::CancellationToken;
 
-pub(crate) const PROVIDER_ID: &str = "openai-chatgpt-compat";
-pub(crate) const MODEL: &str = "gpt-5.5";
-pub(crate) const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
-pub(crate) const AUTH_URL: &str = "https://auth.openai.com/oauth/authorize";
-pub(crate) const TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
-pub(crate) const INFERENCE_URL: &str = "https://chatgpt.com/backend-api/codex/responses";
+pub(crate) type DevicePairingNotifier = Arc<dyn Fn(Option<DevicePairingResponse>) + Send + Sync>;
+
+pub(crate) const PROVIDER_ID: &str = "xai-subscription-oauth";
+pub(crate) const MODEL: &str = "grok-3";
+pub(crate) const CLIENT_ID: &str = "b1a00492-073a-47ea-816f-4c329264a828";
+pub(crate) const DEVICE_CODE_URL: &str = "https://auth.x.ai/oauth2/device/code";
+pub(crate) const TOKEN_URL: &str = "https://auth.x.ai/oauth2/token";
+pub(crate) const INFERENCE_URL: &str = "https://api.x.ai/v1/chat/completions";
 /// TULE-owned catalog-compatibility revision for the authenticated models endpoint.
 pub(crate) const CATALOG_COMPATIBILITY_REVISION: &str = "1.0.0";
-pub(crate) const MODELS_URL: &str =
-    "https://chatgpt.com/backend-api/codex/models?client_version=1.0.0";
-pub(crate) const SCOPES: &str = "openid profile email offline_access";
-pub(crate) const CREDENTIAL_HANDLE: &str = "openai-chatgpt-compat-v1";
+pub(crate) const MODELS_URL: &str = "https://api.x.ai/v1/models";
+pub(crate) const SCOPES: &str = "openid profile email offline_access grok-cli:access api:access";
+pub(crate) const DEVICE_CODE_GRANT: &str = "urn:ietf:params:oauth:grant-type:device_code";
+pub(crate) const CREDENTIAL_HANDLE: &str = "xai-subscription-oauth-v1";
+/// Retired ChatGPT compatibility credential handle superseded on upgrade.
+pub(crate) const LEGACY_CHATGPT_CREDENTIAL_HANDLE: &str = "openai-chatgpt-compat-v1";
+pub(crate) const XAI_DEVICE_PAIRING_CHANGED_EVENT: &str = "xai-device-pairing-changed";
+
+/// Allowlisted non-secret device-code pairing metadata for the interface.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DevicePairingResponse {
+    pub(crate) verification_uri: String,
+    pub(crate) user_code: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct DeviceCodeResponse {
+    pub(crate) device_code: String,
+    pub(crate) user_code: String,
+    pub(crate) verification_uri: String,
+    pub(crate) verification_uri_complete: Option<String>,
+    pub(crate) expires_in: Option<u64>,
+    pub(crate) interval: Option<u64>,
+}
 #[cfg(not(test))]
 const MAX_CATALOG_BODY: usize = 512 * 1024;
-const PRIMARY_CALLBACK_PORT: u16 = 1455;
-const FALLBACK_CALLBACK_PORT: u16 = 1457;
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(300);
-const MAX_CALLBACK_REQUEST: usize = 16 * 1024;
-const MAX_CALLBACK_VALUE: usize = 8 * 1024;
-const CALLBACK_SUCCESS_BODY: &str = "You can return to TULE. This window may be closed.";
+const DEVICE_CODE_DEFAULT_INTERVAL_MS: u64 = 5_000;
+const DEVICE_CODE_MIN_INTERVAL_MS: u64 = 1_000;
+const DEVICE_CODE_SLOW_DOWN_INCREMENT_MS: u64 = 5_000;
+const DEVICE_CODE_DEFAULT_EXPIRES_MS: u64 = 5 * 60 * 1000;
+const OAUTH_POLLING_SAFETY_MARGIN_MS: u64 = 3_000;
 const MAX_PROVIDER_BODY: usize = 64 * 1024;
 const MAX_SSE_BUFFER: usize = 256 * 1024;
 const REFRESH_SKEW_SECS: i64 = 60;
@@ -126,7 +143,7 @@ impl Drop for CredentialSnapshot {
     }
 }
 
-pub(crate) struct ChatGptAdapter {
+pub(crate) struct XaiSubscriptionAdapter {
     credentials: Arc<dyn CredentialStore>,
     client: Client,
     /// Serializes every credential-using operation for the single built-in profile.
@@ -134,11 +151,12 @@ pub(crate) struct ChatGptAdapter {
     connect_cancel: Mutex<Option<Arc<CancellationToken>>>,
     connecting: AtomicBool,
     reconnect_required: AtomicBool,
+    device_pairing: Mutex<Option<DevicePairingResponse>>,
     #[cfg(test)]
     test_transport: Mutex<Option<Arc<dyn TestTransport>>>,
 }
 
-impl ChatGptAdapter {
+impl XaiSubscriptionAdapter {
     pub(crate) fn new(credentials: Arc<dyn CredentialStore>) -> Self {
         let client = Client::builder()
             .redirect(Policy::none())
@@ -152,8 +170,37 @@ impl ChatGptAdapter {
             connect_cancel: Mutex::new(None),
             connecting: AtomicBool::new(false),
             reconnect_required: AtomicBool::new(false),
+            device_pairing: Mutex::new(None),
             #[cfg(test)]
             test_transport: Mutex::new(None),
+        }
+    }
+
+    /// Removes retired ChatGPT credential material so it cannot remain the active send path.
+    pub(crate) fn supersede_legacy_chatgpt_credentials(&self) {
+        for kind in ALL_CREDENTIAL_KINDS {
+            let _ = self
+                .credentials
+                .delete(LEGACY_CHATGPT_CREDENTIAL_HANDLE, kind);
+        }
+    }
+
+    pub(crate) fn device_pairing(&self) -> Option<DevicePairingResponse> {
+        self.device_pairing.lock().ok()?.clone()
+    }
+
+    fn set_device_pairing(&self, pairing: Option<DevicePairingResponse>) {
+        if let Ok(mut slot) = self.device_pairing.lock() {
+            *slot = pairing;
+        }
+    }
+
+    fn notify_device_pairing(
+        on_pairing: Option<&DevicePairingNotifier>,
+        pairing: Option<DevicePairingResponse>,
+    ) {
+        if let Some(notify) = on_pairing {
+            notify(pairing);
         }
     }
 
@@ -178,34 +225,20 @@ impl ChatGptAdapter {
         *self.test_transport.lock().expect("lock") = Some(transport);
     }
 
-    /// Test-only helper that completes the browser callback against the bound
-    /// redirect using the production query parser.
+    /// Test-only helper that injects a device-code response and completes token polling via transport.
     #[cfg(test)]
-    pub(crate) async fn connect_in_browser_with_test_callback(
+    pub(crate) async fn connect_with_test_device_code(
         &self,
         store: Arc<SqliteStore>,
-        code: &str,
     ) -> Result<ConnectionStatus, PublicError> {
-        let code = code.to_owned();
-        self.connect_in_browser(store, move |url| {
-            let query = url.split_once('?').map(|(_, query)| query).expect("query");
-            let params = parse_query(query).expect("authorization query");
-            let state = params.get("state").expect("state").clone();
-            let redirect = params.get("redirect_uri").expect("redirect_uri").clone();
-            let callback = format!("{redirect}?state={state}&code={code}");
-            tokio::spawn(async move {
-                let response = reqwest::get(callback).await.expect("callback request");
-                assert!(response.status().is_success());
-            });
-            Ok(())
-        })
-        .await
+        self.connect_device_code(store, |_| Ok(()), None).await
     }
 
-    pub(crate) async fn connect_in_browser(
+    pub(crate) async fn connect_device_code(
         &self,
         store: Arc<SqliteStore>,
         open_url: impl FnOnce(&str) -> Result<(), PublicError>,
+        on_pairing: Option<DevicePairingNotifier>,
     ) -> Result<ConnectionStatus, PublicError> {
         if self.connection_status_with_store(store.as_ref()).state
             == ConnectionState::UnavailableInThisBuild
@@ -215,6 +248,7 @@ impl ChatGptAdapter {
         if self.connecting.swap(true, Ordering::SeqCst) {
             return Err(PublicError::SessionBusy);
         }
+        self.set_device_pairing(None);
         let cancel = Arc::new(CancellationToken::new());
         match self.connect_cancel.lock() {
             Ok(mut slot) if slot.is_none() => *slot = Some(cancel.clone()),
@@ -237,12 +271,13 @@ impl ChatGptAdapter {
             }
         };
         let result = self
-            .connect_in_browser_inner(Arc::clone(&store), open_url, &cancel)
+            .connect_device_code_inner(Arc::clone(&store), open_url, &cancel, on_pairing.as_ref())
             .await;
         drop(operation);
         let cleanup = self.clear_connect_cancel(&cancel);
-        // Clear the transient connecting lifecycle before sampling terminal status.
         self.connecting.store(false, Ordering::SeqCst);
+        self.set_device_pairing(None);
+        Self::notify_device_pairing(on_pairing.as_ref(), None);
         match (result, cleanup) {
             (Ok(()), Ok(())) => Ok(self.connection_status_with_store(store.as_ref())),
             (Err(error), _) => Err(error),
@@ -250,45 +285,32 @@ impl ChatGptAdapter {
         }
     }
 
-    async fn connect_in_browser_inner(
+    async fn connect_device_code_inner(
         &self,
         store: Arc<SqliteStore>,
         open_url: impl FnOnce(&str) -> Result<(), PublicError>,
         cancel: &Arc<CancellationToken>,
+        on_pairing: Option<&DevicePairingNotifier>,
     ) -> Result<(), PublicError> {
-        let (pkce_challenge, pkce_verifier) = PkceCodeChallenge::new_random_sha256();
-        let csrf = CsrfToken::new_random();
-        let (listener, redirect_uri) = tokio::select! {
-            _ = cancel.cancelled() => return Err(PublicError::Cancelled),
-            listener = bind_callback_listener() => listener?,
-        };
-        let auth_url =
-            build_authorization_url(&redirect_uri, pkce_challenge.as_str(), csrf.secret());
-
         if cancel.is_cancelled() {
             return Err(PublicError::Cancelled);
         }
-        open_url(&auth_url)?;
-
-        let callback = tokio::select! {
-            result = timeout(CONNECT_TIMEOUT, accept_callback(listener, csrf.secret())) => {
-                match result {
-                    Ok(inner) => inner,
-                    Err(_) => Err(PublicError::ProviderUnavailable),
-                }
-            }
-            _ = cancel.cancelled() => Err(PublicError::Cancelled),
+        let device = self.request_device_code(cancel).await?;
+        let open_target = device
+            .verification_uri_complete
+            .as_deref()
+            .unwrap_or(&device.verification_uri);
+        let pairing = DevicePairingResponse {
+            verification_uri: device.verification_uri.clone(),
+            user_code: device.user_code.clone(),
         };
-
-        let code = callback?;
-        let token = self
-            .exchange_token(
-                &redirect_uri,
-                pkce_verifier.secret(),
-                &code,
-                cancel.as_ref(),
-            )
-            .await?;
+        self.set_device_pairing(Some(pairing.clone()));
+        Self::notify_device_pairing(on_pairing, Some(pairing));
+        if cancel.is_cancelled() {
+            return Err(PublicError::Cancelled);
+        }
+        open_url(open_target)?;
+        let token = self.poll_device_code_token(&device, cancel).await?;
         match token {
             TokenBundle::Success(values) => {
                 self.persist_tokens(
@@ -302,6 +324,153 @@ impl ChatGptAdapter {
             TokenBundle::InvalidGrant => return Err(PublicError::AuthenticationRequired),
         }
         Ok(())
+    }
+
+    async fn request_device_code(
+        &self,
+        cancel: &CancellationToken,
+    ) -> Result<DeviceCodeResponse, PublicError> {
+        #[cfg(test)]
+        if let Some(transport) = self.test_transport.lock().expect("lock").clone() {
+            if cancel.is_cancelled() {
+                return Err(PublicError::Cancelled);
+            }
+            return transport.request_device_code(DEVICE_CODE_URL);
+        }
+
+        let body_with_referrer = format!(
+            "client_id={}&scope={}&referrer=tule",
+            urlencoding(CLIENT_ID),
+            urlencoding(SCOPES)
+        );
+        let body_without_referrer = format!(
+            "client_id={}&scope={}",
+            urlencoding(CLIENT_ID),
+            urlencoding(SCOPES)
+        );
+        let request_with = self
+            .client
+            .post(DEVICE_CODE_URL)
+            .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .header(ACCEPT, "application/json")
+            .body(body_with_referrer);
+        let response = tokio::select! {
+            _ = cancel.cancelled() => return Err(PublicError::Cancelled),
+            response = request_with.send() => response.map_err(|_| PublicError::ProviderUnavailable)?,
+        };
+        let response = if response.status().is_success() {
+            response
+        } else {
+            let retry = self
+                .client
+                .post(DEVICE_CODE_URL)
+                .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .header(ACCEPT, "application/json")
+                .body(body_without_referrer);
+            tokio::select! {
+                _ = cancel.cancelled() => return Err(PublicError::Cancelled),
+                response = retry.send() => response.map_err(|_| PublicError::ProviderUnavailable)?,
+            }
+        };
+        if !response.status().is_success() {
+            return Err(PublicError::ProviderUnavailable);
+        }
+        let bytes = tokio::select! {
+            _ = cancel.cancelled() => return Err(PublicError::Cancelled),
+            body = read_bounded_response_body(response, MAX_PROVIDER_BODY) => body?,
+        };
+        let device: DeviceCodeResponse =
+            serde_json::from_slice(&bytes).map_err(|_| PublicError::ProviderUnavailable)?;
+        if device.device_code.is_empty()
+            || device.user_code.is_empty()
+            || device.verification_uri.is_empty()
+        {
+            return Err(PublicError::ProviderUnavailable);
+        }
+        Ok(device)
+    }
+
+    async fn poll_device_code_token(
+        &self,
+        device: &DeviceCodeResponse,
+        cancel: &CancellationToken,
+    ) -> Result<TokenBundle, PublicError> {
+        let expires_ms = positive_seconds_to_ms(device.expires_in, DEVICE_CODE_DEFAULT_EXPIRES_MS);
+        let deadline =
+            unix_now_ms().map_err(|_| PublicError::ProviderUnavailable)? + expires_ms as i64;
+        let mut interval_ms =
+            positive_seconds_to_ms(device.interval, DEVICE_CODE_DEFAULT_INTERVAL_MS)
+                .max(DEVICE_CODE_MIN_INTERVAL_MS);
+
+        loop {
+            let now = unix_now_ms().map_err(|_| PublicError::ProviderUnavailable)?;
+            if now >= deadline {
+                break;
+            }
+            if cancel.is_cancelled() {
+                return Err(PublicError::Cancelled);
+            }
+            #[cfg(test)]
+            if let Some(transport) = self.test_transport.lock().expect("lock").clone() {
+                return transport.poll_device_code_token(TOKEN_URL, &device.device_code);
+            }
+
+            let body = format!(
+                "grant_type={}&client_id={}&device_code={}",
+                urlencoding(DEVICE_CODE_GRANT),
+                urlencoding(CLIENT_ID),
+                urlencoding(&device.device_code)
+            );
+            let request = self
+                .client
+                .post(TOKEN_URL)
+                .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .header(ACCEPT, "application/json")
+                .body(body);
+            let response = tokio::select! {
+                _ = cancel.cancelled() => return Err(PublicError::Cancelled),
+                response = request.send() => response.map_err(|_| PublicError::ProviderUnavailable)?,
+            };
+            if response.status().is_success() {
+                return tokio::select! {
+                    _ = cancel.cancelled() => Err(PublicError::Cancelled),
+                    result = parse_token_response(response, TokenPersistence::Initial) => result,
+                };
+            }
+            let error_body = tokio::select! {
+                _ = cancel.cancelled() => return Err(PublicError::Cancelled),
+                body = read_bounded_response_body(response, MAX_PROVIDER_BODY) => body?,
+            };
+            let error: Value = serde_json::from_slice(&error_body).unwrap_or(Value::Null);
+            let code = error
+                .get("error")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let now = unix_now_ms().map_err(|_| PublicError::ProviderUnavailable)?;
+            let remaining = (deadline - now).max(0) as u64;
+            match code {
+                "authorization_pending" => {
+                    sleep(Duration::from_millis(
+                        (interval_ms + OAUTH_POLLING_SAFETY_MARGIN_MS).min(remaining),
+                    ))
+                    .await;
+                }
+                "slow_down" => {
+                    interval_ms += DEVICE_CODE_SLOW_DOWN_INCREMENT_MS;
+                    sleep(Duration::from_millis(
+                        (interval_ms + OAUTH_POLLING_SAFETY_MARGIN_MS).min(remaining),
+                    ))
+                    .await;
+                }
+                "access_denied" | "authorization_denied" => {
+                    return Err(PublicError::AuthenticationRequired);
+                }
+                "expired_token" => return Err(PublicError::ProviderUnavailable),
+                "invalid_grant" => return Ok(TokenBundle::InvalidGrant),
+                _ => return Err(PublicError::ProviderUnavailable),
+            }
+        }
+        Err(PublicError::ProviderUnavailable)
     }
 
     pub(crate) fn cancel_connect(&self) -> Result<(), PublicError> {
@@ -383,7 +552,7 @@ impl ChatGptAdapter {
             .current_credential_generation(PROVIDER_PROFILE_ID)
             .map_err(|_| PublicError::AgentStorageUnavailable)?;
         let (mut access, mut account) = self.read_access_and_account()?;
-        let headers = match build_catalog_headers(&access, &account, etag.as_deref()) {
+        let headers = match build_catalog_headers(&access, etag.as_deref()) {
             Ok(headers) => headers,
             Err(error) => {
                 access.zeroize();
@@ -530,46 +699,6 @@ impl ChatGptAdapter {
         let body = read_bounded_response_body(response, MAX_CATALOG_BODY).await?;
         let body = String::from_utf8(body).map_err(|_| PublicError::ProviderUnavailable)?;
         Ok(ModelsFetchResult::Models { body, etag })
-    }
-
-    async fn exchange_token(
-        &self,
-        redirect_uri: &str,
-        verifier: &str,
-        code: &str,
-        cancel: &CancellationToken,
-    ) -> Result<TokenBundle, PublicError> {
-        #[cfg(test)]
-        if let Some(transport) = self.test_transport.lock().expect("lock").clone() {
-            let result = transport.exchange_token(TOKEN_URL, redirect_uri, verifier, code);
-            return if cancel.is_cancelled() {
-                Err(PublicError::Cancelled)
-            } else {
-                result
-            };
-        }
-
-        let request = self
-            .client
-            .post(TOKEN_URL)
-            .header("Content-Type", "application/x-www-form-urlencoded")
-            .header("Accept", "application/json")
-            .body(format!(
-                "grant_type=authorization_code&client_id={}&code={}&redirect_uri={}&code_verifier={}",
-                urlencoding(CLIENT_ID),
-                urlencoding(code),
-                urlencoding(redirect_uri),
-                urlencoding(verifier)
-            ))
-            .send();
-        let response = tokio::select! {
-            _ = cancel.cancelled() => return Err(PublicError::Cancelled),
-            response = request => response.map_err(|_| PublicError::ProviderUnavailable)?,
-        };
-        tokio::select! {
-            _ = cancel.cancelled() => Err(PublicError::Cancelled),
-            result = parse_token_response(response, TokenPersistence::Initial) => result,
-        }
     }
 
     async fn refresh_access_token_locked(
@@ -1136,7 +1265,7 @@ impl ChatGptAdapter {
     }
 }
 
-impl ProviderAdapter for ChatGptAdapter {
+impl ProviderAdapter for XaiSubscriptionAdapter {
     fn connection_status(&self) -> ConnectionStatus {
         self.connection_status_for_commit_marker(Ok(None))
     }
@@ -1156,7 +1285,7 @@ impl ProviderAdapter for ChatGptAdapter {
                 operation = self.profile_lock.lock() => operation,
             };
             let (mut access, mut account) = self.read_access_and_account()?;
-            let headers = match build_inference_headers(&access, &account, &request.session_id) {
+            let headers = match build_inference_headers(&access) {
                 Ok(headers) => headers,
                 Err(error) => {
                     access.zeroize();
@@ -1254,146 +1383,22 @@ async fn emit_mock_inference(
     }
 }
 
-fn build_inference_headers(
-    access: &str,
-    account: &str,
-    session_id: &str,
-) -> Result<HeaderMap, PublicError> {
-    let mut headers = HeaderMap::with_capacity(7);
+fn build_inference_headers(access: &str) -> Result<HeaderMap, PublicError> {
+    let mut headers = HeaderMap::with_capacity(4);
     let authorization = HeaderValue::from_str(&format!("Bearer {access}"))
         .map_err(|_| PublicError::AuthenticationRequired)?;
-    let account =
-        HeaderValue::from_str(account).map_err(|_| PublicError::AuthenticationRequired)?;
-    let session = HeaderValue::from_str(session_id).map_err(|_| PublicError::InvalidInput)?;
     headers.insert(AUTHORIZATION, authorization);
     headers.insert(ACCEPT, HeaderValue::from_static("text/event-stream"));
     headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-    headers.insert(
-        HeaderName::from_static("originator"),
-        HeaderValue::from_static("tule"),
-    );
     headers.insert(USER_AGENT, HeaderValue::from_static("tule-desktop/0.1.0"));
-    headers.insert(HeaderName::from_static("session_id"), session);
-    headers.insert(HeaderName::from_static("chatgpt-account-id"), account);
     Ok(headers)
 }
 
-async fn bind_callback_listener() -> Result<(TcpListener, String), PublicError> {
-    match TcpListener::bind(("127.0.0.1", PRIMARY_CALLBACK_PORT)).await {
-        Ok(listener) => Ok((
-            listener,
-            format!("http://localhost:{PRIMARY_CALLBACK_PORT}/auth/callback"),
-        )),
-        Err(_) => {
-            let listener = TcpListener::bind(("127.0.0.1", FALLBACK_CALLBACK_PORT))
-                .await
-                .map_err(|_| PublicError::ProviderUnavailable)?;
-            Ok((
-                listener,
-                format!("http://localhost:{FALLBACK_CALLBACK_PORT}/auth/callback"),
-            ))
-        }
-    }
-}
-
-fn build_authorization_url(redirect_uri: &str, challenge: &str, state: &str) -> String {
-    format!(
-        "{AUTH_URL}?response_type=code&client_id={}&redirect_uri={}&scope={}&code_challenge={}&code_challenge_method=S256&state={}&id_token_add_organizations=true&codex_cli_simplified_flow=true&originator=tule",
-        urlencoding(CLIENT_ID),
-        urlencoding(redirect_uri),
-        urlencoding(SCOPES),
-        urlencoding(challenge),
-        urlencoding(state)
-    )
-}
-
-async fn accept_callback(
-    listener: TcpListener,
-    expected_state: &str,
-) -> Result<String, PublicError> {
-    let (mut socket, _) = listener
-        .accept()
-        .await
-        .map_err(|_| PublicError::ProviderUnavailable)?;
-    let mut buf = vec![0_u8; MAX_CALLBACK_REQUEST + 1];
-    let mut read = 0_usize;
-    loop {
-        let n = socket
-            .read(&mut buf[read..])
-            .await
-            .map_err(|_| PublicError::ProviderUnavailable)?;
-        if n == 0 {
-            break;
-        }
-        read += n;
-        if read > MAX_CALLBACK_REQUEST {
-            let _ = socket
-                .write_all(b"HTTP/1.1 413 Payload Too Large\r\nContent-Length: 0\r\n\r\n")
-                .await;
-            return Err(PublicError::InvalidInput);
-        }
-        if buf[..read].windows(4).any(|w| w == b"\r\n\r\n") {
-            break;
-        }
-    }
-    let request = std::str::from_utf8(&buf[..read]).map_err(|_| PublicError::InvalidInput)?;
-    let line = request.lines().next().ok_or(PublicError::InvalidInput)?;
-    let mut request_line = line.split_whitespace();
-    let method = request_line.next().ok_or(PublicError::InvalidInput)?;
-    let target = request_line.next().ok_or(PublicError::InvalidInput)?;
-    let version = request_line.next().ok_or(PublicError::InvalidInput)?;
-    if request_line.next().is_some()
-        || method != "GET"
-        || !version.starts_with("HTTP/1.")
-        || target.contains('#')
-    {
-        return Err(PublicError::InvalidInput);
-    }
-    let (path, query) = target.split_once('?').unwrap_or((target, ""));
-    if path != "/auth/callback" {
-        return Err(PublicError::InvalidInput);
-    }
-    let params = parse_query(query)?;
-    let state = params.get("state").ok_or(PublicError::InvalidInput)?;
-    if state.len() > MAX_CALLBACK_VALUE || state != expected_state {
-        let _ = socket
-            .write_all(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n")
-            .await;
-        return Err(PublicError::InvalidInput);
-    }
-    if params.contains_key("error") {
-        let _ = socket
-            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 16\r\n\r\nSign-in declined")
-            .await;
-        return Err(PublicError::AuthenticationRequired);
-    }
-    let code = params.get("code").ok_or(PublicError::InvalidInput)?;
-    if code.is_empty() || code.len() > MAX_CALLBACK_VALUE {
-        return Err(PublicError::InvalidInput);
-    }
-    let _ = socket
-        .write_all(
-            format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{CALLBACK_SUCCESS_BODY}",
-                CALLBACK_SUCCESS_BODY.len(),
-            )
-            .as_bytes(),
-        )
-        .await;
-    Ok(code.clone())
-}
-
-fn parse_query(query: &str) -> Result<HashMap<String, String>, PublicError> {
-    let mut map = HashMap::new();
-    for pair in query.split('&').filter(|part| !part.is_empty()) {
-        let mut parts = pair.splitn(2, '=');
-        let key = parts.next().unwrap_or_default();
-        let value = parts.next().unwrap_or_default();
-        if map.insert(urldecoding(key)?, urldecoding(value)?).is_some() {
-            return Err(PublicError::InvalidInput);
-        }
-    }
-    Ok(map)
+fn positive_seconds_to_ms(value: Option<u64>, default_ms: u64) -> u64 {
+    value
+        .filter(|seconds| *seconds > 0)
+        .map(|seconds| seconds.saturating_mul(1000))
+        .unwrap_or(default_ms)
 }
 
 async fn parse_token_response(
@@ -1497,11 +1502,8 @@ fn extract_account_id(id_token: &str) -> Result<String, PublicError> {
     let value: Value =
         serde_json::from_slice(&decoded).map_err(|_| PublicError::ProviderUnavailable)?;
     value
-        .get("https://api.openai.com/auth")
-        .and_then(|auth| auth.get("chatgpt_account_id"))
+        .get("sub")
         .and_then(Value::as_str)
-        .or_else(|| value.get("chatgpt_account_id").and_then(Value::as_str))
-        .or_else(|| value.get("sub").and_then(Value::as_str))
         .map(str::to_owned)
         .ok_or(PublicError::ProviderUnavailable)
 }
@@ -1653,17 +1655,58 @@ fn parse_sse_event(event: &[u8], output: &mut Vec<ProviderEvent>) -> Result<(), 
         return Ok(());
     }
     if data == "[DONE]" {
-        // Framing marker only. `response.completed` is the sole success terminal.
+        // chat/completions terminal framing when finish_reason was absent on the last chunk.
+        output.push(ProviderEvent::Completed {
+            response_id: None,
+            input_tokens: None,
+            output_tokens: None,
+        });
         return Ok(());
     }
     let value: Value = serde_json::from_str(&data).map_err(|_| PublicError::ProviderUnavailable)?;
+    if contains_unsupported_provider_output(&value) {
+        return Err(PublicError::UnsupportedProviderOutput);
+    }
+    // OpenAI-compatible chat/completions streaming (`choices[].delta.content`).
+    if let Some(choices) = value.get("choices").and_then(Value::as_array) {
+        for choice in choices {
+            if choice
+                .get("delta")
+                .and_then(|delta| delta.get("tool_calls"))
+                .is_some()
+            {
+                return Err(PublicError::UnsupportedProviderOutput);
+            }
+            if let Some(content) = choice
+                .get("delta")
+                .and_then(|delta| delta.get("content"))
+                .and_then(Value::as_str)
+                && !content.is_empty()
+            {
+                output.push(ProviderEvent::Delta(content.to_owned()));
+            }
+            if choice
+                .get("finish_reason")
+                .and_then(Value::as_str)
+                .is_some_and(|reason| !reason.is_empty())
+            {
+                output.push(ProviderEvent::Completed {
+                    response_id: value.get("id").and_then(Value::as_str).map(str::to_owned),
+                    input_tokens: value
+                        .pointer("/usage/prompt_tokens")
+                        .and_then(Value::as_u64),
+                    output_tokens: value
+                        .pointer("/usage/completion_tokens")
+                        .and_then(Value::as_u64),
+                });
+            }
+        }
+        return Ok(());
+    }
     let kind = value
         .get("type")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    if contains_unsupported_provider_output(&value) {
-        return Err(PublicError::UnsupportedProviderOutput);
-    }
     match kind {
         "response.output_text.delta" => {
             let delta = value
@@ -1782,43 +1825,6 @@ fn urlencoding(value: &str) -> String {
     out
 }
 
-fn urldecoding(value: &str) -> Result<String, PublicError> {
-    let bytes = value.as_bytes();
-    let mut out = Vec::new();
-    let mut index = 0;
-    while index < bytes.len() {
-        match bytes[index] {
-            b'+' => {
-                out.push(b' ');
-                index += 1;
-            }
-            b'%' => {
-                if index + 2 >= bytes.len() {
-                    return Err(PublicError::InvalidInput);
-                }
-                let high = decode_hex(bytes[index + 1]).ok_or(PublicError::InvalidInput)?;
-                let low = decode_hex(bytes[index + 2]).ok_or(PublicError::InvalidInput)?;
-                out.push((high << 4) | low);
-                index += 3;
-            }
-            byte => {
-                out.push(byte);
-                index += 1;
-            }
-        }
-    }
-    String::from_utf8(out).map_err(|_| PublicError::InvalidInput)
-}
-
-const fn decode_hex(value: u8) -> Option<u8> {
-    match value {
-        b'0'..=b'9' => Some(value - b'0'),
-        b'a'..=b'f' => Some(value - b'a' + 10),
-        b'A'..=b'F' => Some(value - b'A' + 10),
-        _ => None,
-    }
-}
-
 #[derive(Debug, Clone)]
 enum ModelsFetchResult {
     NotModified { etag: Option<String> },
@@ -1826,24 +1832,13 @@ enum ModelsFetchResult {
     Status(u16),
 }
 
-fn build_catalog_headers(
-    access: &str,
-    account: &str,
-    etag: Option<&str>,
-) -> Result<HeaderMap, PublicError> {
-    let mut headers = HeaderMap::with_capacity(6);
+fn build_catalog_headers(access: &str, etag: Option<&str>) -> Result<HeaderMap, PublicError> {
+    let mut headers = HeaderMap::with_capacity(4);
     let authorization = HeaderValue::from_str(&format!("Bearer {access}"))
         .map_err(|_| PublicError::AuthenticationRequired)?;
-    let account =
-        HeaderValue::from_str(account).map_err(|_| PublicError::AuthenticationRequired)?;
     headers.insert(AUTHORIZATION, authorization);
     headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
-    headers.insert(
-        HeaderName::from_static("originator"),
-        HeaderValue::from_static("tule"),
-    );
     headers.insert(USER_AGENT, HeaderValue::from_static("tule-desktop/0.1.0"));
-    headers.insert(HeaderName::from_static("chatgpt-account-id"), account);
     if let Some(etag) = etag {
         let value = HeaderValue::from_str(etag).map_err(|_| PublicError::ProviderUnavailable)?;
         headers.insert(reqwest::header::IF_NONE_MATCH, value);
@@ -1854,19 +1849,25 @@ fn build_catalog_headers(
 fn parse_catalog_body(body: &str) -> Result<Vec<tule_core::ModelCatalogEntry>, PublicError> {
     let value: Value = serde_json::from_str(body).map_err(|_| PublicError::ProviderUnavailable)?;
     let models = value
-        .get("models")
+        .get("data")
+        .or_else(|| value.get("models"))
         .and_then(Value::as_array)
         .ok_or(PublicError::ProviderUnavailable)?;
     let mut candidates = Vec::with_capacity(models.len());
-    for item in models {
+    for (index, item) in models.iter().enumerate() {
         let Some(object) = item.as_object() else {
             continue;
         };
-        let Some(model_id) = object.get("slug").and_then(Value::as_str) else {
+        let Some(model_id) = object
+            .get("id")
+            .or_else(|| object.get("slug"))
+            .and_then(Value::as_str)
+        else {
             continue;
         };
         let display_name = object
             .get("display_name")
+            .or_else(|| object.get("name"))
             .and_then(Value::as_str)
             .unwrap_or(model_id);
         let description = object
@@ -1890,7 +1891,7 @@ fn parse_catalog_body(body: &str) -> Result<Vec<tule_core::ModelCatalogEntry>, P
         let sort_order = object
             .get("priority")
             .and_then(Value::as_i64)
-            .unwrap_or(10_000) as i32;
+            .unwrap_or(index as i64) as i32;
         let is_provider_default = object
             .get("is_default")
             .and_then(Value::as_bool)
@@ -1903,8 +1904,6 @@ fn parse_catalog_body(body: &str) -> Result<Vec<tule_core::ModelCatalogEntry>, P
             .get("use_responses_lite")
             .and_then(Value::as_bool)
             .unwrap_or(false);
-        // supported_in_api is intentionally ignored for exclusion.
-        let _ = object.get("supported_in_api");
         candidates.push(CatalogCandidate {
             model_id: model_id.to_owned(),
             display_name: display_name.to_owned(),
@@ -1974,13 +1973,18 @@ impl From<MockModelsResponse> for ModelsFetchResult {
 
 #[cfg(test)]
 pub(crate) trait TestTransport: Send + Sync {
-    fn exchange_token(
+    fn request_device_code(&self, device_url: &str) -> Result<DeviceCodeResponse, PublicError> {
+        let _ = device_url;
+        Err(PublicError::ProviderUnavailable)
+    }
+    fn poll_device_code_token(
         &self,
         token_url: &str,
-        redirect_uri: &str,
-        verifier: &str,
-        code: &str,
-    ) -> Result<TokenBundle, PublicError>;
+        device_code: &str,
+    ) -> Result<TokenBundle, PublicError> {
+        let _ = (token_url, device_code);
+        Err(PublicError::ProviderUnavailable)
+    }
     fn refresh_token(&self, token_url: &str, refresh: &str) -> Result<TokenBundle, PublicError>;
     fn inference(
         &self,
@@ -2003,35 +2007,30 @@ pub(crate) trait TestTransport: Send + Sync {
 mod tests {
     use super::*;
     use crate::credentials::FakeCredentialStore;
+    use reqwest::header::HeaderMap;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
 
     #[test]
     fn production_contract_is_pinned() {
-        assert_eq!(PROVIDER_ID, "openai-chatgpt-compat");
-        assert_eq!(MODEL, "gpt-5.5");
-        assert_eq!(CLIENT_ID, "app_EMoamEEZ73f0CkXaXp7hrann");
-        assert_eq!(AUTH_URL, "https://auth.openai.com/oauth/authorize");
-        assert_eq!(TOKEN_URL, "https://auth.openai.com/oauth/token");
-        assert_eq!(
-            INFERENCE_URL,
-            "https://chatgpt.com/backend-api/codex/responses"
-        );
+        assert_eq!(PROVIDER_ID, "xai-subscription-oauth");
+        assert_eq!(MODEL, "grok-3");
+        assert_eq!(CLIENT_ID, "b1a00492-073a-47ea-816f-4c329264a828");
+        assert_eq!(DEVICE_CODE_URL, "https://auth.x.ai/oauth2/device/code");
+        assert_eq!(TOKEN_URL, "https://auth.x.ai/oauth2/token");
+        assert_eq!(INFERENCE_URL, "https://api.x.ai/v1/chat/completions");
         assert_eq!(CATALOG_COMPATIBILITY_REVISION, "1.0.0");
+        assert_eq!(MODELS_URL, "https://api.x.ai/v1/models");
         assert_eq!(
-            MODELS_URL,
-            "https://chatgpt.com/backend-api/codex/models?client_version=1.0.0"
+            SCOPES,
+            "openid profile email offline_access grok-cli:access api:access"
         );
-        assert_eq!(SCOPES, "openid profile email offline_access");
-        let url =
-            build_authorization_url("http://localhost:1455/auth/callback", "challenge", "state");
-        assert!(url.contains("originator=tule"));
-        assert!(url.contains("codex_cli_simplified_flow=true"));
-        assert!(url.contains("id_token_add_organizations=true"));
-        assert!(!url.contains("api.connectors"));
     }
 
     #[test]
     fn tool_events_are_rejected() {
         for event in [
+            r#"data: {"choices":[{"delta":{"tool_calls":[{"id":"call"}]}}]}"#,
             r#"data: {"type":"response.function_call"}"#,
             r#"data: {"type":"response.output_item.added","item":{"type":"function_call"}}"#,
         ] {
@@ -2044,10 +2043,50 @@ mod tests {
     }
 
     #[test]
+    fn chat_completions_maps_delta_finish_reason_and_done() {
+        let mut output = Vec::new();
+        parse_sse_event(
+            br#"data: {"id":"chatcmpl-1","choices":[{"delta":{"content":"hello"},"finish_reason":null}]}"#,
+            &mut output,
+        )
+        .unwrap();
+        assert!(matches!(
+            output.as_slice(),
+            [ProviderEvent::Delta(text)] if text == "hello"
+        ));
+
+        output.clear();
+        parse_sse_event(
+            br#"data: {"id":"chatcmpl-1","choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":1}}"#,
+            &mut output,
+        )
+        .unwrap();
+        assert!(matches!(
+            output.as_slice(),
+            [ProviderEvent::Completed {
+                response_id: Some(id),
+                input_tokens: Some(3),
+                output_tokens: Some(1),
+            }] if id == "chatcmpl-1"
+        ));
+
+        output.clear();
+        parse_sse_event(b"data: [DONE]", &mut output).unwrap();
+        assert!(matches!(
+            output.as_slice(),
+            [ProviderEvent::Completed {
+                response_id: None,
+                input_tokens: None,
+                output_tokens: None,
+            }]
+        ));
+    }
+
+    #[test]
     fn terminal_can_arrive_before_delta() {
         let mut output = Vec::new();
         parse_sse_event(
-            br#"data: {"type":"response.completed","response":{"id":"response-1"}}"#,
+            br#"data: {"id":"chatcmpl-1","choices":[{"delta":{},"finish_reason":"stop"}]}"#,
             &mut output,
         )
         .unwrap();
@@ -2055,19 +2094,10 @@ mod tests {
             output.as_slice(),
             [ProviderEvent::Completed { .. }]
         ));
-
-        output.clear();
-        parse_sse_event(
-            br#"data: {"type":"response.output_text.done"}"#,
-            &mut output,
-        )
-        .unwrap();
-        parse_sse_event(b"data: [DONE]", &mut output).unwrap();
-        assert!(output.is_empty());
     }
 
     #[tokio::test]
-    async fn sse_requires_exact_response_terminal_and_stops_after_completion() {
+    async fn chat_completions_sse_stops_after_completion() {
         let events = Arc::new(Mutex::new(Vec::new()));
         let captured = Arc::clone(&events);
         let mut sink: ProviderEventSink = Box::new(move |event| {
@@ -2075,7 +2105,7 @@ mod tests {
             Ok(())
         });
         parse_sse_buffer(
-            b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\"}\n\ndata: {\"type\":\"response.output_text.done\"}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"r1\"}}\n\ndata: [DONE]\n\n",
+            b"data: {\"id\":\"chatcmpl-1\",\"choices\":[{\"delta\":{\"content\":\"hello\"},\"finish_reason\":null}]}\n\ndata: {\"id\":\"chatcmpl-1\",\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
             CancellationToken::new(),
             &mut sink,
         )
@@ -2084,35 +2114,81 @@ mod tests {
         assert!(matches!(
             events.lock().unwrap().as_slice(),
             [ProviderEvent::Delta(text), ProviderEvent::Completed { response_id: Some(id), .. }]
-                if text == "hello" && id == "r1"
+                if text == "hello" && id == "chatcmpl-1"
         ));
 
         let mut discard: ProviderEventSink = Box::new(|_| Ok(()));
         let incomplete = parse_sse_buffer(
-            b"data: {\"type\":\"response.output_text.done\"}\n\ndata: [DONE]\n\n",
+            b"data: {\"id\":\"chatcmpl-1\",\"choices\":[{\"delta\":{\"content\":\"partial\"},\"finish_reason\":null}]}\n\n",
             CancellationToken::new(),
             &mut discard,
         )
         .await;
         assert_eq!(incomplete, Err(PublicError::ProviderUnavailable));
 
-        let duplicate_events = Arc::new(Mutex::new(Vec::new()));
-        let duplicate_events_cb = Arc::clone(&duplicate_events);
-        let mut capture_duplicate: ProviderEventSink = Box::new(move |event| {
-            duplicate_events_cb.lock().unwrap().push(event);
+        let done_only = Arc::new(Mutex::new(Vec::new()));
+        let done_only_cb = Arc::clone(&done_only);
+        let mut capture_done: ProviderEventSink = Box::new(move |event| {
+            done_only_cb.lock().unwrap().push(event);
             Ok(())
         });
         parse_sse_buffer(
-            b"data: {\"type\":\"response.completed\",\"response\":{}}\n\ndata: {\"type\":\"response.completed\",\"response\":{}}\n\n",
+            b"data: [DONE]\n\n",
             CancellationToken::new(),
-            &mut capture_duplicate,
+            &mut capture_done,
         )
         .await
         .unwrap();
         assert!(matches!(
-            duplicate_events.lock().unwrap().as_slice(),
+            done_only.lock().unwrap().as_slice(),
             [ProviderEvent::Completed { .. }]
         ));
+    }
+
+    #[test]
+    fn supersede_legacy_chatgpt_credentials_clears_retired_handle() {
+        let fake = Arc::new(FakeCredentialStore::default());
+        fake.replace(
+            LEGACY_CHATGPT_CREDENTIAL_HANDLE,
+            CredentialKind::AccessToken,
+            b"legacy-access",
+        )
+        .unwrap();
+        fake.replace(
+            LEGACY_CHATGPT_CREDENTIAL_HANDLE,
+            CredentialKind::RefreshToken,
+            b"legacy-refresh",
+        )
+        .unwrap();
+        fake.replace(
+            CREDENTIAL_HANDLE,
+            CredentialKind::AccessToken,
+            b"xai-access",
+        )
+        .unwrap();
+
+        let adapter = XaiSubscriptionAdapter::new(fake.clone());
+        adapter.supersede_legacy_chatgpt_credentials();
+
+        assert!(
+            fake.peek(
+                LEGACY_CHATGPT_CREDENTIAL_HANDLE,
+                CredentialKind::AccessToken
+            )
+            .is_none()
+        );
+        assert!(
+            fake.peek(
+                LEGACY_CHATGPT_CREDENTIAL_HANDLE,
+                CredentialKind::RefreshToken
+            )
+            .is_none()
+        );
+        assert_eq!(
+            fake.peek(CREDENTIAL_HANDLE, CredentialKind::AccessToken)
+                .as_deref(),
+            Some(b"xai-access".as_slice())
+        );
     }
 
     #[test]
@@ -2120,7 +2196,7 @@ mod tests {
         let fake = Arc::new(FakeCredentialStore::default());
         let dir = tempfile_dir();
         let store = SqliteStore::open(dir.join("tule.sqlite3")).unwrap();
-        let adapter = ChatGptAdapter::new(fake.clone());
+        let adapter = XaiSubscriptionAdapter::new(fake.clone());
         assert_eq!(
             adapter.connection_status_with_store(&store).state,
             ConnectionState::Disconnected
@@ -2132,7 +2208,7 @@ mod tests {
             adapter.connection_status_with_store(&store).state,
             ConnectionState::ReconnectRequired
         );
-        let restarted = ChatGptAdapter::new(fake.clone());
+        let restarted = XaiSubscriptionAdapter::new(fake.clone());
         assert_eq!(
             restarted.connection_status_with_store(&store).state,
             ConnectionState::ReconnectRequired
@@ -2159,7 +2235,7 @@ mod tests {
         );
 
         mark_profile_connected(&store, Some(i64::MAX / 2));
-        let committed_restart = ChatGptAdapter::new(fake);
+        let committed_restart = XaiSubscriptionAdapter::new(fake);
         assert_eq!(
             committed_restart.connection_status_with_store(&store).state,
             ConnectionState::Connected
@@ -2168,7 +2244,7 @@ mod tests {
 
     #[test]
     fn cancel_connect_rejects_noop_and_duplicate_requests() {
-        let adapter = ChatGptAdapter::new(Arc::new(FakeCredentialStore::default()));
+        let adapter = XaiSubscriptionAdapter::new(Arc::new(FakeCredentialStore::default()));
         assert_eq!(adapter.cancel_connect(), Err(PublicError::InvalidInput));
 
         let cancel = Arc::new(CancellationToken::new());
@@ -2182,13 +2258,17 @@ mod tests {
     async fn successful_browser_connect_returns_connected_after_clearing_connecting() {
         struct SuccessExchange;
         impl TestTransport for SuccessExchange {
-            fn exchange_token(
-                &self,
-                _: &str,
-                _: &str,
-                _: &str,
-                _: &str,
-            ) -> Result<TokenBundle, PublicError> {
+            fn request_device_code(&self, _: &str) -> Result<DeviceCodeResponse, PublicError> {
+                Ok(DeviceCodeResponse {
+                    device_code: "device".into(),
+                    user_code: "ABCD".into(),
+                    verification_uri: "https://auth.x.ai/device".into(),
+                    verification_uri_complete: None,
+                    expires_in: Some(300),
+                    interval: Some(5),
+                })
+            }
+            fn poll_device_code_token(&self, _: &str, _: &str) -> Result<TokenBundle, PublicError> {
                 Ok(TokenBundle::Success(token_values(
                     "access", "refresh", "account", false,
                 )))
@@ -2207,7 +2287,7 @@ mod tests {
         }
 
         let fake = Arc::new(FakeCredentialStore::default());
-        let adapter = ChatGptAdapter::new(fake.clone());
+        let adapter = XaiSubscriptionAdapter::new(fake.clone());
         adapter.set_test_transport(Arc::new(SuccessExchange));
         let dir = unique_connect_tempfile_dir("success");
         let store = Arc::new(SqliteStore::open(dir.path().join("tule.sqlite3")).unwrap());
@@ -2227,19 +2307,62 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn active_browser_connect_cancellation_returns_cancelled_without_credentials() {
+        struct DeviceCodeOnly;
+        impl TestTransport for DeviceCodeOnly {
+            fn request_device_code(&self, _: &str) -> Result<DeviceCodeResponse, PublicError> {
+                Ok(DeviceCodeResponse {
+                    device_code: "device".into(),
+                    user_code: "ABCD".into(),
+                    verification_uri: "https://auth.x.ai/device".into(),
+                    verification_uri_complete: None,
+                    expires_in: Some(300),
+                    interval: Some(5),
+                })
+            }
+            fn refresh_token(&self, _: &str, _: &str) -> Result<TokenBundle, PublicError> {
+                unreachable!("refresh should not run during cancelled connect")
+            }
+            fn inference(
+                &self,
+                _: &str,
+                _: &HeaderMap,
+                _: &str,
+            ) -> Result<MockInference, PublicError> {
+                unreachable!("inference should not run during cancelled connect")
+            }
+        }
+
         let _guard = CONNECT_TEST_LOCK.lock().await;
         let fake = Arc::new(FakeCredentialStore::default());
-        let adapter = Arc::new(ChatGptAdapter::new(fake.clone()));
+        let adapter = Arc::new(XaiSubscriptionAdapter::new(fake.clone()));
+        adapter.set_test_transport(Arc::new(DeviceCodeOnly));
         let dir = unique_connect_tempfile_dir("cancel");
         let store = Arc::new(SqliteStore::open(dir.path().join("tule.sqlite3")).unwrap());
-        let cancel_adapter = Arc::clone(&adapter);
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
 
-        let result = adapter
-            .connect_in_browser(store, move |_url| cancel_adapter.cancel_connect())
-            .await;
-        assert_eq!(result, Err(PublicError::Cancelled));
+        let connect_adapter = Arc::clone(&adapter);
+        let connect_store = Arc::clone(&store);
+        let connect = tokio::spawn(async move {
+            connect_adapter
+                .connect_device_code(
+                    connect_store,
+                    move |_url| {
+                        entered_tx.send(()).unwrap();
+                        release_rx.recv().unwrap();
+                        Ok(())
+                    },
+                    None,
+                )
+                .await
+        });
+
+        entered_rx.recv().expect("connect entered open_url");
+        assert_eq!(adapter.cancel_connect(), Ok(()));
+        release_tx.send(()).expect("release open_url");
+        assert_eq!(connect.await.expect("join"), Err(PublicError::Cancelled));
         assert!(!adapter.connecting.load(Ordering::SeqCst));
         assert!(adapter.connect_cancel.lock().unwrap().is_none());
         assert_eq!(
@@ -2252,20 +2375,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cancellation_during_token_exchange_does_not_persist_credentials() {
-        struct CancelExchange(CancellationToken);
-        impl TestTransport for CancelExchange {
-            fn exchange_token(
-                &self,
-                _: &str,
-                _: &str,
-                _: &str,
-                _: &str,
-            ) -> Result<TokenBundle, PublicError> {
+    async fn cancellation_during_token_poll_does_not_persist_credentials() {
+        struct CancelPoll(CancellationToken);
+        impl TestTransport for CancelPoll {
+            fn request_device_code(&self, _: &str) -> Result<DeviceCodeResponse, PublicError> {
+                Ok(DeviceCodeResponse {
+                    device_code: "device".into(),
+                    user_code: "ABCD".into(),
+                    verification_uri: "https://auth.x.ai/device".into(),
+                    verification_uri_complete: None,
+                    expires_in: Some(300),
+                    interval: Some(5),
+                })
+            }
+            fn poll_device_code_token(&self, _: &str, _: &str) -> Result<TokenBundle, PublicError> {
                 self.0.cancel();
-                Ok(TokenBundle::Success(token_values(
-                    "access", "refresh", "account", false,
-                )))
+                Err(PublicError::Cancelled)
             }
             fn refresh_token(&self, _: &str, _: &str) -> Result<TokenBundle, PublicError> {
                 unreachable!()
@@ -2281,13 +2406,13 @@ mod tests {
         }
 
         let fake = Arc::new(FakeCredentialStore::default());
-        let adapter = ChatGptAdapter::new(fake.clone());
+        let adapter = XaiSubscriptionAdapter::new(fake.clone());
         let cancel = CancellationToken::new();
-        adapter.set_test_transport(Arc::new(CancelExchange(cancel.clone())));
+        adapter.set_test_transport(Arc::new(CancelPoll(cancel.clone())));
+        let dir = unique_connect_tempfile_dir("cancel-poll");
+        let store = Arc::new(SqliteStore::open(dir.path().join("tule.sqlite3")).unwrap());
         assert!(matches!(
-            adapter
-                .exchange_token("redirect", "verifier", "code", &cancel)
-                .await,
+            adapter.connect_device_code(store, |_| Ok(()), None).await,
             Err(PublicError::Cancelled)
         ));
         for kind in ALL_CREDENTIAL_KINDS {
@@ -2337,7 +2462,7 @@ mod tests {
             cancel: cancel.as_ref().clone(),
             writes: std::sync::atomic::AtomicUsize::new(0),
         });
-        let adapter = ChatGptAdapter::new(credentials.clone());
+        let adapter = XaiSubscriptionAdapter::new(credentials.clone());
         *adapter.connect_cancel.lock().unwrap() = Some(cancel.clone());
         let dir = tempfile_dir();
         let store = SqliteStore::open(dir.join("tule.sqlite3")).unwrap();
@@ -2360,7 +2485,7 @@ mod tests {
         for failed_operation in 4..=6 {
             let fake = Arc::new(FakeCredentialStore::default());
             fake.fail_on_operation(failed_operation);
-            let adapter = ChatGptAdapter::new(fake.clone());
+            let adapter = XaiSubscriptionAdapter::new(fake.clone());
             let dir = tempfile_dir();
             let store = SqliteStore::open(dir.join("tule.sqlite3")).unwrap();
             let result = adapter.persist_tokens(
@@ -2383,7 +2508,7 @@ mod tests {
     #[test]
     fn metadata_failure_restores_initial_credential_state() {
         let fake = Arc::new(FakeCredentialStore::default());
-        let adapter = ChatGptAdapter::new(fake.clone());
+        let adapter = XaiSubscriptionAdapter::new(fake.clone());
         let dir = tempfile_dir();
         let store = SqliteStore::open(dir.join("tule.sqlite3")).unwrap();
         store
@@ -2419,7 +2544,7 @@ mod tests {
         mark_profile_connected(&store, Some(0));
         fake.reset_operations();
         fake.fail_on_operations([5, 6]);
-        let adapter = ChatGptAdapter::new(fake.clone());
+        let adapter = XaiSubscriptionAdapter::new(fake.clone());
 
         assert_eq!(
             adapter.persist_tokens(
@@ -2439,7 +2564,7 @@ mod tests {
             None
         );
 
-        let restarted = ChatGptAdapter::new(fake);
+        let restarted = XaiSubscriptionAdapter::new(fake);
         assert_eq!(
             restarted.connection_status_with_store(&store).state,
             ConnectionState::ReconnectRequired
@@ -2449,7 +2574,7 @@ mod tests {
     #[test]
     fn initial_connection_requires_refresh_but_rotation_may_preserve_it() {
         let fake = Arc::new(FakeCredentialStore::default());
-        let adapter = ChatGptAdapter::new(fake.clone());
+        let adapter = XaiSubscriptionAdapter::new(fake.clone());
         let dir = tempfile_dir();
         let store = SqliteStore::open(dir.join("tule.sqlite3")).unwrap();
         assert_eq!(
@@ -2492,7 +2617,7 @@ mod tests {
             seed_connected(&fake);
             fake.reset_operations();
             fake.fail_on_operation(failed_operation);
-            let adapter = ChatGptAdapter::new(fake.clone());
+            let adapter = XaiSubscriptionAdapter::new(fake.clone());
             let dir = tempfile_dir();
             let store = SqliteStore::open(dir.join("tule.sqlite3")).unwrap();
             mark_profile_connected(&store, Some(i64::MAX / 2));
@@ -2523,7 +2648,7 @@ mod tests {
         seed_connected(&fake);
         fake.reset_operations();
         fake.fail_on_operations([5, 6]);
-        let adapter = ChatGptAdapter::new(fake);
+        let adapter = XaiSubscriptionAdapter::new(fake);
         let dir = tempfile_dir();
         let store = SqliteStore::open(dir.join("tule.sqlite3")).unwrap();
         mark_profile_connected(&store, Some(i64::MAX / 2));
@@ -2538,91 +2663,11 @@ mod tests {
     }
 
     #[test]
-    fn authorization_url_uses_exact_bound_redirect() {
-        let primary = build_authorization_url("http://localhost:1455/auth/callback", "ch", "st");
-        assert!(primary.contains("redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback"));
-        let fallback = build_authorization_url("http://localhost:1457/auth/callback", "ch", "st");
-        assert!(fallback.contains("redirect_uri=http%3A%2F%2Flocalhost%3A1457%2Fauth%2Fcallback"));
-    }
-
-    #[test]
-    fn oversized_callback_values_are_rejected() {
-        let huge = "x".repeat(MAX_CALLBACK_VALUE + 1);
-        let query = format!("state={huge}&code=ok");
-        let params = parse_query(&query).unwrap();
-        assert!(params.get("state").unwrap().len() > MAX_CALLBACK_VALUE);
-    }
-
-    #[test]
-    fn parse_query_decodes_callback_pairs() {
-        let params = parse_query("code=a%2Bb&state=s+t&error=access_denied").unwrap();
-        assert_eq!(params.get("code").unwrap(), "a+b");
-        assert_eq!(params.get("state").unwrap(), "s t");
-        assert_eq!(params.get("error").unwrap(), "access_denied");
-        assert_eq!(
-            parse_query("state=one&state=two"),
-            Err(PublicError::InvalidInput)
-        );
-        assert_eq!(
-            parse_query("state=%💩&code=x"),
-            Err(PublicError::InvalidInput)
-        );
-        assert_eq!(
-            parse_query("state=%FF&code=x"),
-            Err(PublicError::InvalidInput)
-        );
-    }
-
-    #[tokio::test]
-    async fn successful_callback_response_returns_complete_closed_copy() {
-        assert_eq!(
-            CALLBACK_SUCCESS_BODY,
-            "You can return to TULE. This window may be closed."
-        );
-        assert_ne!(
-            CALLBACK_SUCCESS_BODY,
-            "You can return to TULE. This window may be close"
-        );
-        let response = callback_http_response(
-            "GET /auth/callback?state=expected&code=ok HTTP/1.1\r\nHost: localhost\r\n\r\n",
-            "expected",
-        )
-        .await;
-        let body = response.split("\r\n\r\n").nth(1).expect("response body");
-        assert!(response.contains(&format!("Content-Length: {}\r\n", body.len())));
-        assert_eq!(body, CALLBACK_SUCCESS_BODY);
-        assert_eq!(body, "You can return to TULE. This window may be closed.");
-    }
-
-    #[tokio::test]
-    async fn callback_requires_exact_method_path_and_state_before_result() {
-        assert_eq!(
-            callback_result(
-                "GET /auth/callback?state=expected&code=ok HTTP/1.1\r\nHost: localhost\r\n\r\n",
-                "expected",
-            )
-            .await,
-            Ok("ok".to_owned())
-        );
-        for request in [
-            "POST /auth/callback?state=expected&code=ok HTTP/1.1\r\nHost: localhost\r\n\r\n",
-            "GET /wrong?state=expected&code=ok HTTP/1.1\r\nHost: localhost\r\n\r\n",
-            "GET /auth/callback?state=wrong&code=ok HTTP/1.1\r\nHost: localhost\r\n\r\n",
-            "GET /auth/callback?error=access_denied HTTP/1.1\r\nHost: localhost\r\n\r\n",
-        ] {
-            assert_eq!(
-                callback_result(request, "expected").await,
-                Err(PublicError::InvalidInput)
-            );
-        }
-        assert_eq!(
-            callback_result(
-                "GET /auth/callback?state=expected&error=access_denied HTTP/1.1\r\nHost: localhost\r\n\r\n",
-                "expected",
-            )
-            .await,
-            Err(PublicError::AuthenticationRequired)
-        );
+    fn endpoint_constants_reject_drift_targets() {
+        assert!(!DEVICE_CODE_URL.contains("api.x.ai/v1"));
+        assert_eq!(TOKEN_URL, "https://auth.x.ai/oauth2/token");
+        assert_eq!(INFERENCE_URL, "https://api.x.ai/v1/chat/completions");
+        assert!(!SCOPES.contains("api.connectors"));
     }
 
     #[tokio::test]
@@ -2636,7 +2681,7 @@ mod tests {
 
     #[tokio::test]
     async fn mock_inference_maps_status_and_tool_and_terminal_before_delta() {
-        let adapter = ChatGptAdapter::new(Arc::new(FakeCredentialStore::default()));
+        let adapter = XaiSubscriptionAdapter::new(Arc::new(FakeCredentialStore::default()));
         adapter
             .credentials
             .replace(CREDENTIAL_HANDLE, CredentialKind::RefreshToken, b"r")
@@ -2652,15 +2697,6 @@ mod tests {
 
         struct StatusTransport(u16);
         impl TestTransport for StatusTransport {
-            fn exchange_token(
-                &self,
-                _: &str,
-                _: &str,
-                _: &str,
-                _: &str,
-            ) -> Result<TokenBundle, PublicError> {
-                unreachable!()
-            }
             fn refresh_token(&self, _: &str, _: &str) -> Result<TokenBundle, PublicError> {
                 unreachable!()
             }
@@ -2703,20 +2739,6 @@ mod tests {
 
         struct SseTransport(String);
         impl TestTransport for SseTransport {
-            fn exchange_token(
-                &self,
-                token_url: &str,
-                redirect_uri: &str,
-                _: &str,
-                _: &str,
-            ) -> Result<TokenBundle, PublicError> {
-                assert_eq!(token_url, TOKEN_URL);
-                assert!(
-                    redirect_uri == "http://localhost:1455/auth/callback"
-                        || redirect_uri == "http://localhost:1457/auth/callback"
-                );
-                Err(PublicError::ProviderUnavailable)
-            }
             fn refresh_token(&self, token_url: &str, _: &str) -> Result<TokenBundle, PublicError> {
                 assert_eq!(token_url, TOKEN_URL);
                 Err(PublicError::ProviderUnavailable)
@@ -2728,14 +2750,9 @@ mod tests {
                 body: &str,
             ) -> Result<MockInference, PublicError> {
                 assert_eq!(url, INFERENCE_URL);
-                assert_eq!(headers.len(), 7);
+                assert_eq!(headers.len(), 4);
                 assert_eq!(headers.get(AUTHORIZATION).unwrap(), "Bearer a");
-                assert_eq!(headers.get(ACCEPT).unwrap(), "text/event-stream");
-                assert_eq!(headers.get(CONTENT_TYPE).unwrap(), "application/json");
-                assert_eq!(headers.get("originator").unwrap(), "tule");
                 assert_eq!(headers.get(USER_AGENT).unwrap(), "tule-desktop/0.1.0");
-                assert_eq!(headers.get("session_id").unwrap(), "s");
-                assert_eq!(headers.get("ChatGPT-Account-Id").unwrap(), "acct");
                 assert!(!body.is_empty());
                 Ok(MockInference::Sse(self.0.clone()))
             }
@@ -2748,7 +2765,7 @@ mod tests {
             .stream(
                 ProviderRequest {
                     session_id: "s".into(),
-                    request_json: "{\"model\":\"gpt-5.5\"}".into(),
+                    request_json: "{\"model\":\"grok-3\"}".into(),
                 },
                 CancellationToken::new(),
                 Box::new(|_| Ok(())),
@@ -2807,18 +2824,9 @@ mod tests {
             .unwrap();
         fake.replace(CREDENTIAL_HANDLE, CredentialKind::AccountId, b"acct")
             .unwrap();
-        let adapter = ChatGptAdapter::new(fake);
+        let adapter = XaiSubscriptionAdapter::new(fake);
         struct InvalidGrant;
         impl TestTransport for InvalidGrant {
-            fn exchange_token(
-                &self,
-                _: &str,
-                _: &str,
-                _: &str,
-                _: &str,
-            ) -> Result<TokenBundle, PublicError> {
-                unreachable!()
-            }
             fn refresh_token(
                 &self,
                 token_url: &str,
@@ -2855,19 +2863,10 @@ mod tests {
 
         let fake = Arc::new(FakeCredentialStore::default());
         seed_connected(&fake);
-        let adapter = ChatGptAdapter::new(fake);
+        let adapter = XaiSubscriptionAdapter::new(fake);
         let calls = Arc::new(AtomicUsize::new(0));
         struct RefreshOnce(Arc<AtomicUsize>);
         impl TestTransport for RefreshOnce {
-            fn exchange_token(
-                &self,
-                _: &str,
-                _: &str,
-                _: &str,
-                _: &str,
-            ) -> Result<TokenBundle, PublicError> {
-                unreachable!()
-            }
             fn refresh_token(&self, url: &str, refresh: &str) -> Result<TokenBundle, PublicError> {
                 assert_eq!(url, TOKEN_URL);
                 assert_eq!(refresh, "refresh");
@@ -2912,19 +2911,10 @@ mod tests {
     async fn pre_stream_cancellation_interrupts_refresh_without_rotating_credentials() {
         let fake = Arc::new(FakeCredentialStore::default());
         seed_connected(&fake);
-        let adapter = ChatGptAdapter::new(fake.clone());
+        let adapter = XaiSubscriptionAdapter::new(fake.clone());
         let cancel = CancellationToken::new();
         struct CancelRefresh(CancellationToken);
         impl TestTransport for CancelRefresh {
-            fn exchange_token(
-                &self,
-                _: &str,
-                _: &str,
-                _: &str,
-                _: &str,
-            ) -> Result<TokenBundle, PublicError> {
-                unreachable!()
-            }
             fn refresh_token(&self, _: &str, _: &str) -> Result<TokenBundle, PublicError> {
                 self.0.cancel();
                 Ok(TokenBundle::Success(token_values(
@@ -2982,18 +2972,9 @@ mod tests {
             .unwrap();
         fake.replace(CREDENTIAL_HANDLE, CredentialKind::AccountId, b"acct")
             .unwrap();
-        let adapter = ChatGptAdapter::new(fake);
+        let adapter = XaiSubscriptionAdapter::new(fake);
         struct ManyEvents;
         impl TestTransport for ManyEvents {
-            fn exchange_token(
-                &self,
-                _: &str,
-                _: &str,
-                _: &str,
-                _: &str,
-            ) -> Result<TokenBundle, PublicError> {
-                unreachable!()
-            }
             fn refresh_token(&self, _: &str, _: &str) -> Result<TokenBundle, PublicError> {
                 unreachable!()
             }
@@ -3035,18 +3016,9 @@ mod tests {
     async fn idle_stream_cancels_promptly_and_blocks_disconnect() {
         let fake = Arc::new(FakeCredentialStore::default());
         seed_connected(&fake);
-        let adapter = ChatGptAdapter::new(fake);
+        let adapter = XaiSubscriptionAdapter::new(fake);
         struct WaitTransport;
         impl TestTransport for WaitTransport {
-            fn exchange_token(
-                &self,
-                _: &str,
-                _: &str,
-                _: &str,
-                _: &str,
-            ) -> Result<TokenBundle, PublicError> {
-                unreachable!()
-            }
             fn refresh_token(&self, _: &str, _: &str) -> Result<TokenBundle, PublicError> {
                 unreachable!()
             }
@@ -3082,18 +3054,7 @@ mod tests {
         assert_eq!(result, Err(PublicError::Cancelled));
     }
 
-    #[test]
-    fn endpoint_constants_reject_drift_targets() {
-        assert!(!AUTH_URL.contains("api.openai.com/v1"));
-        assert!(!TOKEN_URL.contains("device"));
-        assert_eq!(
-            INFERENCE_URL,
-            "https://chatgpt.com/backend-api/codex/responses"
-        );
-        assert!(!SCOPES.contains("api.connectors"));
-    }
-
-    // Fixed callback ports cannot be shared across parallel browser-connect tests.
+    // Fixed device-code connect tests serialize on a single lock.
     static CONNECT_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     fn unique_connect_tempfile_dir(label: &str) -> tempfile::TempDir {
@@ -3104,15 +3065,15 @@ mod tests {
     }
 
     async fn complete_browser_connect(
-        adapter: &ChatGptAdapter,
+        adapter: &XaiSubscriptionAdapter,
         store: Arc<SqliteStore>,
-        code: &str,
+        _code: &str,
     ) -> ConnectionStatus {
         let _guard = CONNECT_TEST_LOCK.lock().await;
         adapter
-            .connect_in_browser_with_test_callback(store, code)
+            .connect_with_test_device_code(Arc::clone(&store))
             .await
-            .expect("browser connect should succeed")
+            .expect("device connect should succeed")
     }
 
     fn token_values(
@@ -3149,35 +3110,6 @@ mod tests {
             .unwrap();
         profile.set_credential_metadata(Some(CREDENTIAL_HANDLE.into()), expires_at_unix_ms, 1);
         store.update_provider_profile(&profile).unwrap();
-    }
-
-    async fn callback_result(request: &str, expected_state: &str) -> Result<String, PublicError> {
-        let (result, _response) = callback_exchange(request, expected_state).await;
-        result
-    }
-
-    async fn callback_http_response(request: &str, expected_state: &str) -> String {
-        let (result, response) = callback_exchange(request, expected_state).await;
-        assert_eq!(result, Ok("ok".to_owned()));
-        response
-    }
-
-    async fn callback_exchange(
-        request: &str,
-        expected_state: &str,
-    ) -> (Result<String, PublicError>, String) {
-        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let server = accept_callback(listener, expected_state);
-        let client = async {
-            let mut socket = tokio::net::TcpStream::connect(address).await.unwrap();
-            socket.write_all(request.as_bytes()).await.unwrap();
-            let mut response = Vec::new();
-            let _ = socket.read_to_end(&mut response).await;
-            String::from_utf8(response).unwrap()
-        };
-        let (result, response) = tokio::join!(server, client);
-        (result, response)
     }
 
     async fn local_http_response(status: StatusCode, body: Vec<u8>) -> reqwest::Response {
@@ -3282,7 +3214,7 @@ mod tests {
 
         let fake = Arc::new(FakeCredentialStore::default());
         seed_connected(&fake);
-        let adapter = ChatGptAdapter::new(fake);
+        let adapter = XaiSubscriptionAdapter::new(fake);
         let dir = tempfile_dir();
         let store = SqliteStore::open(dir.join("catalog.sqlite3")).unwrap();
         mark_profile_connected(&store, Some(i64::MAX / 2));
@@ -3308,15 +3240,6 @@ mod tests {
             calls: Arc<AtomicUsize>,
         }
         impl TestTransport for CatalogTransport {
-            fn exchange_token(
-                &self,
-                _: &str,
-                _: &str,
-                _: &str,
-                _: &str,
-            ) -> Result<TokenBundle, PublicError> {
-                unreachable!()
-            }
             fn refresh_token(&self, _: &str, _: &str) -> Result<TokenBundle, PublicError> {
                 unreachable!()
             }
@@ -3335,8 +3258,7 @@ mod tests {
                 etag: Option<&str>,
             ) -> Result<MockModelsResponse, PublicError> {
                 assert_eq!(url, MODELS_URL);
-                assert_eq!(headers.get("originator").unwrap(), "tule");
-                assert!(headers.get("chatgpt-account-id").is_some());
+                assert_eq!(headers.get(USER_AGENT).unwrap(), "tule-desktop/0.1.0");
                 let call = self.calls.fetch_add(1, Ordering::SeqCst);
                 if call == 0 {
                     assert!(etag.is_none());
@@ -3396,7 +3318,7 @@ mod tests {
                 .unwrap()
                 .selected_model_id
                 .as_deref(),
-            Some("gpt-5.5")
+            Some("grok-3")
         );
     }
 
@@ -3447,7 +3369,7 @@ mod tests {
 
         let fake = Arc::new(FakeCredentialStore::default());
         seed_connected(&fake);
-        let adapter = ChatGptAdapter::new(fake.clone());
+        let adapter = XaiSubscriptionAdapter::new(fake.clone());
         let dir = tempfile_dir();
         let store = SqliteStore::open(dir.join("expired-catalog.sqlite3")).unwrap();
         mark_profile_connected(&store, Some(0));
@@ -3456,15 +3378,6 @@ mod tests {
             refresh_calls: Arc<AtomicUsize>,
         }
         impl TestTransport for ExpiredCatalogTransport {
-            fn exchange_token(
-                &self,
-                _: &str,
-                _: &str,
-                _: &str,
-                _: &str,
-            ) -> Result<TokenBundle, PublicError> {
-                unreachable!()
-            }
             fn refresh_token(&self, _: &str, _: &str) -> Result<TokenBundle, PublicError> {
                 self.refresh_calls.fetch_add(1, Ordering::SeqCst);
                 Ok(TokenBundle::Success(TokenValues {
@@ -3511,7 +3424,7 @@ mod tests {
     async fn catalog_refresh_authenticated_empty_preserves_snapshot_and_errors() {
         let fake = Arc::new(FakeCredentialStore::default());
         seed_connected(&fake);
-        let adapter = ChatGptAdapter::new(fake);
+        let adapter = XaiSubscriptionAdapter::new(fake);
         let dir = tempfile_dir();
         let store = SqliteStore::open(dir.join("empty-catalog.sqlite3")).unwrap();
         mark_profile_connected(&store, Some(i64::MAX / 2));
@@ -3536,15 +3449,6 @@ mod tests {
             .unwrap();
         struct EmptyTransport;
         impl TestTransport for EmptyTransport {
-            fn exchange_token(
-                &self,
-                _: &str,
-                _: &str,
-                _: &str,
-                _: &str,
-            ) -> Result<TokenBundle, PublicError> {
-                unreachable!()
-            }
             fn refresh_token(&self, _: &str, _: &str) -> Result<TokenBundle, PublicError> {
                 unreachable!()
             }
@@ -3588,7 +3492,7 @@ mod tests {
     fn disconnect_catalog_invalidation_failure_is_not_clean_disconnect() {
         let fake = Arc::new(FakeCredentialStore::default());
         seed_connected(&fake);
-        let adapter = ChatGptAdapter::new(fake.clone());
+        let adapter = XaiSubscriptionAdapter::new(fake.clone());
         let dir = tempfile_dir();
         let store = SqliteStore::open(dir.join("disconnect-fail.sqlite3")).unwrap();
         mark_profile_connected(&store, Some(i64::MAX / 2));
@@ -3632,7 +3536,7 @@ mod tests {
     fn account_change_catalog_invalidation_failure_compensates_prior_account() {
         let fake = Arc::new(FakeCredentialStore::default());
         seed_connected(&fake);
-        let adapter = ChatGptAdapter::new(fake.clone());
+        let adapter = XaiSubscriptionAdapter::new(fake.clone());
         let dir = tempfile_dir();
         let store = SqliteStore::open(dir.join("account-fail.sqlite3")).unwrap();
         mark_profile_connected(&store, Some(i64::MAX / 2));
@@ -3722,7 +3626,7 @@ mod tests {
         // Snapshot reads are ops 1-3, credential writes 4-6, restore replaces 7-9.
         fake.reset_operations();
         fake.fail_on_operations([7, 8, 9]);
-        let adapter = ChatGptAdapter::new(fake.clone());
+        let adapter = XaiSubscriptionAdapter::new(fake.clone());
         assert_eq!(
             adapter.persist_tokens(
                 &store,
@@ -3779,7 +3683,7 @@ mod tests {
         store.set_fail_catalog_scrub(true);
         fake.reset_operations();
         fake.fail_on_operations([7, 8, 9]);
-        let adapter = ChatGptAdapter::new(fake);
+        let adapter = XaiSubscriptionAdapter::new(fake);
         assert_eq!(
             adapter.persist_tokens(
                 &store,
@@ -3832,7 +3736,7 @@ mod tests {
     async fn connected_catalog_get_surfaces_refresh_error_while_preserving_stale() {
         let fake = Arc::new(FakeCredentialStore::default());
         seed_connected(&fake);
-        let adapter = ChatGptAdapter::new(fake);
+        let adapter = XaiSubscriptionAdapter::new(fake);
         let dir = tempfile_dir();
         let store = SqliteStore::open(dir.join("stale-get.sqlite3")).unwrap();
         mark_profile_connected(&store, Some(i64::MAX / 2));
@@ -3857,15 +3761,6 @@ mod tests {
             .unwrap();
         struct FailTransport;
         impl TestTransport for FailTransport {
-            fn exchange_token(
-                &self,
-                _: &str,
-                _: &str,
-                _: &str,
-                _: &str,
-            ) -> Result<TokenBundle, PublicError> {
-                unreachable!()
-            }
             fn refresh_token(&self, _: &str, _: &str) -> Result<TokenBundle, PublicError> {
                 unreachable!()
             }
@@ -3901,22 +3796,13 @@ mod tests {
     async fn inference_distinguishes_model_rejection_from_unrelated_bad_request() {
         let fake = Arc::new(FakeCredentialStore::default());
         seed_connected(&fake);
-        let adapter = ChatGptAdapter::new(fake);
+        let adapter = XaiSubscriptionAdapter::new(fake);
         let dir = tempfile_dir();
         let store = SqliteStore::open(dir.join("reject.sqlite3")).unwrap();
         mark_profile_connected(&store, Some(i64::MAX / 2));
 
         struct RejectTransport;
         impl TestTransport for RejectTransport {
-            fn exchange_token(
-                &self,
-                _: &str,
-                _: &str,
-                _: &str,
-                _: &str,
-            ) -> Result<TokenBundle, PublicError> {
-                unreachable!()
-            }
             fn refresh_token(&self, _: &str, _: &str) -> Result<TokenBundle, PublicError> {
                 unreachable!()
             }
@@ -3947,15 +3833,6 @@ mod tests {
 
         struct UnrelatedTransport;
         impl TestTransport for UnrelatedTransport {
-            fn exchange_token(
-                &self,
-                _: &str,
-                _: &str,
-                _: &str,
-                _: &str,
-            ) -> Result<TokenBundle, PublicError> {
-                unreachable!()
-            }
             fn refresh_token(&self, _: &str, _: &str) -> Result<TokenBundle, PublicError> {
                 unreachable!()
             }
@@ -3990,7 +3867,7 @@ mod tests {
     async fn model_rejection_recovery_with_refresh_failure_keeps_identifier_unavailable() {
         let fake = Arc::new(FakeCredentialStore::default());
         seed_connected(&fake);
-        let adapter = ChatGptAdapter::new(fake);
+        let adapter = XaiSubscriptionAdapter::new(fake);
         let dir = tempfile_dir();
         let store = SqliteStore::open(dir.join("reject-stale.sqlite3")).unwrap();
         mark_profile_connected(&store, Some(i64::MAX / 2));
@@ -4026,15 +3903,6 @@ mod tests {
 
         struct RejectThenFailRefresh;
         impl TestTransport for RejectThenFailRefresh {
-            fn exchange_token(
-                &self,
-                _: &str,
-                _: &str,
-                _: &str,
-                _: &str,
-            ) -> Result<TokenBundle, PublicError> {
-                unreachable!()
-            }
             fn refresh_token(&self, _: &str, _: &str) -> Result<TokenBundle, PublicError> {
                 unreachable!()
             }
@@ -4096,7 +3964,7 @@ mod tests {
     async fn refresh_rejects_catalog_containing_only_locally_rejected_models() {
         let fake = Arc::new(FakeCredentialStore::default());
         seed_connected(&fake);
-        let adapter = ChatGptAdapter::new(fake);
+        let adapter = XaiSubscriptionAdapter::new(fake);
         let dir = tempfile_dir();
         let store = SqliteStore::open(dir.join("reject-only-refresh.sqlite3")).unwrap();
         mark_profile_connected(&store, Some(i64::MAX / 2));
@@ -4124,15 +3992,6 @@ mod tests {
             .unwrap();
         struct RejectedOnlyTransport;
         impl TestTransport for RejectedOnlyTransport {
-            fn exchange_token(
-                &self,
-                _: &str,
-                _: &str,
-                _: &str,
-                _: &str,
-            ) -> Result<TokenBundle, PublicError> {
-                unreachable!()
-            }
             fn refresh_token(&self, _: &str, _: &str) -> Result<TokenBundle, PublicError> {
                 unreachable!()
             }
@@ -4176,7 +4035,7 @@ mod tests {
     async fn refresh_persists_mixed_catalog_without_locally_rejected_models() {
         let fake = Arc::new(FakeCredentialStore::default());
         seed_connected(&fake);
-        let adapter = ChatGptAdapter::new(fake);
+        let adapter = XaiSubscriptionAdapter::new(fake);
         let dir = tempfile_dir();
         let store = SqliteStore::open(dir.join("reject-mixed-refresh.sqlite3")).unwrap();
         mark_profile_connected(&store, Some(i64::MAX / 2));
@@ -4185,15 +4044,6 @@ mod tests {
             .unwrap();
         struct MixedTransport;
         impl TestTransport for MixedTransport {
-            fn exchange_token(
-                &self,
-                _: &str,
-                _: &str,
-                _: &str,
-                _: &str,
-            ) -> Result<TokenBundle, PublicError> {
-                unreachable!()
-            }
             fn refresh_token(&self, _: &str, _: &str) -> Result<TokenBundle, PublicError> {
                 unreachable!()
             }

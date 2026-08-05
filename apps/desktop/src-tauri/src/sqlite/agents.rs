@@ -739,7 +739,7 @@ mod tests {
                 .unwrap()
                 .unwrap()
                 .visible_model_id(),
-            "gpt-5.5"
+            "grok-3"
         );
 
         let session = AgentSession::new("Unicode session", None, "gpt-5.5").unwrap();

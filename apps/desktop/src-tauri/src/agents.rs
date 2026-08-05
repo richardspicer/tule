@@ -93,7 +93,7 @@ impl From<SourceDraftError> for AgentIpcError {
 pub(crate) struct AgentState {
     pub(crate) store: Arc<SqliteStore>,
     pub(crate) provider: Arc<dyn ProviderAdapter>,
-    pub(crate) chatgpt: Option<Arc<crate::openai_chatgpt::ChatGptAdapter>>,
+    pub(crate) xai: Option<Arc<crate::xai_subscription::XaiSubscriptionAdapter>>,
     pub(crate) source_drafts: Arc<SourceDraftStore>,
     operation_gate: Arc<OperationGate>,
     cancellation: Arc<Mutex<Option<(String, CancellationToken)>>>,
@@ -131,12 +131,12 @@ impl AgentState {
     pub(crate) fn new(
         store: Arc<SqliteStore>,
         provider: Arc<dyn ProviderAdapter>,
-        chatgpt: Option<Arc<crate::openai_chatgpt::ChatGptAdapter>>,
+        xai: Option<Arc<crate::xai_subscription::XaiSubscriptionAdapter>>,
     ) -> Self {
         Self {
             store,
             provider,
-            chatgpt,
+            xai,
             source_drafts: Arc::new(SourceDraftStore::new()),
             operation_gate: Arc::new(OperationGate::default()),
             cancellation: Arc::new(Mutex::new(None)),
@@ -147,8 +147,8 @@ impl AgentState {
         self.source_drafts.clear_all();
     }
 
-    pub(crate) fn chatgpt(&self) -> Option<Arc<crate::openai_chatgpt::ChatGptAdapter>> {
-        self.chatgpt.clone()
+    pub(crate) fn xai(&self) -> Option<Arc<crate::xai_subscription::XaiSubscriptionAdapter>> {
+        self.xai.clone()
     }
 
     pub(crate) fn try_operation(&self) -> Result<OperationGuard, PublicError> {
@@ -639,7 +639,7 @@ pub(crate) async fn send_agent_message(
     } else {
         String::new()
     };
-    let connection_state = state.chatgpt().map_or_else(
+    let connection_state = state.xai().map_or_else(
         || state.provider.connection_status().state,
         |adapter| adapter.connection_status_with_store(store.as_ref()).state,
     );
@@ -714,7 +714,7 @@ pub(crate) async fn send_agent_message(
         return Err(AgentIpcError::ProviderUnavailable);
     }
 
-    if let Some(adapter) = state.chatgpt() {
+    if let Some(adapter) = state.xai() {
         match refresh_or_cancel(
             &token,
             adapter.ensure_fresh_access_cancellable_public(store.as_ref(), token.clone()),
@@ -843,7 +843,7 @@ pub(crate) async fn send_agent_message(
         },
     )?;
     if model_rejected {
-        let adapter = state.chatgpt();
+        let adapter = state.xai();
         recover_after_model_rejection(&app, adapter.as_deref(), store.as_ref(), &rejected_model_id)
             .await;
     }
@@ -857,7 +857,7 @@ pub(crate) async fn send_agent_message(
 
 async fn recover_after_model_rejection(
     app: &AppHandle,
-    adapter: Option<&crate::openai_chatgpt::ChatGptAdapter>,
+    adapter: Option<&crate::xai_subscription::XaiSubscriptionAdapter>,
     store: &SqliteStore,
     rejected_model_id: &str,
 ) {

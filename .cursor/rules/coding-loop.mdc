@@ -1,0 +1,38 @@
+---
+description: Cursor Lead/Builder/Reviewer coding loop aligned with TULE vault governance
+alwaysApply: true
+---
+
+# Coding loop
+
+Use this workflow when the user asks to implement a brief/feature **with the coding loop**, or explicitly invokes `/implementer` and `/reviewer` as a generate→review cycle.
+
+Authoritative process lives in the TULE vault: `Project Governance`, the active Work note, and its issued Brief. If this rule conflicts with those, the vault wins.
+
+## Roles
+
+- **Lead (this chat)**: Prefer Grok 4.5 High. Settle Work outcomes, issue Briefs, orchestrate the loop, review the pushed branch, and create pull requests only when the owner separately authorizes publication.
+- **`implementer` (Builder)**: Composer 2.5. Implements within the Brief write set. Do not pass a Task `model` override.
+- **`reviewer`**: Composer 2.5, readonly. Returns `APPROVE` or `REJECT`. Do not pass a Task `model` override.
+
+## Loop
+
+1. Restate acceptance criteria and the Brief's Allowed changes / Done when evidence.
+2. Difficulty:
+   - `easy` / `medium` → delegate implementation to `implementer`
+   - `hard` / ambiguous architecture → implement in this Lead chat, then still run `reviewer`
+3. Run `reviewer` on the result against the Brief and repository `AGENTS.md`.
+4. If `REJECT` and attempt count < 3: send blockers to `implementer` (or fix on Lead if hard) and review again.
+5. If `REJECT` after 3 attempts: stop. Report remaining blockers. Do not commit, push, or open a PR.
+6. If `APPROVE`:
+   - Follow the Brief's **Git publication** line exactly (`NOT AUTHORIZED` / `COMMIT ONLY` / `COMMIT AND PUSH NAMED BRANCH`)
+   - Builder/implementer never creates or edits pull requests, PR metadata, or review threads
+   - Return a private handoff: branch, commit, verification result, artifact/owner checklist if required, deviations/blockers
+7. Pull-request creation is a **separate** owner/Lead gate after handoff. When authorized, publish a review-ready PR with a short product-facing paragraph only (no Test plan / Verification sections; no file paths; no private handoff dump). Do not merge unless separately authorized.
+
+## Do not
+
+- Skip `reviewer` before treating work as ready for handoff
+- Treat Work/Brief approval as PR authorization
+- Expand scope beyond the Brief Allowed changes
+- Put secrets, machine-local paths, or vault-private material into the public repo or PR body

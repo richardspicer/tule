@@ -57,8 +57,11 @@ purpose and avoid adding infrastructure before the product needs it.
 
 ## Pull Requests
 
-Keep titles factual and descriptions brief. State what changed, why it was
-needed, and the essential verification. Call out new dependencies, Tauri
-permissions, persistence changes, credential handling, or changes to a trust
-boundary. Avoid promotional language. Never commit credentials or
-machine-specific paths.
+Keep titles factual and descriptions brief. Prefer one short product-facing
+paragraph: what changed, why it was needed, user or developer impact, and the
+concise verification outcome. Call out new dependencies, Tauri permissions,
+persistence changes, credential handling, or changes to a trust boundary. Do
+not add Test plan or Verification checklist sections, command lists, artifact
+paths, or private planning material. Avoid promotional language. Never commit
+credentials or machine-specific paths. Create a draft pull request only when
+the owner explicitly asks for one.

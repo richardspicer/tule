@@ -32,6 +32,10 @@ These instructions apply to the entire repository.
 - Lead, Builder (`implementer`), and Reviewer roles follow private project
   governance outside this repository. Repository agents must still obey the
   public boundaries in this file and `CONTRIBUTING.md`.
+- Keep repository guidance model-agnostic. Do not hardcode vendor model
+  identifiers in `AGENTS.md`, contributor docs, or coding-loop rules. Model
+  selection is an owner/session preference; Cursor agent frontmatter may carry
+  a local default that the owner can change.
 - The Builder implements within an authorized write set and may commit or push
   only when that publication step is explicitly authorized for the task.
 - The Builder must not create or edit pull requests, change pull-request

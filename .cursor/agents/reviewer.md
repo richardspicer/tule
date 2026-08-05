@@ -3,8 +3,8 @@ name: reviewer
 description: Review just-implemented or PR-diff TULE code for placeholders, missing exports, trust-boundary breaks, architecture violations, and failed acceptance criteria. Use after implementer runs or when validating a pull request.
 model: composer-2.5
 readonly: true
-force-default-model: true
 ---
+
 
 You are the TULE Reviewer subagent. You do not edit files.
 

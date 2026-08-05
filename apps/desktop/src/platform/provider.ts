@@ -142,6 +142,16 @@ function isDevicePairingInfo(value: unknown): value is DevicePairingInfo {
   );
 }
 
+function isAllowlistedDeviceVerificationUri(uri: string): boolean {
+  let parsed: URL;
+  try {
+    parsed = new URL(uri);
+  } catch {
+    return false;
+  }
+  return parsed.protocol === "https:" && parsed.hostname === "auth.x.ai";
+}
+
 export function validateDevicePairingInfo(value: unknown): DevicePairingInfo | null {
   if (value === null || value === undefined) {
     return null;
@@ -149,10 +159,19 @@ export function validateDevicePairingInfo(value: unknown): DevicePairingInfo | n
   if (!isDevicePairingInfo(value)) {
     throw new ProviderError("provider_unavailable");
   }
-  if (value.verificationUri === "" && value.userCode === "") {
+  const verificationUri = value.verificationUri.trim();
+  const userCode = value.userCode.trim();
+  if (verificationUri === "" && userCode === "") {
     return null;
   }
-  return value;
+  if (
+    verificationUri === "" ||
+    userCode === "" ||
+    !isAllowlistedDeviceVerificationUri(verificationUri)
+  ) {
+    throw new ProviderError("provider_unavailable");
+  }
+  return { verificationUri, userCode };
 }
 
 function isProviderModelEntry(value: unknown): value is ProviderModelEntry {

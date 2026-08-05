@@ -7,9 +7,11 @@ import {
   getProviderErrorCode,
   getProviderModelCatalog,
   getProviderModelSelection,
+  getXaiDevicePairing,
   isStaleConnectCancellation,
   ProviderError,
   setProviderModelSelection,
+  validateDevicePairingInfo,
   validateProviderModelCatalog,
 } from "./provider";
 
@@ -122,5 +124,45 @@ describe("provider platform", () => {
         freshness: "current",
       }),
     ).toThrow(ProviderError);
+  });
+
+  it("allows only trimmed https auth.x.ai device pairing metadata", async () => {
+    expect(
+      validateDevicePairingInfo({
+        verificationUri: "  https://auth.x.ai/device  ",
+        userCode: "  ABCD-EFGH  ",
+      }),
+    ).toEqual({
+      verificationUri: "https://auth.x.ai/device",
+      userCode: "ABCD-EFGH",
+    });
+    expect(validateDevicePairingInfo({ verificationUri: "", userCode: "" })).toBeNull();
+    expect(() =>
+      validateDevicePairingInfo({
+        verificationUri: "https://auth.x.ai/device",
+        userCode: "",
+      }),
+    ).toThrow(ProviderError);
+    expect(() =>
+      validateDevicePairingInfo({
+        verificationUri: "http://auth.x.ai/device",
+        userCode: "ABCD",
+      }),
+    ).toThrow(ProviderError);
+    expect(() =>
+      validateDevicePairingInfo({
+        verificationUri: "https://evil.example/device",
+        userCode: "ABCD",
+      }),
+    ).toThrow(ProviderError);
+
+    invokeMock.mockResolvedValueOnce({
+      verificationUri: "https://auth.x.ai/device?user_code=ABCD",
+      userCode: "ABCD",
+    });
+    await expect(getXaiDevicePairing()).resolves.toEqual({
+      verificationUri: "https://auth.x.ai/device?user_code=ABCD",
+      userCode: "ABCD",
+    });
   });
 });

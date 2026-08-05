@@ -402,7 +402,11 @@ impl XaiSubscriptionAdapter {
             positive_seconds_to_ms(device.interval, DEVICE_CODE_DEFAULT_INTERVAL_MS)
                 .max(DEVICE_CODE_MIN_INTERVAL_MS);
 
-        while unix_now_ms().unwrap_or(0) < deadline {
+        loop {
+            let now = unix_now_ms().map_err(|_| PublicError::ProviderUnavailable)?;
+            if now >= deadline {
+                break;
+            }
             if cancel.is_cancelled() {
                 return Err(PublicError::Cancelled);
             }
@@ -442,7 +446,8 @@ impl XaiSubscriptionAdapter {
                 .get("error")
                 .and_then(Value::as_str)
                 .unwrap_or_default();
-            let remaining = (deadline - unix_now_ms().unwrap_or(deadline)).max(0) as u64;
+            let now = unix_now_ms().map_err(|_| PublicError::ProviderUnavailable)?;
+            let remaining = (deadline - now).max(0) as u64;
             match code {
                 "authorization_pending" => {
                     sleep(Duration::from_millis(

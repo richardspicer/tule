@@ -1,4 +1,4 @@
--- Work 0011: sole Phase 1 provider slot moves to xAI subscription OAuth.
+-- Migration 0010: sole Phase 1 provider slot moves to xAI subscription OAuth.
 -- Historical openai-chatgpt-compat rows remain for session provenance.
 
 INSERT INTO provider_profiles (

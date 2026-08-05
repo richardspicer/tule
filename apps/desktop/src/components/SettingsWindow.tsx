@@ -459,11 +459,7 @@ export function SettingsWindow() {
             {connecting && devicePairing !== null ? (
               <p className="settings-disclosure">
                 Enter code <strong>{devicePairing.userCode}</strong> at{" "}
-                <a
-                  href={devicePairing.verificationUri}
-                  rel="noopener noreferrer"
-                  target="_blank"
-                >
+                <a href={devicePairing.verificationUri} rel="noopener noreferrer" target="_blank">
                   {devicePairing.verificationUri}
                 </a>
               </p>

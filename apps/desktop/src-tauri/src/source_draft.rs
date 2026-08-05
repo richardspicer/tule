@@ -314,48 +314,61 @@ pub(crate) struct NativeSourceFolderReader;
 
 impl SourceFolderReader for NativeSourceFolderReader {
     fn read_shallow_folder(&self, path: &Path) -> Result<Vec<(String, Vec<u8>)>, SourceDraftError> {
-        let metadata = fs::metadata(path).map_err(|_| SourceDraftError::Unreadable)?;
-        if !metadata.is_dir() {
-            return Err(SourceDraftError::Unsupported);
-        }
-        let mut eligible = Vec::new();
-        let entries = fs::read_dir(path).map_err(|_| SourceDraftError::Unreadable)?;
-        for entry in entries {
-            let entry = entry.map_err(|_| SourceDraftError::Unreadable)?;
-            let file_type = entry
-                .file_type()
-                .map_err(|_| SourceDraftError::Unreadable)?;
-            if file_type.is_symlink() {
-                continue;
-            }
-            if !file_type.is_file() {
-                continue;
-            }
-            let file_path = entry.path();
-            let Some(basename) = lossless_basename(&file_path) else {
-                continue;
-            };
-            if validate_source_display_name(&basename).is_err() {
-                continue;
-            }
-            let file_metadata = entry.metadata().map_err(|_| SourceDraftError::Unreadable)?;
-            if !file_metadata.is_file() {
-                continue;
-            }
-            if file_metadata.len() > MAX_SOURCE_UTF8 as u64 {
-                continue;
-            }
-            let bytes = NativeSourceFileReader.read_regular_file(&file_path)?;
-            if std::str::from_utf8(&bytes).is_err() {
-                continue;
-            }
-            if bytes.contains(&0) {
-                continue;
-            }
-            eligible.push((basename, bytes));
-        }
-        Ok(eligible)
+        collect_shallow_folder_members(path, &NativeSourceFileReader)
     }
+}
+
+fn collect_shallow_folder_members(
+    path: &Path,
+    file_reader: &impl SourceFileReader,
+) -> Result<Vec<(String, Vec<u8>)>, SourceDraftError> {
+    let metadata = fs::metadata(path).map_err(|_| SourceDraftError::Unreadable)?;
+    if !metadata.is_dir() {
+        return Err(SourceDraftError::Unsupported);
+    }
+    let mut eligible = Vec::new();
+    let entries = fs::read_dir(path).map_err(|_| SourceDraftError::Unreadable)?;
+    for entry in entries {
+        let Ok(entry) = entry else {
+            continue;
+        };
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if file_type.is_symlink() {
+            continue;
+        }
+        if !file_type.is_file() {
+            continue;
+        }
+        let file_path = entry.path();
+        let Some(basename) = lossless_basename(&file_path) else {
+            continue;
+        };
+        if validate_source_display_name(&basename).is_err() {
+            continue;
+        }
+        let Ok(file_metadata) = entry.metadata() else {
+            continue;
+        };
+        if !file_metadata.is_file() {
+            continue;
+        }
+        if file_metadata.len() > MAX_SOURCE_UTF8 as u64 {
+            continue;
+        }
+        let Ok(bytes) = file_reader.read_regular_file(&file_path) else {
+            continue;
+        };
+        if std::str::from_utf8(&bytes).is_err() {
+            continue;
+        }
+        if bytes.contains(&0) {
+            continue;
+        }
+        eligible.push((basename, bytes));
+    }
+    Ok(eligible)
 }
 
 /// Captures one selected file into an ephemeral draft without retaining the path.
@@ -603,6 +616,47 @@ mod tests {
             capture_picked_source(&store, &picker, &reader),
             Err(SourceDraftError::TooLarge)
         ));
+    }
+
+    #[test]
+    fn folder_capture_skips_unreadable_sibling_and_succeeds_with_one_eligible() {
+        struct FailLockedReader;
+
+        impl SourceFileReader for FailLockedReader {
+            fn read_regular_file(&self, path: &Path) -> Result<Vec<u8>, SourceDraftError> {
+                if path.file_name().is_some_and(|name| name == "locked.txt") {
+                    return Err(SourceDraftError::Unreadable);
+                }
+                NativeSourceFileReader.read_regular_file(path)
+            }
+        }
+
+        let store = SourceDraftStore::new();
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("good.txt"), "alpha").unwrap();
+        std::fs::write(root.path().join("locked.txt"), "secret").unwrap();
+        let members = collect_shallow_folder_members(root.path(), &FailLockedReader).unwrap();
+        assert_eq!(members.len(), 1);
+        assert_eq!(members[0].0, "good.txt");
+
+        let picker = FakePicker {
+            path: Mutex::new(Some(root.path().to_path_buf())),
+        };
+        struct FolderReaderWithLockedSibling;
+        impl SourceFolderReader for FolderReaderWithLockedSibling {
+            fn read_shallow_folder(
+                &self,
+                path: &Path,
+            ) -> Result<Vec<(String, Vec<u8>)>, SourceDraftError> {
+                collect_shallow_folder_members(path, &FailLockedReader)
+            }
+        }
+        let outcome =
+            capture_picked_folder(&store, &picker, &FolderReaderWithLockedSibling).unwrap();
+        let PickSourceOutcome::Selected { member_count, .. } = outcome else {
+            panic!("expected selection");
+        };
+        assert_eq!(member_count, 1);
     }
 
     #[test]

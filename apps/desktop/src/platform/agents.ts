@@ -47,9 +47,40 @@ export interface AgentTurn {
   sources: AgentSourceMetadata[];
 }
 
+export type AgentEventKind =
+  | "session_created"
+  | "project_association_changed"
+  | "turn_pending"
+  | "turn_streaming"
+  | "turn_completed"
+  | "turn_cancelled"
+  | "turn_failed"
+  | "turn_interrupted";
+
+const agentEventKinds: readonly AgentEventKind[] = [
+  "session_created",
+  "project_association_changed",
+  "turn_pending",
+  "turn_streaming",
+  "turn_completed",
+  "turn_cancelled",
+  "turn_failed",
+  "turn_interrupted",
+];
+
+export interface AgentEvent {
+  id: string;
+  sessionId: string;
+  turnId: string | null;
+  sequence: number;
+  kind: AgentEventKind;
+  createdAtUnixMs: number;
+}
+
 export interface AgentSessionDetail {
   session: AgentSession;
   turns: AgentTurn[];
+  events: AgentEvent[];
 }
 
 export type AgentStreamEvent =
@@ -171,6 +202,14 @@ const PICK_RESULT_KEYS = [
   "memberCount",
   "originKind",
   "status",
+] as const;
+const EVENT_METADATA_KEYS = [
+  "createdAtUnixMs",
+  "id",
+  "kind",
+  "sequence",
+  "sessionId",
+  "turnId",
 ] as const;
 
 function isUuidV7(value: string): boolean {
@@ -304,6 +343,37 @@ function isSourceMetadata(value: unknown): value is AgentSourceMetadata {
   );
 }
 
+function isAgentEventKind(value: unknown): value is AgentEventKind {
+  return typeof value === "string" && agentEventKinds.includes(value as AgentEventKind);
+}
+
+function isEventSequence(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0;
+}
+
+function isEventTimestamp(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value);
+}
+
+function isAgentEvent(value: unknown): value is AgentEvent {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return false;
+  }
+
+  const record = value as Record<string, unknown>;
+  return (
+    hasExactKeys(record, EVENT_METADATA_KEYS) &&
+    typeof record.id === "string" &&
+    isUuidV7(record.id) &&
+    typeof record.sessionId === "string" &&
+    isUuidV7(record.sessionId) &&
+    (record.turnId === null || (typeof record.turnId === "string" && isUuidV7(record.turnId))) &&
+    isEventSequence(record.sequence) &&
+    isAgentEventKind(record.kind) &&
+    isEventTimestamp(record.createdAtUnixMs)
+  );
+}
+
 function isAgentTurn(value: unknown): value is AgentTurn {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     return false;
@@ -345,6 +415,14 @@ function validateTurn(value: unknown): AgentTurn {
   return value;
 }
 
+function validateEvent(value: unknown): AgentEvent {
+  if (!isAgentEvent(value)) {
+    throw new AgentError("agent_storage_unavailable");
+  }
+
+  return value;
+}
+
 function validateSessionList(value: unknown): AgentSession[] {
   if (!Array.isArray(value) || !value.every(isAgentSession)) {
     throw new AgentError("agent_storage_unavailable");
@@ -362,9 +440,14 @@ function validateSessionDetail(value: unknown): AgentSessionDetail {
     throw new AgentError("agent_storage_unavailable");
   }
 
+  if (!("events" in value) || !Array.isArray(value.events)) {
+    throw new AgentError("agent_storage_unavailable");
+  }
+
   return {
     session: validateSession(value.session),
     turns: value.turns.map(validateTurn),
+    events: value.events.map(validateEvent),
   };
 }
 

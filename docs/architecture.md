@@ -116,6 +116,16 @@ Failed, cancelled, and interrupted turns retain that metadata but do not enter
 later context. The final serialized request still honors the existing 128 KiB
 ceiling without truncation or silent omission.
 
+Session reopen through `get_agent_session` also returns the durable append-only
+event sequence for that session in one round-trip, ordered by per-session
+`sequence`. Each event DTO exposes only stable identity, optional turn linkage,
+kind, and timestamp; there are no event payloads and no live event streaming on
+the send channel. The React Activity panel is read-only inspectability beside
+the turn transcript: collapsible rows keyed by event id with kind, timestamp,
+and turn association when `turnId` is present. Hostile-response validation on
+the platform layer rejects unknown event kinds and malformed event objects with
+the same fail-closed posture as sessions and turns.
+
 ## Project Persistence
 
 The project model and its application operations live in `tule-core`. The core

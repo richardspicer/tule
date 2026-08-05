@@ -13,8 +13,8 @@ use tauri::{AppHandle, Emitter, State, Webview, ipc::Channel};
 use tauri_plugin_dialog::{DialogExt, FilePath};
 use tokio_util::sync::CancellationToken;
 use tule_core::{
-    AgentRepository, AgentSession, AgentSessionId, AgentTurn, ProjectId, ProjectRepository, Source,
-    TurnSource,
+    AgentEvent, AgentRepository, AgentSession, AgentSessionId, AgentTurn, ProjectId,
+    ProjectRepository, Source, TurnSource,
 };
 
 use crate::{
@@ -305,9 +305,34 @@ impl SourceFolderPicker for AppDialogPicker {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub(crate) struct EventResponse {
+    id: String,
+    session_id: String,
+    turn_id: Option<String>,
+    sequence: u64,
+    kind: String,
+    created_at_unix_ms: i64,
+}
+
+impl From<&AgentEvent> for EventResponse {
+    fn from(event: &AgentEvent) -> Self {
+        Self {
+            id: event.id().to_string(),
+            session_id: event.session_id().to_string(),
+            turn_id: event.turn_id().map(|turn_id| turn_id.to_string()),
+            sequence: event.sequence(),
+            kind: event.kind().as_str().to_owned(),
+            created_at_unix_ms: event.created_at_unix_ms(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct SessionDetailResponse {
     session: SessionResponse,
     turns: Vec<TurnResponse>,
+    events: Vec<EventResponse>,
 }
 
 fn map_prepare(error: tule_core::PrepareAgentSendError) -> AgentIpcError {
@@ -465,6 +490,9 @@ pub(crate) async fn get_agent_session(
         let turns = store
             .list_turns(&id)
             .map_err(|_| AgentIpcError::AgentStorageUnavailable)?;
+        let events = store
+            .list_events(&id)
+            .map_err(|_| AgentIpcError::AgentStorageUnavailable)?;
         let sources = turn_sources_for(store.as_ref(), &id)?;
         Ok(SessionDetailResponse {
             session: session.into(),
@@ -472,6 +500,7 @@ pub(crate) async fn get_agent_session(
                 .iter()
                 .map(|turn| turn_response(turn, &sources))
                 .collect(),
+            events: events.iter().map(EventResponse::from).collect(),
         })
     })
     .await
@@ -1295,6 +1324,52 @@ mod tests {
         );
         drop(held);
         drop(state);
+        drop(directory);
+    }
+
+    #[test]
+    fn session_detail_events_are_ordered_and_include_cancelled_terminal_kind() {
+        let (directory, store) = test_store();
+        let prepared =
+            tule_core::prepare_agent_send(store.as_ref(), None, "Hello", None, "", "gpt-5.5", None)
+                .unwrap();
+        tule_core::cancel_agent_turn(store.as_ref(), prepared.turn.id()).unwrap();
+
+        let events = store.list_events(&prepared.session.id()).unwrap();
+        let mapped: Vec<EventResponse> = events.iter().map(EventResponse::from).collect();
+
+        assert_eq!(mapped.len(), 3);
+        assert_eq!(mapped[0].kind, "session_created");
+        assert_eq!(mapped[1].kind, "turn_pending");
+        assert_eq!(mapped[2].kind, "turn_cancelled");
+        assert_eq!(mapped[0].session_id, prepared.session.id().to_string());
+        assert_eq!(
+            mapped[1].turn_id.as_deref(),
+            Some(prepared.turn.id().to_string().as_str())
+        );
+        assert!(mapped[0].sequence < mapped[1].sequence);
+        assert!(mapped[1].sequence < mapped[2].sequence);
+        drop(store);
+        drop(directory);
+    }
+
+    #[test]
+    fn session_detail_events_include_interrupted_terminal_kind_after_recovery() {
+        let (directory, store) = test_store();
+        let prepared =
+            tule_core::prepare_agent_send(store.as_ref(), None, "Hello", None, "", "gpt-5.5", None)
+                .unwrap();
+        let interrupted = tule_core::interrupt_inflight_turns(store.as_ref()).unwrap();
+
+        assert_eq!(interrupted.len(), 1);
+        let mapped: Vec<EventResponse> = store
+            .list_events(&prepared.session.id())
+            .unwrap()
+            .iter()
+            .map(EventResponse::from)
+            .collect();
+        assert!(mapped.iter().any(|event| event.kind == "turn_interrupted"));
+        drop(store);
         drop(directory);
     }
 

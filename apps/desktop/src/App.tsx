@@ -19,6 +19,7 @@ import {
   sendAgentMessage,
   setAgentSessionProject,
   setAgentSourceDraftScope,
+  type AgentEvent,
   type AgentSession,
   type AgentTurn,
   type PendingSourceAttachment,
@@ -104,6 +105,7 @@ function App() {
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [pendingProjectId, setPendingProjectId] = useState<string | null>(null);
   const [turns, setTurns] = useState<AgentTurn[]>([]);
+  const [events, setEvents] = useState<AgentEvent[]>([]);
   const [draft, setDraft] = useState("");
   const [pendingAttachment, setPendingAttachment] = useState<PendingSourceAttachment | null>(null);
   const [sending, setSending] = useState(false);
@@ -332,6 +334,7 @@ function App() {
             const detail = await getAgentSession(newest.id);
             if (active && sessionRequestGenerationRef.current === requestGeneration) {
               setTurns(detail.turns);
+              setEvents(detail.events);
             }
           } catch (error: unknown) {
             if (active && sessionRequestGenerationRef.current === requestGeneration) {
@@ -470,6 +473,7 @@ function App() {
     setPendingProjectId(null);
     setPendingModelId(selection?.selectedModelId ?? null);
     setTurns([]);
+    setEvents([]);
     setDraft("");
     setAgentError(null);
     setPendingAttachment(null);
@@ -489,6 +493,7 @@ function App() {
     setActiveSessionId(sessionId);
     setPendingProjectId(summary?.projectId ?? null);
     setTurns([]);
+    setEvents([]);
     setAgentError(null);
     setPendingAttachment(null);
     void setAgentSourceDraftScope(sessionId).catch(() => undefined);
@@ -500,6 +505,7 @@ function App() {
       setActiveSessionId(detail.session.id);
       setPendingProjectId(detail.session.projectId);
       setTurns(detail.turns);
+      setEvents(detail.events);
       setSessions((current) => {
         const exists = current.some((session) => session.id === detail.session.id);
         return exists
@@ -528,6 +534,7 @@ function App() {
     setActiveSessionId(null);
     setPendingProjectId(projectId);
     setTurns([]);
+    setEvents([]);
     setDraft("");
     setAgentError(null);
     setPendingAttachment(null);
@@ -883,6 +890,7 @@ function App() {
     setActiveSessionId(null);
     setPendingProjectId(project.id);
     setTurns([]);
+    setEvents([]);
     setDraft("");
     setAgentError(null);
     setPendingAttachment(null);
@@ -1053,6 +1061,7 @@ function App() {
               selectedModelId={sessionModelId}
               modelLocked={modelLocked}
               turns={turns}
+              events={events}
               draft={draft}
               pendingAttachment={pendingAttachment}
               connected={connected}

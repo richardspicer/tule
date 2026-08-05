@@ -2,6 +2,7 @@ import {
   useEffect,
   useId,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
   type FormEvent,
@@ -13,6 +14,8 @@ import {
   formatSourceAttachmentSummary,
   getSafeAgentErrorMessageForCode,
   sourceAttachmentKindLabel,
+  type AgentEvent,
+  type AgentEventKind,
   type AgentSourceMetadata,
   type AgentTurn,
   type PendingSourceAttachment,
@@ -52,6 +55,7 @@ interface AgentWorkspaceProps {
   selectedModelId: string | null;
   modelLocked: boolean;
   turns: readonly AgentTurn[];
+  events: readonly AgentEvent[];
   draft: string;
   pendingAttachment: PendingSourceAttachment | null;
   connected: boolean;
@@ -132,6 +136,25 @@ function isNearBottom(element: HTMLElement): boolean {
   return element.scrollHeight - element.scrollTop - element.clientHeight <= 48;
 }
 
+const agentEventKindLabels: Record<AgentEventKind, string> = {
+  session_created: "Session created",
+  project_association_changed: "Project association changed",
+  turn_pending: "Turn pending",
+  turn_streaming: "Turn streaming",
+  turn_completed: "Turn completed",
+  turn_cancelled: "Turn cancelled",
+  turn_failed: "Turn failed",
+  turn_interrupted: "Turn interrupted",
+};
+
+function formatAgentEventKind(kind: AgentEventKind): string {
+  return agentEventKindLabels[kind];
+}
+
+function formatAgentEventTimestamp(createdAtUnixMs: number): string {
+  return new Date(createdAtUnixMs).toLocaleString();
+}
+
 export function AgentWorkspace({
   title,
   projectId,
@@ -141,6 +164,7 @@ export function AgentWorkspace({
   selectedModelId,
   modelLocked,
   turns,
+  events,
   draft,
   pendingAttachment,
   connected,
@@ -170,6 +194,13 @@ export function AgentWorkspace({
   const linkFieldId = useId();
   const previousTurnCountRef = useRef(0);
   const isEmptyNewSession = turns.length === 0 && title === "New session";
+  const turnOrdinals = useMemo(() => {
+    const ordinals = new Map<string, number>();
+    for (const turn of turns) {
+      ordinals.set(turn.id, turn.ordinal);
+    }
+    return ordinals;
+  }, [turns]);
 
   useLayoutEffect(() => {
     const composer = composerRef.current;
@@ -341,6 +372,29 @@ export function AgentWorkspace({
           ) : null}
         </div>
       </header>
+
+      {events.length === 0 ? null : (
+        <details className="activity-panel">
+          <summary>Activity</summary>
+          <ol className="activity-list">
+            {events.map((event) => {
+              const turnOrdinal =
+                event.turnId === null ? null : (turnOrdinals.get(event.turnId) ?? null);
+              return (
+                <li key={event.id} className="activity-row">
+                  <span className="activity-kind">{formatAgentEventKind(event.kind)}</span>
+                  <time dateTime={new Date(event.createdAtUnixMs).toISOString()}>
+                    {formatAgentEventTimestamp(event.createdAtUnixMs)}
+                  </time>
+                  {turnOrdinal === null ? null : (
+                    <span className="activity-turn">Turn {turnOrdinal}</span>
+                  )}
+                </li>
+              );
+            })}
+          </ol>
+        </details>
+      )}
 
       <div className="transcript-shell">
         <div

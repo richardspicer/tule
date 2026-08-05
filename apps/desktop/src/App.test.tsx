@@ -401,7 +401,7 @@ describe("App", () => {
       instructions: "Keep answers short",
     };
     listAgentSessionsMock.mockResolvedValue([session]);
-    getAgentSessionMock.mockResolvedValue({ session, turns: [] });
+    getAgentSessionMock.mockResolvedValue({ session, turns: [], events: [] });
     getConnectionStatusMock.mockResolvedValue({
       state: "connected",
       providerId: "xai-subscription-oauth",
@@ -473,6 +473,7 @@ describe("App", () => {
           sources: [],
         },
       ],
+      events: [],
     });
 
     render(<App />);
@@ -506,6 +507,7 @@ describe("App", () => {
           sources: [],
         },
       ],
+      events: [],
     });
     getConnectionStatusMock.mockResolvedValue({
       state: "connected",
@@ -710,6 +712,7 @@ describe("App", () => {
           sources: [],
         },
       ],
+      events: [],
     });
     await waitFor(() => {
       expect(screen.getByRole("heading", { name: "New session" })).toBeInTheDocument();
@@ -735,7 +738,7 @@ describe("App", () => {
     let resolveSecond: ((detail: AgentSessionDetail) => void) | undefined;
     listAgentSessionsMock.mockResolvedValue([first, second]);
     getAgentSessionMock
-      .mockResolvedValueOnce({ session: first, turns: [] })
+      .mockResolvedValueOnce({ session: first, turns: [], events: [] })
       .mockReturnValueOnce(
         new Promise<AgentSessionDetail>((resolve) => {
           resolveFirst = resolve;
@@ -765,6 +768,7 @@ describe("App", () => {
           sources: [],
         },
       ],
+      events: [],
     });
     expect(await screen.findByText("Latest answer")).toBeInTheDocument();
 
@@ -781,6 +785,7 @@ describe("App", () => {
           sources: [],
         },
       ],
+      events: [],
     });
     await waitFor(() => {
       expect(screen.getByRole("heading", { name: "Second session" })).toBeInTheDocument();
@@ -803,7 +808,7 @@ describe("App", () => {
     };
     listProjectsMock.mockResolvedValue([project]);
     listAgentSessionsMock.mockResolvedValue([session]);
-    getAgentSessionMock.mockResolvedValue({ session, turns: [] });
+    getAgentSessionMock.mockResolvedValue({ session, turns: [], events: [] });
     setAgentSessionProjectMock
       .mockResolvedValueOnce({ ...session, projectId: project.id })
       .mockResolvedValueOnce(session);
@@ -973,7 +978,7 @@ describe("App", () => {
     });
     listProjectsMock.mockResolvedValue([project]);
     listAgentSessionsMock.mockResolvedValue([session]);
-    getAgentSessionMock.mockResolvedValue({ session, turns: [] });
+    getAgentSessionMock.mockResolvedValue({ session, turns: [], events: [] });
     vi.spyOn(window, "confirm").mockReturnValue(true);
 
     render(<App />);
@@ -1145,6 +1150,120 @@ describe("App", () => {
     });
     await waitFor(() => expect(screen.queryByRole("button", { name: "Cancelling…" })).toBeNull());
     expect(screen.getByRole("button", { name: "New session" })).toBeEnabled();
+  });
+
+  it("shows turn_cancelled and turn_interrupted events in Activity after reopen", async () => {
+    const user = userEvent.setup();
+    const cancelledSession: AgentSession = {
+      id: "22222222-2222-7222-8222-222222222222",
+      title: "Cancelled session",
+      projectId: null,
+      modelId: "grok-3",
+    };
+    const interruptedSession: AgentSession = {
+      id: "33333333-3333-7333-8333-333333333333",
+      title: "Interrupted session",
+      projectId: null,
+      modelId: "grok-3",
+    };
+    const cancelledTurnId = "44444444-4444-7444-8444-444444444444";
+    const interruptedTurnId = "55555555-5555-7555-8555-555555555555";
+    listAgentSessionsMock.mockResolvedValue([cancelledSession, interruptedSession]);
+    getAgentSessionMock.mockImplementation((sessionId: string) => {
+      if (sessionId === cancelledSession.id) {
+        return Promise.resolve({
+          session: cancelledSession,
+          turns: [
+            {
+              id: cancelledTurnId,
+              ordinal: 1,
+              userText: "Cancel me",
+              agentText: "",
+              state: "cancelled",
+              errorCode: "cancelled",
+              sources: [],
+            },
+          ],
+          events: [
+            {
+              id: "66666666-6666-7666-8666-666666666666",
+              sessionId: cancelledSession.id,
+              turnId: null,
+              sequence: 0,
+              kind: "session_created",
+              createdAtUnixMs: 1_700_000_000_000,
+            },
+            {
+              id: "77777777-7777-7777-8777-777777777777",
+              sessionId: cancelledSession.id,
+              turnId: cancelledTurnId,
+              sequence: 1,
+              kind: "turn_pending",
+              createdAtUnixMs: 1_700_000_000_001,
+            },
+            {
+              id: "88888888-8888-7888-8888-888888888888",
+              sessionId: cancelledSession.id,
+              turnId: cancelledTurnId,
+              sequence: 2,
+              kind: "turn_cancelled",
+              createdAtUnixMs: 1_700_000_000_002,
+            },
+          ],
+        });
+      }
+      if (sessionId === interruptedSession.id) {
+        return Promise.resolve({
+          session: interruptedSession,
+          turns: [
+            {
+              id: interruptedTurnId,
+              ordinal: 1,
+              userText: "Interrupted",
+              agentText: "Partial",
+              state: "interrupted",
+              errorCode: "interrupted",
+              sources: [],
+            },
+          ],
+          events: [
+            {
+              id: "99999999-9999-7999-8999-999999999999",
+              sessionId: interruptedSession.id,
+              turnId: null,
+              sequence: 0,
+              kind: "session_created",
+              createdAtUnixMs: 1_700_000_010_000,
+            },
+            {
+              id: "aaaaaaaa-aaaa-7aaa-8aaa-aaaaaaaaaaaa",
+              sessionId: interruptedSession.id,
+              turnId: interruptedTurnId,
+              sequence: 1,
+              kind: "turn_pending",
+              createdAtUnixMs: 1_700_000_010_001,
+            },
+            {
+              id: "bbbbbbbb-bbbb-7bbb-8bbb-bbbbbbbbbbbb",
+              sessionId: interruptedSession.id,
+              turnId: interruptedTurnId,
+              sequence: 2,
+              kind: "turn_interrupted",
+              createdAtUnixMs: 1_700_000_010_002,
+            },
+          ],
+        });
+      }
+      return Promise.reject(new Error("unexpected session"));
+    });
+
+    render(<App />);
+    expect(await screen.findByText("Turn cancelled")).toBeInTheDocument();
+    expect(screen.getByText("Cancel me")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Interrupted session" }));
+    expect(await screen.findByText("Turn interrupted")).toBeInTheDocument();
+    expect(screen.getByText("Partial")).toBeInTheDocument();
   });
 
   it("loads native appearance preference on startup", async () => {

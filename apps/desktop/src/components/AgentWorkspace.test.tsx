@@ -31,6 +31,7 @@ const baseTurn: AgentTurn = {
   agentText: "Hello",
   state: "completed",
   errorCode: null,
+  sources: [],
 };
 
 describe("AgentWorkspace", () => {
@@ -48,6 +49,7 @@ describe("AgentWorkspace", () => {
         onModelChange={() => undefined}
         turns={[]}
         draft=""
+        pendingAttachment={null}
         connected={false}
         sending={false}
         sendBlocked={false}
@@ -57,6 +59,8 @@ describe("AgentWorkspace", () => {
         onDraftChange={vi.fn()}
         onSend={vi.fn()}
         onCancel={vi.fn()}
+        onAttach={vi.fn()}
+        onRemoveAttachment={vi.fn()}
         onProjectChange={vi.fn()}
         onOpenProvidersSettings={onOpenProvidersSettings}
       />,
@@ -68,6 +72,103 @@ describe("AgentWorkspace", () => {
     ).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Open Settings" }));
     expect(onOpenProvidersSettings).toHaveBeenCalled();
+  });
+
+  it("exposes attachment controls and transcript metadata accessibly", () => {
+    const onAttach = vi.fn();
+    const onRemoveAttachment = vi.fn();
+    render(
+      <AgentWorkspace
+        title="Hello"
+        projectId={null}
+        projects={[]}
+        modelLabel="GPT-5.5"
+        modelOptions={[{ id: "gpt-5.5", displayName: "GPT-5.5" }]}
+        selectedModelId="gpt-5.5"
+        modelLocked={false}
+        onModelChange={() => undefined}
+        turns={[
+          {
+            ...baseTurn,
+            sources: [
+              {
+                id: "src1",
+                originKind: "local_text_file",
+                displayName: "notes.txt",
+                byteCount: 12,
+                contentSha256: "a".repeat(64),
+              },
+            ],
+          },
+        ]}
+        draft="Ask"
+        pendingAttachment={{
+          draftHandle: "handle",
+          displayName: "draft.txt",
+          byteCount: 4,
+          originKind: "local_text_file",
+        }}
+        connected
+        sending={false}
+        sendBlocked={false}
+        cancelRequested={false}
+        activeTurnId={null}
+        errorMessage={null}
+        onDraftChange={vi.fn()}
+        onSend={vi.fn()}
+        onCancel={vi.fn()}
+        onAttach={onAttach}
+        onRemoveAttachment={onRemoveAttachment}
+        onProjectChange={vi.fn()}
+        onOpenProvidersSettings={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText(/Attached snapshot: notes.txt/)).toBeInTheDocument();
+    expect(screen.getByText(/Captured snapshot: draft.txt/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Replace the attached text file" }));
+    expect(onAttach).toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Remove attachment draft.txt" }));
+    expect(onRemoveAttachment).toHaveBeenCalled();
+  });
+
+  it("locks attachment actions while a send is in flight", () => {
+    render(
+      <AgentWorkspace
+        title="Hello"
+        projectId={null}
+        projects={[]}
+        modelLabel="GPT-5.5"
+        modelOptions={[{ id: "gpt-5.5", displayName: "GPT-5.5" }]}
+        selectedModelId="gpt-5.5"
+        modelLocked={false}
+        onModelChange={() => undefined}
+        turns={[baseTurn]}
+        draft="Ask"
+        pendingAttachment={{
+          draftHandle: "handle",
+          displayName: "draft.txt",
+          byteCount: 4,
+          originKind: "local_text_file",
+        }}
+        connected
+        sending
+        sendBlocked={false}
+        cancelRequested={false}
+        activeTurnId="t1"
+        errorMessage={null}
+        onDraftChange={vi.fn()}
+        onSend={vi.fn()}
+        onCancel={vi.fn()}
+        onAttach={vi.fn()}
+        onRemoveAttachment={vi.fn()}
+        onProjectChange={vi.fn()}
+        onOpenProvidersSettings={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: "Replace the attached text file" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Remove attachment draft.txt" })).toBeDisabled();
   });
 
   it("hides the empty-session wordmark once a turn exists", () => {
@@ -83,6 +184,7 @@ describe("AgentWorkspace", () => {
         onModelChange={() => undefined}
         turns={[baseTurn]}
         draft=""
+        pendingAttachment={null}
         connected
         sending={false}
         sendBlocked={false}
@@ -92,6 +194,8 @@ describe("AgentWorkspace", () => {
         onDraftChange={vi.fn()}
         onSend={vi.fn()}
         onCancel={vi.fn()}
+        onAttach={vi.fn()}
+        onRemoveAttachment={vi.fn()}
         onProjectChange={vi.fn()}
         onOpenProvidersSettings={vi.fn()}
       />,
@@ -115,6 +219,7 @@ describe("AgentWorkspace", () => {
         onModelChange={() => undefined}
         turns={[{ ...baseTurn, state: "streaming", agentText: "Hel" }]}
         draft="Next"
+        pendingAttachment={null}
         connected
         sending={false}
         sendBlocked={false}
@@ -124,6 +229,8 @@ describe("AgentWorkspace", () => {
         onDraftChange={vi.fn()}
         onSend={onSend}
         onCancel={onCancel}
+        onAttach={vi.fn()}
+        onRemoveAttachment={vi.fn()}
         onProjectChange={vi.fn()}
         onOpenProvidersSettings={vi.fn()}
       />,
@@ -147,6 +254,7 @@ describe("AgentWorkspace", () => {
         onModelChange={() => undefined}
         turns={[{ ...baseTurn, state: "streaming", agentText: "Hello" }]}
         draft=""
+        pendingAttachment={null}
         connected
         sending
         sendBlocked={false}
@@ -156,6 +264,8 @@ describe("AgentWorkspace", () => {
         onDraftChange={vi.fn()}
         onSend={onSend}
         onCancel={onCancel}
+        onAttach={vi.fn()}
+        onRemoveAttachment={vi.fn()}
         onProjectChange={vi.fn()}
         onOpenProvidersSettings={vi.fn()}
       />,
@@ -182,6 +292,7 @@ describe("AgentWorkspace", () => {
         onModelChange={() => undefined}
         turns={[]}
         draft={"line\n".repeat(20)}
+        pendingAttachment={null}
         connected
         sending={false}
         sendBlocked={false}
@@ -191,6 +302,8 @@ describe("AgentWorkspace", () => {
         onDraftChange={vi.fn()}
         onSend={vi.fn()}
         onCancel={vi.fn()}
+        onAttach={vi.fn()}
+        onRemoveAttachment={vi.fn()}
         onProjectChange={vi.fn()}
         onOpenProvidersSettings={vi.fn()}
       />,
@@ -217,6 +330,7 @@ describe("AgentWorkspace", () => {
         onModelChange={() => undefined}
         turns={[{ ...baseTurn, state: "streaming", agentText: "Hello" }]}
         draft=""
+        pendingAttachment={null}
         connected
         sending
         sendBlocked={false}
@@ -226,6 +340,8 @@ describe("AgentWorkspace", () => {
         onDraftChange={vi.fn()}
         onSend={vi.fn()}
         onCancel={vi.fn()}
+        onAttach={vi.fn()}
+        onRemoveAttachment={vi.fn()}
         onProjectChange={vi.fn()}
         onOpenProvidersSettings={vi.fn()}
       />,
@@ -249,6 +365,7 @@ describe("AgentWorkspace", () => {
         onModelChange={() => undefined}
         turns={[{ ...baseTurn, state: "streaming", agentText: "Hello there" }]}
         draft=""
+        pendingAttachment={null}
         connected
         sending
         sendBlocked={false}
@@ -258,6 +375,8 @@ describe("AgentWorkspace", () => {
         onDraftChange={vi.fn()}
         onSend={vi.fn()}
         onCancel={vi.fn()}
+        onAttach={vi.fn()}
+        onRemoveAttachment={vi.fn()}
         onProjectChange={vi.fn()}
         onOpenProvidersSettings={vi.fn()}
       />,
@@ -286,6 +405,7 @@ describe("AgentWorkspace", () => {
         onModelChange={() => undefined}
         turns={[{ ...baseTurn, state: "streaming", agentText: "Hello there friend" }]}
         draft=""
+        pendingAttachment={null}
         connected
         sending
         sendBlocked={false}
@@ -295,6 +415,8 @@ describe("AgentWorkspace", () => {
         onDraftChange={vi.fn()}
         onSend={vi.fn()}
         onCancel={vi.fn()}
+        onAttach={vi.fn()}
+        onRemoveAttachment={vi.fn()}
         onProjectChange={vi.fn()}
         onOpenProvidersSettings={vi.fn()}
       />,
@@ -323,6 +445,7 @@ describe("AgentWorkspace", () => {
         onModelChange={() => undefined}
         turns={[{ ...baseTurn, state: "completed", agentText: "Hello there friend" }]}
         draft=""
+        pendingAttachment={null}
         connected
         sending={false}
         sendBlocked={false}
@@ -332,6 +455,8 @@ describe("AgentWorkspace", () => {
         onDraftChange={vi.fn()}
         onSend={vi.fn()}
         onCancel={vi.fn()}
+        onAttach={vi.fn()}
+        onRemoveAttachment={vi.fn()}
         onProjectChange={vi.fn()}
         onOpenProvidersSettings={vi.fn()}
       />,
@@ -363,9 +488,11 @@ describe("AgentWorkspace", () => {
             agentText: "",
             state: "failed",
             errorCode: "provider_unavailable",
+            sources: [],
           },
         ]}
         draft=""
+        pendingAttachment={null}
         connected
         sending={false}
         sendBlocked={false}
@@ -375,6 +502,8 @@ describe("AgentWorkspace", () => {
         onDraftChange={vi.fn()}
         onSend={vi.fn()}
         onCancel={vi.fn()}
+        onAttach={vi.fn()}
+        onRemoveAttachment={vi.fn()}
         onProjectChange={onProjectChange}
         onOpenProvidersSettings={vi.fn()}
       />,

@@ -25,6 +25,16 @@ const agentTurnStates: readonly AgentTurnState[] = [
   "interrupted",
 ];
 
+export type SourceOriginKind = "local_text_file";
+
+export interface AgentSourceMetadata {
+  id: string;
+  originKind: SourceOriginKind;
+  displayName: string;
+  byteCount: number;
+  contentSha256: string;
+}
+
 export interface AgentTurn {
   id: string;
   ordinal: number;
@@ -32,6 +42,7 @@ export interface AgentTurn {
   agentText: string;
   state: AgentTurnState;
   errorCode: AgentErrorCode | null;
+  sources: AgentSourceMetadata[];
 }
 
 export interface AgentSessionDetail {
@@ -44,7 +55,27 @@ export type AgentStreamEvent =
   | { kind: "delta"; turn_id: string; text: string }
   | { kind: "terminal"; turn: AgentTurn };
 
-export type AgentErrorCode = ProviderErrorCode;
+export type AgentSourceErrorCode =
+  "source_unreadable" | "source_unsupported" | "source_too_large" | "source_draft_expired";
+
+export type AgentErrorCode = ProviderErrorCode | AgentSourceErrorCode;
+
+const agentSourceErrorCodes: readonly AgentSourceErrorCode[] = [
+  "source_unreadable",
+  "source_unsupported",
+  "source_too_large",
+  "source_draft_expired",
+];
+
+export interface PendingSourceAttachment {
+  draftHandle: string;
+  displayName: string;
+  byteCount: number;
+  originKind: SourceOriginKind;
+}
+
+export type PickAgentTextSourceResult =
+  { status: "cancelled" } | { status: "selected"; attachment: PendingSourceAttachment };
 
 export class AgentError extends Error {
   readonly code: AgentErrorCode;
@@ -56,9 +87,40 @@ export class AgentError extends Error {
   }
 }
 
+function isAgentSourceErrorCode(value: unknown): value is AgentSourceErrorCode {
+  return typeof value === "string" && agentSourceErrorCodes.includes(value as AgentSourceErrorCode);
+}
+
+function isAgentErrorCode(value: unknown): value is AgentErrorCode {
+  return isProviderErrorCode(value) || isAgentSourceErrorCode(value);
+}
+
+function extractErrorCode(error: unknown): unknown {
+  if (typeof error === "string") {
+    return error;
+  }
+
+  if (typeof error === "object" && error !== null) {
+    if ("code" in error) {
+      return error.code;
+    }
+
+    if ("message" in error && typeof error.message === "string") {
+      return error.message;
+    }
+  }
+
+  return undefined;
+}
+
 export function getAgentErrorCode(error: unknown): AgentErrorCode {
   if (error instanceof AgentError) {
     return error.code;
+  }
+
+  const code = extractErrorCode(error);
+  if (isAgentErrorCode(code)) {
+    return code;
   }
 
   return getProviderErrorCode(error);
@@ -85,6 +147,91 @@ function isAgentSession(value: unknown): value is AgentSession {
   );
 }
 
+const MAX_SOURCE_UTF8 = 64 * 1024;
+const SOURCE_METADATA_KEYS = [
+  "byteCount",
+  "contentSha256",
+  "displayName",
+  "id",
+  "originKind",
+] as const;
+const PICK_RESULT_KEYS = [
+  "byteCount",
+  "displayName",
+  "draftHandle",
+  "originKind",
+  "status",
+] as const;
+
+function isUuidV7(value: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(value);
+}
+
+function isCanonicalSha256(value: string): boolean {
+  return /^[0-9a-f]{64}$/.test(value);
+}
+
+function isDraftHandle(value: string): boolean {
+  return /^[0-9a-f]{32}$/.test(value);
+}
+
+function isSafeSourceDisplayName(value: string): boolean {
+  if (value.length === 0) {
+    return false;
+  }
+
+  for (const char of value) {
+    const code = char.codePointAt(0);
+    if (code === undefined) {
+      return false;
+    }
+    if (
+      code <= 0x1f ||
+      code === 0x7f ||
+      (code >= 0x80 && code <= 0x9f) ||
+      code === 0x061c ||
+      (code >= 0x200e && code <= 0x200f) ||
+      (code >= 0x202a && code <= 0x202e) ||
+      (code >= 0x2028 && code <= 0x2029) ||
+      (code >= 0x2066 && code <= 0x2069)
+    ) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+function isSourceByteCount(value: unknown): value is number {
+  return (
+    typeof value === "number" && Number.isInteger(value) && value >= 0 && value <= MAX_SOURCE_UTF8
+  );
+}
+
+function hasExactKeys(record: Record<string, unknown>, allowed: readonly string[]): boolean {
+  const keys = Object.keys(record).sort();
+  return keys.length === allowed.length && keys.every((key, index) => key === allowed[index]);
+}
+
+function isSourceMetadata(value: unknown): value is AgentSourceMetadata {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return false;
+  }
+
+  const record = value as Record<string, unknown>;
+  return (
+    hasExactKeys(record, SOURCE_METADATA_KEYS) &&
+    typeof record.id === "string" &&
+    isUuidV7(record.id) &&
+    record.originKind === "local_text_file" &&
+    typeof record.displayName === "string" &&
+    isSafeSourceDisplayName(record.displayName) &&
+    isSourceByteCount(record.byteCount) &&
+    typeof record.contentSha256 === "string" &&
+    isCanonicalSha256(record.contentSha256)
+  );
+}
+
 function isAgentTurn(value: unknown): value is AgentTurn {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     return false;
@@ -103,7 +250,10 @@ function isAgentTurn(value: unknown): value is AgentTurn {
     typeof value.state === "string" &&
     agentTurnStates.includes(value.state as AgentTurnState) &&
     "errorCode" in value &&
-    (value.errorCode === null || isProviderErrorCode(value.errorCode))
+    (value.errorCode === null || isAgentErrorCode(value.errorCode)) &&
+    "sources" in value &&
+    Array.isArray(value.sources) &&
+    value.sources.every(isSourceMetadata)
   );
 }
 
@@ -176,6 +326,51 @@ function isAgentStreamEvent(value: unknown): value is AgentStreamEvent {
   return false;
 }
 
+function validatePickResult(value: unknown): PickAgentTextSourceResult {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new AgentError("agent_storage_unavailable");
+  }
+
+  const record = value as Record<string, unknown>;
+  if (!hasExactKeys(record, PICK_RESULT_KEYS)) {
+    throw new AgentError("agent_storage_unavailable");
+  }
+
+  if (record.status === "cancelled") {
+    if (
+      record.draftHandle !== null ||
+      record.displayName !== null ||
+      record.byteCount !== null ||
+      record.originKind !== null
+    ) {
+      throw new AgentError("agent_storage_unavailable");
+    }
+    return { status: "cancelled" };
+  }
+
+  if (
+    record.status === "selected" &&
+    typeof record.draftHandle === "string" &&
+    isDraftHandle(record.draftHandle) &&
+    typeof record.displayName === "string" &&
+    isSafeSourceDisplayName(record.displayName) &&
+    isSourceByteCount(record.byteCount) &&
+    record.originKind === "local_text_file"
+  ) {
+    return {
+      status: "selected",
+      attachment: {
+        draftHandle: record.draftHandle,
+        displayName: record.displayName,
+        byteCount: record.byteCount,
+        originKind: "local_text_file",
+      },
+    };
+  }
+
+  throw new AgentError("agent_storage_unavailable");
+}
+
 async function invokeAgentCommand(
   command: string,
   args?: Record<string, unknown>,
@@ -208,11 +403,24 @@ export async function cancelAgentTurn(turnId: string): Promise<void> {
   await invokeAgentCommand("cancel_agent_turn", { turnId });
 }
 
+export async function pickAgentTextSource(): Promise<PickAgentTextSourceResult> {
+  return validatePickResult(await invokeAgentCommand("pick_agent_text_source"));
+}
+
+export async function clearAgentTextSourceDraft(draftHandle: string | null): Promise<void> {
+  await invokeAgentCommand("clear_agent_text_source_draft", { draftHandle });
+}
+
+export async function setAgentSourceDraftScope(sessionId: string | null): Promise<void> {
+  await invokeAgentCommand("set_agent_source_draft_scope", { sessionId });
+}
+
 export async function sendAgentMessage(options: {
   sessionId: string | null;
   userText: string;
   projectId: string | null;
   modelId: string | null;
+  sourceDraftHandle: string | null;
   onEvent: (event: AgentStreamEvent) => void;
 }): Promise<void> {
   const channel = new Channel<unknown>((payload) => {
@@ -229,6 +437,7 @@ export async function sendAgentMessage(options: {
       userText: options.userText,
       projectId: options.projectId,
       modelId: options.modelId,
+      sourceDraftHandle: options.sourceDraftHandle,
       channel,
     });
   } catch (error: unknown) {
@@ -272,9 +481,25 @@ export function getSafeAgentErrorMessageForCode(code: AgentErrorCode): string {
       return "That model is unavailable. Choose another model for a new session.";
     case "provider_unavailable":
       return "The provider is unavailable. Try again.";
+    case "source_unreadable":
+      return "That file could not be read.";
+    case "source_unsupported":
+      return "That file is not supported as a text attachment.";
+    case "source_too_large":
+      return "That file is too large to attach.";
+    case "source_draft_expired":
+      return "The attachment is no longer available. Choose the file again.";
   }
 }
 
 export function getSafeAgentErrorMessage(error: unknown): string {
   return getSafeAgentErrorMessageForCode(getAgentErrorCode(error));
+}
+
+export function formatSourceByteCount(byteCount: number): string {
+  if (byteCount < 1024) {
+    return `${byteCount} B`;
+  }
+
+  return `${(byteCount / 1024).toFixed(byteCount < 10 * 1024 ? 1 : 0)} KB`;
 }

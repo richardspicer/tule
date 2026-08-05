@@ -3,6 +3,7 @@
 
 mod agent;
 mod agent_repository;
+mod agent_source;
 mod agent_use_cases;
 mod project;
 mod provider_catalog;
@@ -20,6 +21,12 @@ pub use agent::{
     derive_session_title, should_checkpoint, validate_user_text,
 };
 pub use agent_repository::{AgentRepository, ProviderProfile};
+pub use agent_source::{
+    ATTACHED_SOURCE_FRAME_VERSION, MAX_SOURCE_UTF8, SOURCE_ORIGIN_LOCAL_TEXT_FILE, Source,
+    SourceContext, SourceId, SourceReconstructionError, SourceValidationError, TurnSource,
+    format_turn_user_content, hash_source_bytes, validate_source_content,
+    validate_source_display_name,
+};
 pub use agent_use_cases::{
     ApplyAgentDeltaError, FinishAgentTurnError, PrepareAgentSendError, PreparedAgentSend,
     SetSessionProjectError, apply_agent_delta, cancel_agent_turn, checkpoint_agent_turn,

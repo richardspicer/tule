@@ -14,6 +14,7 @@ type NativeCloseRequestedHandler = (event: NativeCloseRequestedEvent) => void;
 
 const {
   cancelAgentTurnMock,
+  clearAgentTextSourceDraftMock,
   createProjectMock,
   exitApplicationMock,
   getApplicationInfoMock,
@@ -32,13 +33,16 @@ const {
   onCloseRequestedMock,
   openProjectMock,
   openSettingsWindowMock,
+  pickAgentTextSourceMock,
   sendAgentMessageMock,
   setAgentSessionProjectMock,
+  setAgentSourceDraftScopeMock,
   syncConnectionStatusMock,
   unlistenCloseRequestedMock,
   updateProjectInstructionsMock,
 } = vi.hoisted(() => ({
   cancelAgentTurnMock: vi.fn(),
+  clearAgentTextSourceDraftMock: vi.fn(),
   createProjectMock: vi.fn(),
   exitApplicationMock: vi.fn(),
   getApplicationInfoMock: vi.fn(),
@@ -57,8 +61,10 @@ const {
   onCloseRequestedMock: vi.fn<(handler: NativeCloseRequestedHandler) => Promise<() => void>>(),
   openProjectMock: vi.fn(),
   openSettingsWindowMock: vi.fn(),
+  pickAgentTextSourceMock: vi.fn(),
   sendAgentMessageMock: vi.fn(),
   setAgentSessionProjectMock: vi.fn(),
+  setAgentSourceDraftScopeMock: vi.fn(),
   syncConnectionStatusMock: vi.fn(),
   unlistenCloseRequestedMock: vi.fn(),
   updateProjectInstructionsMock: vi.fn(),
@@ -115,6 +121,9 @@ vi.mock("./platform/agents", async (importOriginal) => {
     sendAgentMessage: sendAgentMessageMock,
     cancelAgentTurn: cancelAgentTurnMock,
     setAgentSessionProject: setAgentSessionProjectMock,
+    pickAgentTextSource: pickAgentTextSourceMock,
+    clearAgentTextSourceDraft: clearAgentTextSourceDraftMock,
+    setAgentSourceDraftScope: setAgentSourceDraftScopeMock,
   };
 });
 
@@ -138,15 +147,21 @@ describe("App", () => {
   beforeEach(() => {
     createProjectMock.mockReset();
     cancelAgentTurnMock.mockReset();
+    clearAgentTextSourceDraftMock.mockReset();
     exitApplicationMock.mockReset();
     getApplicationInfoMock.mockReset();
     getAgentSessionMock.mockReset();
     listProjectsMock.mockReset();
     openProjectMock.mockReset();
     openSettingsWindowMock.mockReset();
+    pickAgentTextSourceMock.mockReset();
     sendAgentMessageMock.mockReset();
     setAgentSessionProjectMock.mockReset();
+    setAgentSourceDraftScopeMock.mockReset();
     syncConnectionStatusMock.mockReset();
+    clearAgentTextSourceDraftMock.mockResolvedValue(undefined);
+    pickAgentTextSourceMock.mockResolvedValue({ status: "cancelled" });
+    setAgentSourceDraftScopeMock.mockResolvedValue(undefined);
     updateProjectInstructionsMock.mockReset();
     listAgentSessionsMock.mockReset();
     getConnectionStatusMock.mockReset();
@@ -371,6 +386,58 @@ describe("App", () => {
     expect(screen.getAllByText("Atlas").length).toBeGreaterThan(0);
   });
 
+  it("clears the prior session attachment when Use with Agents starts a project session", async () => {
+    const user = userEvent.setup();
+    const session: AgentSession = {
+      id: "22222222-2222-7222-8222-222222222222",
+      title: "Existing session",
+      projectId: null,
+      modelId: "gpt-5.5",
+    };
+    const project: Project = {
+      id: "11111111-1111-7111-8111-111111111111",
+      displayName: "Atlas",
+      instructions: "Keep answers short",
+    };
+    listAgentSessionsMock.mockResolvedValue([session]);
+    getAgentSessionMock.mockResolvedValue({ session, turns: [] });
+    getConnectionStatusMock.mockResolvedValue({
+      state: "connected",
+      providerId: "openai-chatgpt-compat",
+      model: "gpt-5.5",
+    });
+    listProjectsMock.mockResolvedValue([project]);
+    openProjectMock.mockResolvedValue(project);
+    pickAgentTextSourceMock.mockResolvedValue({
+      status: "selected",
+      attachment: {
+        draftHandle: "deadbeef".repeat(4),
+        displayName: "notes.txt",
+        byteCount: 5,
+        originKind: "local_text_file",
+      },
+    });
+
+    render(<App />);
+    expect(await screen.findByRole("heading", { name: "Existing session" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Attach a text file" }));
+    expect(await screen.findByText(/Captured snapshot: notes\.txt/)).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Manage projects" }));
+    const atlasButtons = screen.getAllByRole("button", { name: /Atlas/ });
+    const atlasOpen = atlasButtons[atlasButtons.length - 1];
+    expect(atlasOpen).toBeDefined();
+    await user.click(atlasOpen);
+    await waitFor(() => expect(openProjectMock).toHaveBeenCalled());
+    setAgentSourceDraftScopeMock.mockClear();
+
+    await user.click(await screen.findByRole("button", { name: "Use with Agents" }));
+
+    expect(screen.getByRole("heading", { name: "New session" })).toBeInTheDocument();
+    expect(screen.queryByText(/Captured snapshot: notes\.txt/)).not.toBeInTheDocument();
+    expect(setAgentSourceDraftScopeMock).toHaveBeenCalledWith(null);
+  });
+
   it("opens New project creation in the detail region", async () => {
     const user = userEvent.setup();
     createProjectMock.mockRejectedValue(new ProjectStorageError("invalid_project_name"));
@@ -400,6 +467,7 @@ describe("App", () => {
           agentText: "Persisted answer",
           state: "completed",
           errorCode: null,
+          sources: [],
         },
       ],
     });
@@ -410,6 +478,191 @@ describe("App", () => {
     expect(screen.getByText("Earlier question")).toBeInTheDocument();
     expect(screen.getByText("Persisted answer")).toBeInTheDocument();
     expect(screen.queryByRole("img", { name: "TULE" })).not.toBeInTheDocument();
+    await waitFor(() => expect(setAgentSourceDraftScopeMock).toHaveBeenCalledWith(session.id));
+  });
+
+  it("binds attachment scope on startup so a resumed session can attach without navigating", async () => {
+    const user = userEvent.setup();
+    const session: AgentSession = {
+      id: "22222222-2222-7222-8222-222222222222",
+      title: "Existing session",
+      projectId: null,
+      modelId: "gpt-5.5",
+    };
+    listAgentSessionsMock.mockResolvedValue([session]);
+    getAgentSessionMock.mockResolvedValue({
+      session,
+      turns: [
+        {
+          id: "33333333-3333-7333-8333-333333333333",
+          ordinal: 1,
+          userText: "Earlier question",
+          agentText: "Persisted answer",
+          state: "completed",
+          errorCode: null,
+          sources: [],
+        },
+      ],
+    });
+    getConnectionStatusMock.mockResolvedValue({
+      state: "connected",
+      providerId: "openai-chatgpt-compat",
+      model: "gpt-5.5",
+    });
+    pickAgentTextSourceMock.mockResolvedValue({
+      status: "selected",
+      attachment: {
+        draftHandle: "deadbeef".repeat(4),
+        displayName: "notes.txt",
+        byteCount: 5,
+        originKind: "local_text_file",
+      },
+    });
+    sendAgentMessageMock.mockImplementation(
+      (options: {
+        sessionId: string | null;
+        sourceDraftHandle: string | null;
+        onEvent: (event: AgentStreamEvent) => void;
+      }) => {
+        options.onEvent({
+          kind: "started",
+          session_id: session.id,
+          turn_id: "44444444-4444-7444-8444-444444444444",
+        });
+        options.onEvent({
+          kind: "terminal",
+          turn: {
+            id: "44444444-4444-7444-8444-444444444444",
+            ordinal: 2,
+            userText: "Use the file",
+            agentText: "Used it",
+            state: "completed",
+            errorCode: null,
+            sources: [
+              {
+                id: "55555555-5555-7555-8555-555555555555",
+                originKind: "local_text_file",
+                displayName: "notes.txt",
+                byteCount: 5,
+                contentSha256: "a".repeat(64),
+              },
+            ],
+          },
+        });
+        expect(options.sessionId).toBe(session.id);
+        expect(options.sourceDraftHandle).toBe("deadbeef".repeat(4));
+        return Promise.resolve();
+      },
+    );
+
+    render(<App />);
+    expect(await screen.findByRole("heading", { name: "Existing session" })).toBeInTheDocument();
+    await waitFor(() => expect(setAgentSourceDraftScopeMock).toHaveBeenCalledWith(session.id));
+
+    await user.click(screen.getByRole("button", { name: "Attach a text file" }));
+    expect(await screen.findByText(/Captured snapshot: notes\.txt/)).toBeInTheDocument();
+    const composer = screen.getByRole("textbox", { name: "Message the Agent" });
+    await user.type(composer, "Use the file");
+    await user.click(screen.getByRole("button", { name: "Send" }));
+
+    await waitFor(() => expect(sendAgentMessageMock).toHaveBeenCalled());
+    expect(screen.queryByText("source_draft_expired")).not.toBeInTheDocument();
+  });
+
+  it("binds attachment scope after the first turn so a follow-up can attach without navigating", async () => {
+    const user = userEvent.setup();
+    const sessionId = "22222222-2222-7222-8222-222222222222";
+    getConnectionStatusMock.mockResolvedValue({
+      state: "connected",
+      providerId: "openai-chatgpt-compat",
+      model: "gpt-5.5",
+    });
+    listAgentSessionsMock.mockResolvedValue([]);
+    sendAgentMessageMock
+      .mockImplementationOnce(
+        (options: {
+          sessionId: string | null;
+          sourceDraftHandle: string | null;
+          onEvent: (event: AgentStreamEvent) => void;
+        }) => {
+          expect(options.sessionId).toBeNull();
+          options.onEvent({ kind: "started", session_id: sessionId, turn_id: "t1" });
+          options.onEvent({
+            kind: "terminal",
+            turn: {
+              id: "t1",
+              ordinal: 1,
+              userText: "Hello",
+              agentText: "Hi",
+              state: "completed",
+              errorCode: null,
+              sources: [],
+            },
+          });
+          return Promise.resolve();
+        },
+      )
+      .mockImplementationOnce(
+        (options: {
+          sessionId: string | null;
+          sourceDraftHandle: string | null;
+          onEvent: (event: AgentStreamEvent) => void;
+        }) => {
+          expect(options.sessionId).toBe(sessionId);
+          expect(options.sourceDraftHandle).toBe("abcdabcd".repeat(4));
+          options.onEvent({ kind: "started", session_id: sessionId, turn_id: "t2" });
+          options.onEvent({
+            kind: "terminal",
+            turn: {
+              id: "t2",
+              ordinal: 2,
+              userText: "With file",
+              agentText: "Got it",
+              state: "completed",
+              errorCode: null,
+              sources: [
+                {
+                  id: "55555555-5555-7555-8555-555555555555",
+                  originKind: "local_text_file",
+                  displayName: "follow.txt",
+                  byteCount: 4,
+                  contentSha256: "b".repeat(64),
+                },
+              ],
+            },
+          });
+          return Promise.resolve();
+        },
+      );
+    pickAgentTextSourceMock.mockResolvedValue({
+      status: "selected",
+      attachment: {
+        draftHandle: "abcdabcd".repeat(4),
+        displayName: "follow.txt",
+        byteCount: 4,
+        originKind: "local_text_file",
+      },
+    });
+
+    render(<App />);
+    const composer = await screen.findByRole("textbox", { name: "Message the Agent" });
+    await user.type(composer, "Hello");
+    await user.click(screen.getByRole("button", { name: "Send" }));
+
+    await waitFor(() => expect(setAgentSourceDraftScopeMock).toHaveBeenCalledWith(sessionId));
+
+    await user.click(screen.getByRole("button", { name: "Attach a text file" }));
+    expect(await screen.findByText(/Captured snapshot: follow\.txt/)).toBeInTheDocument();
+    await user.type(screen.getByRole("textbox", { name: "Message the Agent" }), "With file");
+    await user.click(screen.getByRole("button", { name: "Send" }));
+
+    await waitFor(() => expect(sendAgentMessageMock).toHaveBeenCalledTimes(2));
+    expect(sendAgentMessageMock.mock.calls[1]?.[0]).toEqual(
+      expect.objectContaining({
+        sessionId,
+        sourceDraftHandle: "abcdabcd".repeat(4),
+      }),
+    );
   });
 
   it("does not let a stale startup detail overwrite New session", async () => {
@@ -443,6 +696,7 @@ describe("App", () => {
           agentText: "Stale answer",
           state: "completed",
           errorCode: null,
+          sources: [],
         },
       ],
     });
@@ -497,6 +751,7 @@ describe("App", () => {
           agentText: "Latest answer",
           state: "completed",
           errorCode: null,
+          sources: [],
         },
       ],
     });
@@ -512,6 +767,7 @@ describe("App", () => {
           agentText: "Older answer",
           state: "completed",
           errorCode: null,
+          sources: [],
         },
       ],
     });
@@ -811,6 +1067,7 @@ describe("App", () => {
             agentText: "",
             state: "failed",
             errorCode: "authentication_required",
+            sources: [],
           },
         });
         return Promise.resolve();
@@ -870,6 +1127,7 @@ describe("App", () => {
           agentText: "",
           state: "cancelled",
           errorCode: "cancelled",
+          sources: [],
         },
       });
       resolveSend?.();

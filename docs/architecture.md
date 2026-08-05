@@ -80,6 +80,21 @@ fallback or retry under another model. Tools, connectors, filesystem access,
 autonomous retries, and active-session model switching are out of scope for this
 slice.
 
+Turn-scoped local text Sources extend that Agent boundary. The native host owns
+file-picker invocation, one-time bounded reading, and ephemeral draft handles for
+the main-window composer. React receives only an opaque draft handle and
+allowlisted metadata—never a path or file content—and gains no generic dialog or
+filesystem capability. On send, the host resolves the handle, validates the
+snapshot in `tule-core`, and atomically persists the Source with the pending turn
+and events before provider transmission. Provider context includes the current
+Source and Sources from completed prior turns in owning-turn order under prompt
+version `tule-direct-agent-v2`, with explicit untrusted-data framing subordinate
+to fixed and saved Project instructions. Routine IPC, transcripts, events, and
+safe errors expose only Source identifier, origin kind, display name, byte count,
+and hash. Failed, cancelled, and interrupted turns retain that metadata but do
+not enter later context. The final serialized request still honors the existing
+128 KiB ceiling without truncation or silent omission.
+
 ## Project Persistence
 
 The project model and its application operations live in `tule-core`. The core

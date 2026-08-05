@@ -89,6 +89,7 @@ describe("Tooltip", () => {
   });
 
   it("dismisses when the document becomes hidden", () => {
+    const previousVisibility = document.visibilityState;
     render(
       <Tooltip label="Settings">
         <button type="button" aria-label="Settings">
@@ -105,8 +106,15 @@ describe("Tooltip", () => {
       configurable: true,
       value: "hidden",
     });
-    fireEvent(document, new Event("visibilitychange"));
-    expect(screen.queryByRole("tooltip")).not.toBeInTheDocument();
+    try {
+      fireEvent(document, new Event("visibilitychange"));
+      expect(screen.queryByRole("tooltip")).not.toBeInTheDocument();
+    } finally {
+      Object.defineProperty(document, "visibilityState", {
+        configurable: true,
+        value: previousVisibility,
+      });
+    }
   });
 
   it("flips above the anchor when there is insufficient space below", () => {

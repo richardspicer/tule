@@ -61,7 +61,6 @@ interface AgentWorkspaceProps {
   onRemoveAttachment: () => void;
   onProjectChange: (projectId: string | null) => void;
   onModelChange: (modelId: string) => void;
-  onOpenProvidersSettings: () => void;
 }
 
 function turnStateLabel(state: string): string | null {
@@ -91,7 +90,12 @@ function attachmentActionLabel(
   if (pendingAttachment === null) {
     return kind === "folder" ? "Attach folder" : "Attach file";
   }
-  return kind === "folder" ? "Replace folder" : "Replace file";
+  const pendingKind =
+    pendingAttachment.originKind === "local_text_folder" ? "folder" : "file";
+  if (pendingKind === kind) {
+    return kind === "folder" ? "Replace folder" : "Replace file";
+  }
+  return kind === "folder" ? "Replace with folder" : "Replace with file";
 }
 
 function isNearBottom(element: HTMLElement): boolean {

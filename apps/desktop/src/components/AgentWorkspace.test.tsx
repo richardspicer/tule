@@ -62,7 +62,6 @@ describe("AgentWorkspace", () => {
         onAttachFolder={vi.fn()}
         onRemoveAttachment={vi.fn()}
         onProjectChange={vi.fn()}
-        onOpenProvidersSettings={vi.fn()}
       />,
     );
 
@@ -121,7 +120,6 @@ describe("AgentWorkspace", () => {
         onAttachFolder={vi.fn()}
         onRemoveAttachment={onRemoveAttachment}
         onProjectChange={vi.fn()}
-        onOpenProvidersSettings={vi.fn()}
       />,
     );
 
@@ -177,7 +175,6 @@ describe("AgentWorkspace", () => {
         onAttachFolder={onAttachFolder}
         onRemoveAttachment={vi.fn()}
         onProjectChange={vi.fn()}
-        onOpenProvidersSettings={vi.fn()}
       />,
     );
 
@@ -236,7 +233,6 @@ describe("AgentWorkspace", () => {
         onAttachFolder={vi.fn()}
         onRemoveAttachment={vi.fn()}
         onProjectChange={vi.fn()}
-        onOpenProvidersSettings={vi.fn()}
       />,
     );
 
@@ -277,13 +273,56 @@ describe("AgentWorkspace", () => {
         onAttachFolder={vi.fn()}
         onRemoveAttachment={vi.fn()}
         onProjectChange={vi.fn()}
-        onOpenProvidersSettings={vi.fn()}
       />,
     );
 
     expect(screen.getByRole("button", { name: "Replace file" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "Replace folder" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Replace with folder" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Remove attachment draft.txt" })).toBeDisabled();
+  });
+
+  it("labels cross-kind replace actions when a pending attachment already exists", () => {
+    render(
+      <AgentWorkspace
+        title="Hello"
+        projectId={null}
+        projects={[]}
+        modelLabel="GPT-5.5"
+        modelOptions={[{ id: "gpt-5.5", displayName: "GPT-5.5" }]}
+        selectedModelId="gpt-5.5"
+        modelLocked={false}
+        onModelChange={() => undefined}
+        turns={[]}
+        draft="Ask"
+        pendingAttachment={{
+          draftHandle: "handle",
+          displayName: "draft.txt",
+          byteCount: 4,
+          originKind: "local_text_file",
+          memberCount: 1,
+        }}
+        connected
+        sending={false}
+        sendBlocked={false}
+        cancelRequested={false}
+        activeTurnId={null}
+        errorMessage={null}
+        onDraftChange={vi.fn()}
+        onSend={vi.fn()}
+        onCancel={vi.fn()}
+        onAttach={vi.fn()}
+        onAttachFolder={vi.fn()}
+        onRemoveAttachment={vi.fn()}
+        onProjectChange={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: "Replace file" })).toBeInTheDocument();
+    const replaceWithFolder = screen.getByRole("button", { name: "Replace with folder" });
+    fireEvent.mouseEnter(replaceWithFolder.parentElement!);
+    expect(within(replaceWithFolder.parentElement!).getByRole("tooltip")).toHaveTextContent(
+      "Replace with folder",
+    );
   });
 
   it("hides the empty-session wordmark once a turn exists", () => {
@@ -313,7 +352,6 @@ describe("AgentWorkspace", () => {
         onAttachFolder={vi.fn()}
         onRemoveAttachment={vi.fn()}
         onProjectChange={vi.fn()}
-        onOpenProvidersSettings={vi.fn()}
       />,
     );
 
@@ -349,7 +387,6 @@ describe("AgentWorkspace", () => {
         onAttachFolder={vi.fn()}
         onRemoveAttachment={vi.fn()}
         onProjectChange={vi.fn()}
-        onOpenProvidersSettings={vi.fn()}
       />,
     );
 
@@ -385,7 +422,6 @@ describe("AgentWorkspace", () => {
         onAttachFolder={vi.fn()}
         onRemoveAttachment={vi.fn()}
         onProjectChange={vi.fn()}
-        onOpenProvidersSettings={vi.fn()}
       />,
     );
 
@@ -424,7 +460,6 @@ describe("AgentWorkspace", () => {
         onAttachFolder={vi.fn()}
         onRemoveAttachment={vi.fn()}
         onProjectChange={vi.fn()}
-        onOpenProvidersSettings={vi.fn()}
       />,
     );
 
@@ -463,7 +498,6 @@ describe("AgentWorkspace", () => {
         onAttachFolder={vi.fn()}
         onRemoveAttachment={vi.fn()}
         onProjectChange={vi.fn()}
-        onOpenProvidersSettings={vi.fn()}
       />,
     );
 
@@ -499,7 +533,6 @@ describe("AgentWorkspace", () => {
         onAttachFolder={vi.fn()}
         onRemoveAttachment={vi.fn()}
         onProjectChange={vi.fn()}
-        onOpenProvidersSettings={vi.fn()}
       />,
     );
     expect(metrics.scrollTop).toBe(1200);
@@ -540,7 +573,6 @@ describe("AgentWorkspace", () => {
         onAttachFolder={vi.fn()}
         onRemoveAttachment={vi.fn()}
         onProjectChange={vi.fn()}
-        onOpenProvidersSettings={vi.fn()}
       />,
     );
     expect(metrics.scrollTop).toBe(100);
@@ -581,7 +613,6 @@ describe("AgentWorkspace", () => {
         onAttachFolder={vi.fn()}
         onRemoveAttachment={vi.fn()}
         onProjectChange={vi.fn()}
-        onOpenProvidersSettings={vi.fn()}
       />,
     );
     expect(metrics.scrollTop).toBe(220);
@@ -629,7 +660,6 @@ describe("AgentWorkspace", () => {
         onAttachFolder={vi.fn()}
         onRemoveAttachment={vi.fn()}
         onProjectChange={onProjectChange}
-        onOpenProvidersSettings={vi.fn()}
       />,
     );
 

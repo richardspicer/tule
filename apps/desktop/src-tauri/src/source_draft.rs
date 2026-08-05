@@ -626,25 +626,106 @@ fn resolve_and_validate_host(host: &str) -> Result<(), SourceDraftError> {
 
 fn is_blocked_ip(ip: std::net::IpAddr) -> bool {
     match ip {
-        std::net::IpAddr::V4(v4) => {
-            let octets = v4.octets();
-            octets[0] == 0
-                || octets[0] == 10
-                || octets[0] == 127
-                || (octets[0] == 100 && (octets[1] & 0xC0) == 64)
-                || (octets[0] == 169 && octets[1] == 254)
-                || (octets[0] == 172 && (octets[1] >= 16 && octets[1] <= 31))
-                || (octets[0] == 192 && octets[1] == 168)
-                || octets[0] >= 224
-        }
+        std::net::IpAddr::V4(v4) => is_blocked_ipv4(v4),
         std::net::IpAddr::V6(v6) => {
-            let segments = v6.segments();
-            segments[0] == 0
-                || (segments[0] & 0xFE00) == 0xFC00
-                || (segments[0] & 0xFFC0) == 0xFE80
-                || segments == [0, 0, 0, 0, 0, 0, 0, 1]
+            if let Some(mapped) = v6.to_ipv4_mapped() {
+                return is_blocked_ipv4(mapped);
+            }
+            v6.is_loopback()
+                || v6.is_unspecified()
+                || (v6.segments()[0] & 0xFE00) == 0xFC00
+                || (v6.segments()[0] & 0xFFC0) == 0xFE80
         }
     }
+}
+
+fn is_blocked_ipv4(v4: std::net::Ipv4Addr) -> bool {
+    let octets = v4.octets();
+    v4.is_loopback()
+        || v4.is_private()
+        || v4.is_link_local()
+        || octets[0] == 0
+        || (octets[0] == 100 && (octets[1] & 0xC0) == 64)
+        || octets[0] >= 224
+}
+
+/// One hop while fetching a link Source.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum LinkHopOutcome {
+    Redirect(String),
+    Success(FetchedUrlBody),
+}
+
+/// Single-hop fetch boundary used for redirect-chain tests and production.
+pub(crate) trait SourceUrlHopFetcher: Send + Sync {
+    fn fetch_hop(&self, url: &str) -> Result<LinkHopOutcome, SourceDraftError>;
+}
+
+fn fetch_https_text_with_redirects(
+    fetcher: &impl SourceUrlHopFetcher,
+    url: &str,
+) -> Result<FetchedUrlBody, SourceDraftError> {
+    validate_link_destination(url)?;
+    let mut current = url.to_owned();
+    for _ in 0..=MAX_LINK_REDIRECTS {
+        match fetcher.fetch_hop(&current)? {
+            LinkHopOutcome::Redirect(location) => {
+                let next = url::Url::parse(&location)
+                    .or_else(|_| url::Url::parse(&current).and_then(|base| base.join(&location)))
+                    .map_err(|_| SourceDraftError::Unsupported)?;
+                if next.scheme() != "https" {
+                    return Err(SourceDraftError::Unsupported);
+                }
+                let next_url = next.to_string();
+                validate_canonical_https_url(&next_url).map_err(map_validation)?;
+                validate_link_destination(&next_url)?;
+                current = next_url;
+            }
+            LinkHopOutcome::Success(body) => return Ok(body),
+        }
+    }
+    Err(SourceDraftError::Unsupported)
+}
+
+fn link_hop_from_response(
+    response: reqwest::blocking::Response,
+) -> Result<LinkHopOutcome, SourceDraftError> {
+    let status = response.status();
+    if status.is_redirection() {
+        let location = response
+            .headers()
+            .get(reqwest::header::LOCATION)
+            .and_then(|value| value.to_str().ok())
+            .ok_or(SourceDraftError::Unsupported)?;
+        return Ok(LinkHopOutcome::Redirect(location.to_owned()));
+    }
+    if !status.is_success() {
+        return Err(SourceDraftError::Unreadable);
+    }
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+    let mut buffer = Vec::new();
+    let mut reader = response;
+    let mut chunk = [0_u8; 8192];
+    loop {
+        let read = reader
+            .read(&mut chunk)
+            .map_err(|_| SourceDraftError::Unreadable)?;
+        if read == 0 {
+            break;
+        }
+        if buffer.len() + read > MAX_SOURCE_UTF8 {
+            return Err(SourceDraftError::TooLarge);
+        }
+        buffer.extend_from_slice(&chunk[..read]);
+    }
+    Ok(LinkHopOutcome::Success(FetchedUrlBody {
+        bytes: buffer,
+        content_type,
+    }))
 }
 
 /// Production HTTPS fetcher with redirect validation and a fixed redirect budget.
@@ -673,58 +754,14 @@ impl NativeSourceUrlFetcher {
 
 impl SourceUrlFetcher for NativeSourceUrlFetcher {
     fn fetch_https_text(&self, url: &str) -> Result<FetchedUrlBody, SourceDraftError> {
+        fetch_https_text_with_redirects(self, url)
+    }
+}
+
+impl SourceUrlHopFetcher for NativeSourceUrlFetcher {
+    fn fetch_hop(&self, url: &str) -> Result<LinkHopOutcome, SourceDraftError> {
         validate_link_destination(url)?;
-        let mut current = url.to_owned();
-        for _ in 0..=MAX_LINK_REDIRECTS {
-            let response = self.fetch_once(&current)?;
-            let status = response.status();
-            if status.is_redirection() {
-                let location = response
-                    .headers()
-                    .get(reqwest::header::LOCATION)
-                    .and_then(|value| value.to_str().ok())
-                    .ok_or(SourceDraftError::Unsupported)?;
-                let next = url::Url::parse(location)
-                    .or_else(|_| url::Url::parse(&current).and_then(|base| base.join(location)))
-                    .map_err(|_| SourceDraftError::Unsupported)?;
-                if next.scheme() != "https" {
-                    return Err(SourceDraftError::Unsupported);
-                }
-                let next_url = next.to_string();
-                validate_canonical_https_url(&next_url).map_err(map_validation)?;
-                validate_link_destination(&next_url)?;
-                current = next_url;
-                continue;
-            }
-            if !status.is_success() {
-                return Err(SourceDraftError::Unreadable);
-            }
-            let content_type = response
-                .headers()
-                .get(reqwest::header::CONTENT_TYPE)
-                .and_then(|value| value.to_str().ok())
-                .map(str::to_owned);
-            let mut buffer = Vec::new();
-            let mut reader = response;
-            let mut chunk = [0_u8; 8192];
-            loop {
-                let read = reader
-                    .read(&mut chunk)
-                    .map_err(|_| SourceDraftError::Unreadable)?;
-                if read == 0 {
-                    break;
-                }
-                if buffer.len() + read > MAX_SOURCE_UTF8 {
-                    return Err(SourceDraftError::TooLarge);
-                }
-                buffer.extend_from_slice(&chunk[..read]);
-            }
-            return Ok(FetchedUrlBody {
-                bytes: buffer,
-                content_type,
-            });
-        }
-        Err(SourceDraftError::Unsupported)
+        link_hop_from_response(self.fetch_once(url)?)
     }
 }
 
@@ -1206,21 +1243,33 @@ mod tests {
     }
 
     struct FakeUrlFetcher {
-        responses:
-            Mutex<std::collections::HashMap<String, Result<FetchedUrlBody, SourceDraftError>>>,
+        hops: Mutex<std::collections::HashMap<String, LinkHopOutcome>>,
         reads: Mutex<u32>,
     }
 
     impl SourceUrlFetcher for FakeUrlFetcher {
         fn fetch_https_text(&self, url: &str) -> Result<FetchedUrlBody, SourceDraftError> {
+            fetch_https_text_with_redirects(self, url)
+        }
+    }
+
+    impl SourceUrlHopFetcher for FakeUrlFetcher {
+        fn fetch_hop(&self, url: &str) -> Result<LinkHopOutcome, SourceDraftError> {
             *self.reads.lock().unwrap() += 1;
-            self.responses
+            self.hops
                 .lock()
                 .unwrap()
                 .get(url)
                 .cloned()
-                .unwrap_or(Err(SourceDraftError::Unreadable))
+                .ok_or(SourceDraftError::Unreadable)
         }
+    }
+
+    fn text_success(body: &str) -> LinkHopOutcome {
+        LinkHopOutcome::Success(FetchedUrlBody {
+            bytes: body.as_bytes().to_vec(),
+            content_type: Some("text/plain".into()),
+        })
     }
 
     #[test]
@@ -1228,12 +1277,9 @@ mod tests {
         let store = SourceDraftStore::new();
         let url = "https://example.com/readme.txt";
         let fetcher = FakeUrlFetcher {
-            responses: Mutex::new(std::collections::HashMap::from([(
+            hops: Mutex::new(std::collections::HashMap::from([(
                 url.to_owned(),
-                Ok(FetchedUrlBody {
-                    bytes: b"hello link".to_vec(),
-                    content_type: Some("text/plain".into()),
-                }),
+                text_success("hello link"),
             )])),
             reads: Mutex::new(0),
         };
@@ -1265,7 +1311,7 @@ mod tests {
     fn link_capture_rejects_http_private_loopback_and_bad_redirects() {
         let store = SourceDraftStore::new();
         let fetcher = FakeUrlFetcher {
-            responses: Mutex::new(std::collections::HashMap::new()),
+            hops: Mutex::new(std::collections::HashMap::new()),
             reads: Mutex::new(0),
         };
         for url in [
@@ -1274,6 +1320,7 @@ mod tests {
             "https://localhost/a.txt",
             "https://192.168.0.1/a.txt",
             "https://10.0.0.1/a.txt",
+            "https://[::ffff:127.0.0.1]/a.txt",
             "file:///etc/passwd",
         ] {
             assert!(
@@ -1291,9 +1338,9 @@ mod tests {
         let store = SourceDraftStore::new();
         let url = "https://example.com/a.txt";
         let fetcher = FakeUrlFetcher {
-            responses: Mutex::new(std::collections::HashMap::from([(
+            hops: Mutex::new(std::collections::HashMap::from([(
                 url.to_owned(),
-                Ok(FetchedUrlBody {
+                LinkHopOutcome::Success(FetchedUrlBody {
                     bytes: vec![0xff, 0xfe],
                     content_type: Some("text/plain".into()),
                 }),
@@ -1305,9 +1352,9 @@ mod tests {
             Err(SourceDraftError::Unsupported)
         ));
 
-        *fetcher.responses.lock().unwrap() = std::collections::HashMap::from([(
+        *fetcher.hops.lock().unwrap() = std::collections::HashMap::from([(
             url.to_owned(),
-            Ok(FetchedUrlBody {
+            LinkHopOutcome::Success(FetchedUrlBody {
                 bytes: vec![b'a'; MAX_SOURCE_UTF8 + 1],
                 content_type: Some("text/plain".into()),
             }),
@@ -1317,15 +1364,90 @@ mod tests {
             Err(SourceDraftError::TooLarge)
         ));
 
-        *fetcher.responses.lock().unwrap() = std::collections::HashMap::from([(
+        *fetcher.hops.lock().unwrap() = std::collections::HashMap::from([(
             url.to_owned(),
-            Ok(FetchedUrlBody {
+            LinkHopOutcome::Success(FetchedUrlBody {
                 bytes: b"ok".to_vec(),
                 content_type: Some("application/octet-stream".into()),
             }),
         )]);
         assert!(matches!(
             capture_link_source(&store, url, &fetcher),
+            Err(SourceDraftError::Unsupported)
+        ));
+    }
+
+    #[test]
+    fn link_capture_redirect_chain_honors_budget_and_blocks_bad_targets() {
+        let store = SourceDraftStore::new();
+        let start = "https://example.com/start.txt";
+        let hop_b = "https://example.com/hop-b.txt";
+        let hop_c = "https://example.com/hop-c.txt";
+        let fetcher = FakeUrlFetcher {
+            hops: Mutex::new(std::collections::HashMap::from([
+                (start.to_owned(), LinkHopOutcome::Redirect(hop_b.to_owned())),
+                (hop_b.to_owned(), LinkHopOutcome::Redirect(hop_c.to_owned())),
+                (hop_c.to_owned(), text_success("after redirects")),
+            ])),
+            reads: Mutex::new(0),
+        };
+        let outcome = capture_link_source(&store, start, &fetcher).unwrap();
+        let PickSourceOutcome::Selected { byte_count, .. } = outcome else {
+            panic!("expected selection");
+        };
+        assert_eq!(byte_count, 15);
+        assert_eq!(*fetcher.reads.lock().unwrap(), 3);
+
+        let private_redirect = FakeUrlFetcher {
+            hops: Mutex::new(std::collections::HashMap::from([(
+                start.to_owned(),
+                LinkHopOutcome::Redirect("https://127.0.0.1/private.txt".to_owned()),
+            )])),
+            reads: Mutex::new(0),
+        };
+        assert!(matches!(
+            capture_link_source(&store, start, &private_redirect),
+            Err(SourceDraftError::Unsupported)
+        ));
+
+        let mapped_loopback_redirect = FakeUrlFetcher {
+            hops: Mutex::new(std::collections::HashMap::from([(
+                start.to_owned(),
+                LinkHopOutcome::Redirect("https://[::ffff:127.0.0.1]/private.txt".to_owned()),
+            )])),
+            reads: Mutex::new(0),
+        };
+        assert!(matches!(
+            capture_link_source(&store, start, &mapped_loopback_redirect),
+            Err(SourceDraftError::Unsupported)
+        ));
+
+        let http_downgrade = FakeUrlFetcher {
+            hops: Mutex::new(std::collections::HashMap::from([(
+                start.to_owned(),
+                LinkHopOutcome::Redirect("http://example.com/insecure.txt".to_owned()),
+            )])),
+            reads: Mutex::new(0),
+        };
+        assert!(matches!(
+            capture_link_source(&store, start, &http_downgrade),
+            Err(SourceDraftError::Unsupported)
+        ));
+
+        let mut over_budget = std::collections::HashMap::new();
+        let mut current = start.to_owned();
+        for index in 0..=MAX_LINK_REDIRECTS {
+            let next = format!("https://example.com/hop-{index}.txt");
+            over_budget.insert(current, LinkHopOutcome::Redirect(next.clone()));
+            current = next;
+        }
+        over_budget.insert(current, text_success("too many hops"));
+        let exhausted = FakeUrlFetcher {
+            hops: Mutex::new(over_budget),
+            reads: Mutex::new(0),
+        };
+        assert!(matches!(
+            capture_link_source(&store, start, &exhausted),
             Err(SourceDraftError::Unsupported)
         ));
     }

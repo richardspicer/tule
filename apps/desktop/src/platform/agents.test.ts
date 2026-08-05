@@ -9,6 +9,7 @@ import {
   listAgentSessions,
   pickAgentTextSource,
   pickAgentTextFolderSource,
+  attachAgentTextLinkSource,
   sendAgentMessage,
   setAgentSourceDraftScope,
 } from "./agents";
@@ -95,6 +96,10 @@ describe("agents platform", () => {
       { ...validSource, contentSha256: "A".repeat(64) },
       { ...validSource, contentSha256: "a".repeat(63) },
       { ...validSource, path: "C:\\\\secret" },
+      { ...validLinkSource, canonicalUrl: null },
+      { ...validLinkSource, canonicalUrl: "http://example.com/readme.txt" },
+      { ...validSource, canonicalUrl: "https://example.com/readme.txt" },
+      { ...validFolderSource, canonicalUrl: "https://example.com/readme.txt" },
       {
         id: validSource.id,
         originKind: validSource.originKind,
@@ -262,9 +267,7 @@ describe("agents platform", () => {
       memberCount: 1,
       canonicalUrl: "https://example.com/readme.txt",
     });
-    await expect(
-      (await import("./agents")).attachAgentTextLinkSource("https://example.com/readme.txt"),
-    ).resolves.toEqual({
+    await expect(attachAgentTextLinkSource("https://example.com/readme.txt")).resolves.toEqual({
       status: "selected",
       attachment: {
         draftHandle: "deadbeef".repeat(4),
@@ -377,6 +380,61 @@ describe("agents platform", () => {
     for (const payload of hostilePicks) {
       invokeMock.mockResolvedValueOnce(payload);
       await expect(pickAgentTextSource()).rejects.toMatchObject({
+        code: "agent_storage_unavailable",
+      });
+    }
+
+    const linkPickBase = {
+      status: "selected" as const,
+      draftHandle: "deadbeef".repeat(4),
+      displayName: "example.com/readme.txt",
+      byteCount: 40,
+      memberCount: 1,
+    };
+    const hostileLinkPicks = [
+      {
+        ...linkPickBase,
+        originKind: "remote_text_url",
+        canonicalUrl: null,
+      },
+      {
+        ...linkPickBase,
+        originKind: "remote_text_url",
+        canonicalUrl: "http://example.com/readme.txt",
+      },
+      {
+        ...linkPickBase,
+        originKind: "local_text_file",
+        displayName: "notes.txt",
+        canonicalUrl: "https://example.com/readme.txt",
+      },
+      {
+        ...linkPickBase,
+        originKind: "local_text_folder",
+        displayName: "docs",
+        memberCount: 2,
+        canonicalUrl: "https://example.com/readme.txt",
+      },
+      {
+        ...linkPickBase,
+        originKind: "remote_text_url",
+        canonicalUrl: "https://example.com/readme.txt",
+        path: "C:\\\\secret",
+      },
+      {
+        status: "selected",
+        draftHandle: "deadbeef".repeat(4),
+        displayName: "example.com/readme.txt",
+        byteCount: 40,
+        originKind: "remote_text_url",
+        memberCount: 1,
+      },
+    ];
+    for (const payload of hostileLinkPicks) {
+      invokeMock.mockResolvedValueOnce(payload);
+      await expect(
+        attachAgentTextLinkSource("https://example.com/readme.txt"),
+      ).rejects.toMatchObject({
         code: "agent_storage_unavailable",
       });
     }

@@ -40,7 +40,7 @@ export function WorkspaceSidebar({
   return (
     <aside className="workspace-sidebar" aria-label="Workspace">
       <div className="sidebar-toolbar">
-        <Tooltip label="New session">
+        <Tooltip label="New session" align="start">
           <button
             className="icon-button sidebar-icon"
             type="button"

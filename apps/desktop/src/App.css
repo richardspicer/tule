@@ -759,6 +759,11 @@ textarea:focus-visible {
   transform: none;
 }
 
+.tooltip-anchor[data-tooltip-placement="above"] .tooltip {
+  top: auto;
+  bottom: calc(100% + 6px);
+}
+
 .settings-window {
   display: grid;
   grid-template-columns: 180px minmax(0, 1fr);

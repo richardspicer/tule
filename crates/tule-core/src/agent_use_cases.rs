@@ -7,7 +7,8 @@ use crate::{
     AgentRepository, AgentSession, AgentSessionId, AgentTurn, AgentTurnFinishError, AgentTurnId,
     AgentTurnState, CompletedTurnContext, IllegalAgentTurnTransition, InvalidModelId, ProjectId,
     ProjectTimeError, ProviderRequestId, Source, SourceContext, TurnSource,
-    assemble_responses_request_json, derive_session_title, validate_model_id, validate_user_text,
+    assemble_chat_completions_request_json, derive_session_title, validate_model_id,
+    validate_user_text,
 };
 
 /// Result of preparing a first or follow-up send before network transmission.
@@ -86,7 +87,7 @@ where
     };
 
     let current_source = source.map(SourceContext::from);
-    let request_json = assemble_responses_request_json(
+    let request_json = assemble_chat_completions_request_json(
         &completed_history,
         user_text,
         if saved_project_instructions.is_empty() {
@@ -1034,7 +1035,7 @@ mod tests {
     fn first_send_creates_session_pending_turn_and_events() {
         let repository = FakeAgentRepository::default();
         let prepared =
-            prepare_agent_send(&repository, None, "Hello Agent", None, "", "gpt-5.5", None)
+            prepare_agent_send(&repository, None, "Hello Agent", None, "", "grok-3", None)
                 .expect("prepare");
         assert!(prepared.created_session);
         assert_eq!(prepared.session.title(), "Hello Agent");
@@ -1049,9 +1050,9 @@ mod tests {
     #[test]
     fn one_inflight_turn_blocks_second_send() {
         let repository = FakeAgentRepository::default();
-        prepare_agent_send(&repository, None, "First", None, "", "gpt-5.5", None).unwrap();
+        prepare_agent_send(&repository, None, "First", None, "", "grok-3", None).unwrap();
         let error =
-            prepare_agent_send(&repository, None, "Second", None, "", "gpt-5.5", None).unwrap_err();
+            prepare_agent_send(&repository, None, "Second", None, "", "grok-3", None).unwrap_err();
         assert!(matches!(error, PrepareAgentSendError::SessionBusy));
     }
 
@@ -1059,7 +1060,7 @@ mod tests {
     fn streaming_completion_and_history_selection() {
         let repository = FakeAgentRepository::default();
         let prepared =
-            prepare_agent_send(&repository, None, "First", None, "", "gpt-5.5", None).unwrap();
+            prepare_agent_send(&repository, None, "First", None, "", "grok-3", None).unwrap();
         let turn = apply_agent_delta(&repository, prepared.turn.id(), "Hi").unwrap();
         assert_eq!(turn.state(), AgentTurnState::Streaming);
         let completed =
@@ -1079,7 +1080,7 @@ mod tests {
             "Second",
             None,
             "",
-            "gpt-5.5",
+            "grok-3",
             None,
         )
         .unwrap();
@@ -1098,7 +1099,7 @@ mod tests {
     fn startup_interruption_marks_inflight_once() {
         let repository = FakeAgentRepository::default();
         let prepared =
-            prepare_agent_send(&repository, None, "Hang", None, "", "gpt-5.5", None).unwrap();
+            prepare_agent_send(&repository, None, "Hang", None, "", "grok-3", None).unwrap();
         apply_agent_delta(&repository, prepared.turn.id(), "partial").unwrap();
         let interrupted = interrupt_inflight_turns(&repository).unwrap();
         assert_eq!(interrupted.len(), 1);
@@ -1111,7 +1112,7 @@ mod tests {
     fn prospective_project_change_records_event() {
         let repository = FakeAgentRepository::default();
         let prepared =
-            prepare_agent_send(&repository, None, "Hello", None, "", "gpt-5.5", None).unwrap();
+            prepare_agent_send(&repository, None, "Hello", None, "", "grok-3", None).unwrap();
         complete_agent_turn(&repository, prepared.turn.id(), None, None, None).unwrap();
         let project_id = ProjectId::generate();
         let session =
@@ -1131,7 +1132,7 @@ mod tests {
     fn existing_session_rejects_unconfirmed_project_context() {
         let repository = FakeAgentRepository::default();
         let prepared =
-            prepare_agent_send(&repository, None, "Hello", None, "", "gpt-5.5", None).unwrap();
+            prepare_agent_send(&repository, None, "Hello", None, "", "grok-3", None).unwrap();
         complete_agent_turn(&repository, prepared.turn.id(), None, None, None).unwrap();
         let event_count = repository
             .list_events(&prepared.session.id())
@@ -1144,7 +1145,7 @@ mod tests {
             "Use different context",
             Some(ProjectId::generate()),
             "unconfirmed instructions",
-            "gpt-5.5",
+            "grok-3",
             None,
         )
         .unwrap_err();
@@ -1201,7 +1202,7 @@ mod tests {
             "Use this",
             None,
             "",
-            "gpt-5.5",
+            "grok-3",
             Some(&source),
         )
         .unwrap();
@@ -1227,7 +1228,7 @@ mod tests {
             "Fail next",
             None,
             "",
-            "gpt-5.5",
+            "grok-3",
             Some(&failed_source),
         )
         .unwrap();
@@ -1239,7 +1240,7 @@ mod tests {
             "Follow",
             None,
             "",
-            "gpt-5.5",
+            "grok-3",
             None,
         )
         .unwrap();

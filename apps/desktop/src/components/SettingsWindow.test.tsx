@@ -5,9 +5,9 @@ import { SettingsWindow } from "./SettingsWindow";
 import { ProviderError } from "../platform/provider";
 
 const {
-  cancelChatgptConnectMock,
-  connectChatgptMock,
-  disconnectChatgptMock,
+  cancelXaiConnectMock,
+  connectXaiMock,
+  disconnectXaiMock,
   getConnectionStatusMock,
   getProviderModelCatalogMock,
   getProviderModelSelectionMock,
@@ -22,9 +22,9 @@ const {
   setProviderModelSelectionMock,
   takeSettingsLaunchCategoryMock,
 } = vi.hoisted(() => ({
-  cancelChatgptConnectMock: vi.fn(),
-  connectChatgptMock: vi.fn(),
-  disconnectChatgptMock: vi.fn(),
+  cancelXaiConnectMock: vi.fn(),
+  connectXaiMock: vi.fn(),
+  disconnectXaiMock: vi.fn(),
   getConnectionStatusMock: vi.fn(),
   getProviderModelCatalogMock: vi.fn(),
   getProviderModelSelectionMock: vi.fn(),
@@ -44,9 +44,11 @@ vi.mock("../platform/provider", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../platform/provider")>();
   return {
     ...actual,
-    cancelChatgptConnect: cancelChatgptConnectMock,
-    connectChatgpt: connectChatgptMock,
-    disconnectChatgpt: disconnectChatgptMock,
+    cancelXaiConnect: cancelXaiConnectMock,
+    connectXai: connectXaiMock,
+    disconnectXai: disconnectXaiMock,
+    getXaiDevicePairing: vi.fn().mockResolvedValue(null),
+    listenXaiDevicePairingChanged: vi.fn().mockResolvedValue(() => undefined),
     getConnectionStatus: getConnectionStatusMock,
     getProviderModelCatalog: getProviderModelCatalogMock,
     getProviderModelSelection: getProviderModelSelectionMock,
@@ -75,9 +77,9 @@ vi.mock("../theme", async (importOriginal) => {
 
 describe("SettingsWindow", () => {
   beforeEach(() => {
-    cancelChatgptConnectMock.mockReset();
-    connectChatgptMock.mockReset();
-    disconnectChatgptMock.mockReset();
+    cancelXaiConnectMock.mockReset();
+    connectXaiMock.mockReset();
+    disconnectXaiMock.mockReset();
     getConnectionStatusMock.mockReset();
     getProviderModelCatalogMock.mockReset();
     getProviderModelSelectionMock.mockReset();
@@ -94,19 +96,19 @@ describe("SettingsWindow", () => {
 
     getConnectionStatusMock.mockResolvedValue({
       state: "disconnected",
-      providerId: "openai-chatgpt-compat",
-      model: "gpt-5.5",
+      providerId: "xai-subscription-oauth",
+      model: "grok-3",
     });
     getProviderModelCatalogMock.mockResolvedValue({
-      providerId: "openai-chatgpt-compat",
+      providerId: "xai-subscription-oauth",
       models: [],
       freshness: "stale",
       retrievedAtUnixMs: null,
       compatibilityRevision: null,
     });
     getProviderModelSelectionMock.mockResolvedValue({
-      providerId: "openai-chatgpt-compat",
-      selectedModelId: "gpt-5.5",
+      providerId: "xai-subscription-oauth",
+      selectedModelId: "grok-3",
       requiresSelection: false,
     });
     loadThemePreferenceMock.mockResolvedValue("system");
@@ -119,9 +121,9 @@ describe("SettingsWindow", () => {
     listenProviderModelCatalogChangedMock.mockResolvedValue(vi.fn());
     listenProviderModelSelectionChangedMock.mockResolvedValue(vi.fn());
     listenSettingsNavigateMock.mockResolvedValue(vi.fn());
-    cancelChatgptConnectMock.mockResolvedValue(undefined);
+    cancelXaiConnectMock.mockResolvedValue(undefined);
     refreshProviderModelCatalogMock.mockResolvedValue({
-      providerId: "openai-chatgpt-compat",
+      providerId: "xai-subscription-oauth",
       models: [],
       freshness: "stale",
       retrievedAtUnixMs: null,
@@ -133,16 +135,16 @@ describe("SettingsWindow", () => {
     const user = userEvent.setup();
     getConnectionStatusMock.mockResolvedValue({
       state: "connected",
-      providerId: "openai-chatgpt-compat",
-      model: "gpt-5.5",
+      providerId: "xai-subscription-oauth",
+      model: "grok-3",
     });
     refreshProviderModelCatalogMock
       .mockResolvedValueOnce({
-        providerId: "openai-chatgpt-compat",
+        providerId: "xai-subscription-oauth",
         models: [
           {
-            id: "gpt-5.5",
-            displayName: "GPT-5.5",
+            id: "grok-3",
+            displayName: "Grok 3",
             description: null,
             isProviderDefault: true,
           },
@@ -153,29 +155,29 @@ describe("SettingsWindow", () => {
       })
       .mockRejectedValueOnce(new ProviderError("provider_unavailable"));
     getProviderModelSelectionMock.mockResolvedValue({
-      providerId: "openai-chatgpt-compat",
-      selectedModelId: "gpt-5.5",
+      providerId: "xai-subscription-oauth",
+      selectedModelId: "grok-3",
       requiresSelection: false,
     });
 
     render(<SettingsWindow />);
-    expect(await screen.findByRole("option", { name: "GPT-5.5" })).toBeInTheDocument();
+    expect(await screen.findByRole("option", { name: "Grok 3" })).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Refresh models" }));
     expect(await screen.findByRole("alert")).toHaveTextContent("The provider is unavailable.");
-    expect(screen.getByRole("option", { name: "GPT-5.5" })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "Grok 3" })).toBeInTheDocument();
     expect(getProviderModelCatalogMock).not.toHaveBeenCalled();
   });
 
   it("keeps Refresh models available when connected with an empty catalog", async () => {
     getConnectionStatusMock.mockResolvedValue({
       state: "connected",
-      providerId: "openai-chatgpt-compat",
-      model: "gpt-5.5",
+      providerId: "xai-subscription-oauth",
+      model: "grok-3",
     });
     refreshProviderModelCatalogMock.mockRejectedValue(new ProviderError("provider_unavailable"));
     getProviderModelCatalogMock.mockResolvedValue({
-      providerId: "openai-chatgpt-compat",
+      providerId: "xai-subscription-oauth",
       models: [],
       freshness: "stale",
       retrievedAtUnixMs: null,
@@ -195,17 +197,17 @@ describe("SettingsWindow", () => {
     const user = userEvent.setup();
     getConnectionStatusMock.mockResolvedValue({
       state: "connected",
-      providerId: "openai-chatgpt-compat",
-      model: "gpt-5.5",
+      providerId: "xai-subscription-oauth",
+      model: "grok-3",
     });
     refreshProviderModelCatalogMock
       .mockRejectedValueOnce(new ProviderError("provider_unavailable"))
       .mockResolvedValueOnce({
-        providerId: "openai-chatgpt-compat",
+        providerId: "xai-subscription-oauth",
         models: [
           {
-            id: "gpt-5.5",
-            displayName: "GPT-5.5",
+            id: "grok-3",
+            displayName: "Grok 3",
             description: null,
             isProviderDefault: true,
           },
@@ -215,14 +217,14 @@ describe("SettingsWindow", () => {
         compatibilityRevision: "1.0.0",
       });
     getProviderModelCatalogMock.mockResolvedValue({
-      providerId: "openai-chatgpt-compat",
+      providerId: "xai-subscription-oauth",
       models: [],
       freshness: "stale",
       retrievedAtUnixMs: null,
       compatibilityRevision: null,
     });
     getProviderModelSelectionMock.mockResolvedValue({
-      providerId: "openai-chatgpt-compat",
+      providerId: "xai-subscription-oauth",
       selectedModelId: null,
       requiresSelection: true,
     });
@@ -230,7 +232,7 @@ describe("SettingsWindow", () => {
     render(<SettingsWindow />);
     await user.click(await screen.findByRole("button", { name: "Refresh models" }));
     expect(await screen.findByLabelText("Default model for new sessions")).toBeInTheDocument();
-    expect(screen.getByRole("option", { name: "GPT-5.5" })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "Grok 3" })).toBeInTheDocument();
   });
 
   it("renders Providers and Appearance categories only", async () => {
@@ -245,7 +247,7 @@ describe("SettingsWindow", () => {
     expect(screen.queryByRole("button", { name: "Close" })).not.toBeInTheDocument();
     expect(
       screen.getByText(
-        "Uses a compatibility sign-in path that is not an official TULE integration and may stop working.",
+        "Connects through xAI subscription OAuth using a shared public Grok-CLI client. The browser consent screen may identify Grok rather than TULE.",
       ),
     ).toBeInTheDocument();
   });
@@ -310,7 +312,7 @@ describe("SettingsWindow", () => {
     const user = userEvent.setup();
     let resolveConnect:
       ((status: { state: "connected"; providerId: string; model: string }) => void) | undefined;
-    connectChatgptMock.mockReturnValue(
+    connectXaiMock.mockReturnValue(
       new Promise((resolve) => {
         resolveConnect = resolve;
       }),
@@ -322,8 +324,8 @@ describe("SettingsWindow", () => {
 
     resolveConnect?.({
       state: "connected",
-      providerId: "openai-chatgpt-compat",
-      model: "gpt-5.5",
+      providerId: "xai-subscription-oauth",
+      model: "grok-3",
     });
 
     expect(await screen.findByText("Connected")).toBeInTheDocument();
@@ -335,17 +337,17 @@ describe("SettingsWindow", () => {
   it("cancels browser connection and reports the safe result", async () => {
     const user = userEvent.setup();
     let rejectConnect: ((error: ProviderError) => void) | undefined;
-    connectChatgptMock.mockReturnValue(
+    connectXaiMock.mockReturnValue(
       new Promise((_resolve, reject) => {
         rejectConnect = reject;
       }),
     );
-    cancelChatgptConnectMock.mockImplementation(() => {
+    cancelXaiConnectMock.mockImplementation(() => {
       rejectConnect?.(new ProviderError("cancelled"));
       getConnectionStatusMock.mockResolvedValue({
         state: "disconnected",
-        providerId: "openai-chatgpt-compat",
-        model: "gpt-5.5",
+        providerId: "xai-subscription-oauth",
+        model: "grok-3",
       });
       return Promise.resolve();
     });
@@ -354,8 +356,8 @@ describe("SettingsWindow", () => {
     await user.click(await screen.findByRole("button", { name: "Connect in browser" }));
     await user.click(await screen.findByRole("button", { name: "Cancel connection" }));
 
-    expect(cancelChatgptConnectMock).toHaveBeenCalledOnce();
-    expect(await screen.findByText("Browser connection cancelled.")).toBeInTheDocument();
+    expect(cancelXaiConnectMock).toHaveBeenCalledOnce();
+    expect(await screen.findByText("Device sign-in cancelled.")).toBeInTheDocument();
     expect(await screen.findByText("Disconnected")).toBeInTheDocument();
     expect(screen.queryByText("Enter a valid message.")).not.toBeInTheDocument();
   });
@@ -364,21 +366,21 @@ describe("SettingsWindow", () => {
     const user = userEvent.setup();
     let resolveConnect:
       ((status: { state: "connected"; providerId: string; model: string }) => void) | undefined;
-    connectChatgptMock.mockReturnValue(
+    connectXaiMock.mockReturnValue(
       new Promise((resolve) => {
         resolveConnect = resolve;
       }),
     );
-    cancelChatgptConnectMock.mockImplementation(() => {
+    cancelXaiConnectMock.mockImplementation(() => {
       resolveConnect?.({
         state: "connected",
-        providerId: "openai-chatgpt-compat",
-        model: "gpt-5.5",
+        providerId: "xai-subscription-oauth",
+        model: "grok-3",
       });
       getConnectionStatusMock.mockResolvedValue({
         state: "connected",
-        providerId: "openai-chatgpt-compat",
-        model: "gpt-5.5",
+        providerId: "xai-subscription-oauth",
+        model: "grok-3",
       });
       return Promise.reject(new ProviderError("invalid_input"));
     });
@@ -388,24 +390,24 @@ describe("SettingsWindow", () => {
     await user.click(await screen.findByRole("button", { name: "Cancel connection" }));
 
     expect(await screen.findByText("Connected")).toBeInTheDocument();
-    expect(screen.queryByText("Browser connection cancelled.")).not.toBeInTheDocument();
+    expect(screen.queryByText("Device sign-in cancelled.")).not.toBeInTheDocument();
     expect(screen.queryByText("Enter a valid message.")).not.toBeInTheDocument();
-    expect(screen.queryByText("Cancelling browser connection…")).not.toBeInTheDocument();
+    expect(screen.queryByText("Cancelling device sign-in…")).not.toBeInTheDocument();
   });
 
   it("recovers from a safe provider failure without remaining Connecting", async () => {
     const user = userEvent.setup();
-    connectChatgptMock.mockRejectedValue(new ProviderError("provider_unavailable"));
+    connectXaiMock.mockRejectedValue(new ProviderError("provider_unavailable"));
     getConnectionStatusMock
       .mockResolvedValueOnce({
         state: "disconnected",
-        providerId: "openai-chatgpt-compat",
-        model: "gpt-5.5",
+        providerId: "xai-subscription-oauth",
+        model: "grok-3",
       })
       .mockResolvedValue({
         state: "disconnected",
-        providerId: "openai-chatgpt-compat",
-        model: "gpt-5.5",
+        providerId: "xai-subscription-oauth",
+        model: "grok-3",
       });
 
     render(<SettingsWindow />);
@@ -442,8 +444,8 @@ describe("SettingsWindow", () => {
 
     emitStatus?.({
       state: "connected",
-      providerId: "openai-chatgpt-compat",
-      model: "gpt-5.5",
+      providerId: "xai-subscription-oauth",
+      model: "grok-3",
     });
 
     expect(await screen.findByText("Connected")).toBeInTheDocument();

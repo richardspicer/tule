@@ -1,18 +1,21 @@
 import { useEffect, useId, useState } from "react";
 import {
-  cancelChatgptConnect,
-  connectChatgpt,
-  disconnectChatgpt,
+  cancelXaiConnect,
+  connectXai,
+  disconnectXai,
   formatModelLabel,
   getConnectionStatus,
   getProviderModelCatalog,
   getProviderModelSelection,
+  getXaiDevicePairing,
   isStaleConnectCancellation,
   listenProviderModelCatalogChanged,
   listenProviderModelSelectionChanged,
+  listenXaiDevicePairingChanged,
   refreshProviderModelCatalog,
   setProviderModelSelection,
   type ConnectionState,
+  type DevicePairingInfo,
   type ProviderModelCatalog,
   type ProviderModelSelection,
 } from "../platform/provider";
@@ -67,6 +70,8 @@ export function SettingsWindow() {
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [appearanceError, setAppearanceError] = useState<string | null>(null);
+
+  const [devicePairing, setDevicePairing] = useState<DevicePairingInfo | null>(null);
 
   const selectedModelId = selection?.selectedModelId ?? "";
   const displayModel =
@@ -153,9 +158,10 @@ export function SettingsWindow() {
       setConnectionState(status.state);
       if (status.state !== "connecting") {
         setCancelRequested(false);
-        setStatusMessage((current) =>
-          current === "Cancelling browser connection…" ? null : current,
-        );
+        setStatusMessage((current) => (current === "Cancelling device sign-in…" ? null : current));
+      }
+      if (status.state !== "connecting") {
+        setDevicePairing(null);
       }
       if (status.state === "connected") {
         void refreshProviderModelCatalog()
@@ -201,6 +207,16 @@ export function SettingsWindow() {
       }
     });
 
+    void listenXaiDevicePairingChanged((pairing) => {
+      setDevicePairing(pairing);
+    }).then((unlisten) => {
+      if (disposed) {
+        unlisten();
+      } else {
+        cleanups.push(unlisten);
+      }
+    });
+
     void listenSettingsNavigate((next) => {
       setCategory(next);
     }).then((unlisten) => {
@@ -226,8 +242,9 @@ export function SettingsWindow() {
     setErrorMessage(null);
     setConnectionState("connecting");
     try {
-      const status = await connectChatgpt();
+      const status = await connectXai();
       setConnectionState(status.state);
+      setDevicePairing(await getXaiDevicePairing().catch(() => null));
       setStatusMessage(null);
       setErrorMessage(null);
       const [nextCatalog, nextSelection] = await Promise.all([
@@ -238,7 +255,7 @@ export function SettingsWindow() {
       setSelection(nextSelection);
     } catch (error: unknown) {
       if (getAgentErrorCode(error) === "cancelled") {
-        setStatusMessage("Browser connection cancelled.");
+        setStatusMessage("Device sign-in cancelled.");
         setErrorMessage(null);
       } else {
         setStatusMessage(null);
@@ -262,10 +279,10 @@ export function SettingsWindow() {
     }
 
     setCancelRequested(true);
-    setStatusMessage("Cancelling browser connection…");
+    setStatusMessage("Cancelling device sign-in…");
     setErrorMessage(null);
     try {
-      await cancelChatgptConnect();
+      await cancelXaiConnect();
     } catch (error: unknown) {
       // Completion already won: reconcile to the terminal status and never show
       // Agent-composer validation such as "Enter a valid message".
@@ -290,8 +307,9 @@ export function SettingsWindow() {
     setStatusMessage(null);
     setErrorMessage(null);
     try {
-      const status = await disconnectChatgpt();
+      const status = await disconnectXai();
       setConnectionState(status.state);
+      setDevicePairing(null);
       const [nextCatalog, nextSelection] = await Promise.all([
         getProviderModelCatalog(),
         getProviderModelSelection(),
@@ -383,13 +401,10 @@ export function SettingsWindow() {
       <div className="settings-content">
         {category === "providers" ? (
           <section className="settings-section" aria-labelledby="provider-settings-title">
-            <h2 id="provider-settings-title">ChatGPT subscription</h2>
-            <p className="settings-label-row">
-              <span className="experimental-label">Experimental</span>
-            </p>
+            <h2 id="provider-settings-title">xAI subscription</h2>
             <p className="settings-disclosure">
-              Uses a compatibility sign-in path that is not an official TULE integration and may
-              stop working.
+              Connects through xAI subscription OAuth using a shared public Grok-CLI client. The
+              browser consent screen may identify Grok rather than TULE.
             </p>
             <p className="settings-meta">
               <span>Status</span>
@@ -441,6 +456,14 @@ export function SettingsWindow() {
                 Refresh models
               </button>
             ) : null}
+            {connecting && devicePairing !== null ? (
+              <p className="settings-disclosure">
+                Enter code <strong>{devicePairing.userCode}</strong> at{" "}
+                <a href={devicePairing.verificationUri} rel="noreferrer" target="_blank">
+                  {devicePairing.verificationUri}
+                </a>
+              </p>
+            ) : null}
             {connecting ? (
               <button
                 className="secondary-action"
@@ -487,7 +510,7 @@ export function SettingsWindow() {
             )}
             {connectionState === "unavailable_in_this_build" ? (
               <p className="settings-note" role="status">
-                ChatGPT connection is unavailable in this build.
+                xAI subscription connection is unavailable in this build.
               </p>
             ) : null}
           </section>

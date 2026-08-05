@@ -41,39 +41,47 @@ behavior or React components.
 The first Agent slice lives in `tule-core` as provider-neutral session, turn,
 event, lifecycle, and model-selection use cases. The desktop host persists
 non-secret session state in the shared SQLite store, streams ordered channel
-events to the interface, and owns one experimental ChatGPT subscription
-compatibility adapter. Credentials stay in the OS credential store behind an
-opaque handle. The frontend receives only typed connection status, allowlisted
-model-catalog metadata, selected-default state, and transcript data; it never
-receives authorization URLs, codes, tokens, account identifiers, raw catalog
-payloads, provider instructions, tool definitions, or raw provider frames.
+events to the interface, and owns one xAI subscription OAuth adapter (RFC 8628
+device-code against `auth.x.ai`, catalog and streamed chat/completions against
+`api.x.ai`). Credentials stay in the OS credential store behind an opaque handle.
+The frontend receives only typed connection status, allowlisted device pairing
+metadata (verification URI and user code during connect), allowlisted model-catalog
+metadata, selected-default state, and transcript data; it never receives
+authorization URLs beyond the allowlisted verification URI, codes, tokens,
+account identifiers, raw catalog payloads, provider instructions, tool
+definitions, or raw provider frames.
 
 After a successful connection, the native adapter fetches an account-aware model
-catalog from the authenticated ChatGPT compatibility models endpoint using the
-existing credentials, account context, disabled redirects, and truthful TULE
-identity. Only allowlisted non-secret fields are retained. The last validated
-catalog is cached in SQLite scoped to the provider profile and credential
-generation—never the raw account identifier—with retrieval time, ETag, and
-catalog-compatibility revision. A five-minute TTL marks freshness; failures show
-last-known catalog as stale rather than substituting hard-coded or public lists.
-An authenticated success with no usable models is a bounded catalog failure and
-does not erase the last validated snapshot; the refresh command still surfaces
-the bounded error rather than reporting stale success. Catalog retrieval refreshes
-an expired access token under the shared provider gate, and credential-generation
-invalidation fails closed on account change or disconnect. A durable pre-transition
-quarantine hides catalog and selection reads until invalidation commits or the
-original credential state is restored, including across process restart when
-compensation and best-effort scrubbing fail. Capability filtering
-excludes tool-only and Responses Lite models without persisting those fields.
-Connection-status commands remain separate from catalog and selected-default
-commands and events.
+catalog from `GET https://api.x.ai/v1/models` using the existing credentials,
+disabled redirects, and truthful `User-Agent: tule-desktop/0.1.0`. Agent turns
+stream through `POST https://api.x.ai/v1/chat/completions` with the same Bearer
+and User-Agent; text messages only, no tools. Only allowlisted non-secret fields
+are retained. The last validated catalog is cached in SQLite scoped to the
+provider profile and credential generation—never the raw account identifier—with
+retrieval time, ETag, and catalog-compatibility revision. A five-minute TTL marks
+freshness; failures show last-known catalog as stale rather than substituting
+hard-coded or public lists. An authenticated success with no usable models is a
+bounded catalog failure and does not erase the last validated snapshot; the
+refresh command still surfaces the bounded error rather than reporting stale
+success. Catalog retrieval refreshes an expired access token under the shared
+provider gate, and credential-generation invalidation fails closed on account
+change or disconnect. A durable pre-transition quarantine hides catalog and
+selection reads until invalidation commits or the original credential state is
+restored, including across process restart when compensation and best-effort
+scrubbing fail. Capability filtering excludes tool-only and Responses Lite
+models without persisting those fields. Connection-status commands remain
+separate from catalog and selected-default commands and events. On upgrade,
+retired ChatGPT compatibility credential handles are cleared so the old adapter
+cannot remain the active send path; historical sessions that recorded
+`openai-chatgpt-compat` provenance remain readable.
 
 A profile selected-model default persists independently of connection lifecycle
 and of fixed profile display metadata. A new unsent Agent session may accept that
 default or another catalog model; the first valid send freezes the chosen
 provider-profile and model identifiers onto the durable session and every later
 turn. Persisted sessions expose a non-editable model label and require a new
-session to change models. Existing `gpt-5.5` provenance is preserved. Allowlisted
+session to change models. Existing `grok-3` upgrade default and historical ChatGPT session provenance are
+preserved separately. Allowlisted
 model rejection surfaces as `model_unavailable`, refreshes or stales the catalog,
 clears a rejected default, and requires a new-session choice without silent
 fallback or retry under another model. Tools, connectors, filesystem access,

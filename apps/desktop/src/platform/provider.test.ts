@@ -1,8 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
-  cancelChatgptConnect,
-  connectChatgpt,
-  disconnectChatgpt,
+  cancelXaiConnect,
+  connectXai,
+  disconnectXai,
   getConnectionStatus,
   getProviderErrorCode,
   getProviderModelCatalog,
@@ -27,36 +27,36 @@ describe("provider platform", () => {
   it("validates connection status shape", async () => {
     invokeMock.mockResolvedValue({
       state: "disconnected",
-      providerId: "openai-chatgpt-compat",
-      model: "gpt-5.5",
+      providerId: "xai-subscription-oauth",
+      model: "grok-3",
     });
 
     await expect(getConnectionStatus()).resolves.toEqual({
       state: "disconnected",
-      providerId: "openai-chatgpt-compat",
-      model: "gpt-5.5",
+      providerId: "xai-subscription-oauth",
+      model: "grok-3",
     });
   });
 
   it("maps connect and disconnect commands", async () => {
     invokeMock.mockResolvedValue({
       state: "connected",
-      providerId: "openai-chatgpt-compat",
-      model: "gpt-5.5",
+      providerId: "xai-subscription-oauth",
+      model: "grok-3",
     });
 
-    await expect(connectChatgpt()).resolves.toMatchObject({ state: "connected" });
-    await expect(cancelChatgptConnect()).resolves.toBeUndefined();
-    await expect(disconnectChatgpt()).resolves.toMatchObject({ state: "connected" });
-    expect(invokeMock).toHaveBeenCalledWith("connect_chatgpt");
-    expect(invokeMock).toHaveBeenCalledWith("cancel_chatgpt_connect");
-    expect(invokeMock).toHaveBeenCalledWith("disconnect_chatgpt");
+    await expect(connectXai()).resolves.toMatchObject({ state: "connected" });
+    await expect(cancelXaiConnect()).resolves.toBeUndefined();
+    await expect(disconnectXai()).resolves.toMatchObject({ state: "connected" });
+    expect(invokeMock).toHaveBeenCalledWith("connect_xai");
+    expect(invokeMock).toHaveBeenCalledWith("cancel_xai_connect");
+    expect(invokeMock).toHaveBeenCalledWith("disconnect_xai");
   });
 
   it("maps allowlisted failures safely", async () => {
     invokeMock.mockRejectedValue("session_busy");
-    await expect(connectChatgpt()).rejects.toBeInstanceOf(ProviderError);
-    await expect(connectChatgpt()).rejects.toMatchObject({ code: "session_busy" });
+    await expect(connectXai()).rejects.toBeInstanceOf(ProviderError);
+    await expect(connectXai()).rejects.toMatchObject({ code: "session_busy" });
     expect(getProviderErrorCode(new ProviderError("not_connected"))).toBe("not_connected");
   });
 
@@ -76,11 +76,11 @@ describe("provider platform", () => {
 
   it("validates bounded catalog and selection contracts", async () => {
     invokeMock.mockResolvedValueOnce({
-      providerId: "openai-chatgpt-compat",
+      providerId: "xai-subscription-oauth",
       models: [
         {
-          id: "gpt-5.5",
-          displayName: "GPT-5.5",
+          id: "grok-3",
+          displayName: "Grok 3",
           description: "safe",
           isProviderDefault: true,
         },
@@ -91,20 +91,20 @@ describe("provider platform", () => {
     });
     await expect(getProviderModelCatalog()).resolves.toMatchObject({
       freshness: "current",
-      models: [{ id: "gpt-5.5" }],
+      models: [{ id: "grok-3" }],
     });
 
     invokeMock.mockResolvedValueOnce({
-      providerId: "openai-chatgpt-compat",
-      selectedModelId: "gpt-5.5",
+      providerId: "xai-subscription-oauth",
+      selectedModelId: "grok-3",
       requiresSelection: false,
     });
     await expect(getProviderModelSelection()).resolves.toMatchObject({
-      selectedModelId: "gpt-5.5",
+      selectedModelId: "grok-3",
     });
 
     invokeMock.mockResolvedValueOnce({
-      providerId: "openai-chatgpt-compat",
+      providerId: "xai-subscription-oauth",
       selectedModelId: "other",
       requiresSelection: false,
     });
@@ -117,7 +117,7 @@ describe("provider platform", () => {
 
     expect(() =>
       validateProviderModelCatalog({
-        providerId: "openai-chatgpt-compat",
+        providerId: "xai-subscription-oauth",
         models: [{ id: "x" }],
         freshness: "current",
       }),

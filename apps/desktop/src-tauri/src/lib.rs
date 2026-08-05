@@ -1,12 +1,12 @@
 mod agents;
 mod credentials;
-mod openai_chatgpt;
 mod preferences;
 mod projects;
 mod provider;
 mod settings_window;
 mod source_draft;
 mod sqlite;
+mod xai_subscription;
 
 use std::{fs, sync::Arc};
 
@@ -16,7 +16,6 @@ use agents::{
     set_agent_session_project, set_agent_source_draft_scope,
 };
 use credentials::native_store;
-use openai_chatgpt::ChatGptAdapter;
 use preferences::{DesktopPreferenceState, get_appearance_preference, set_appearance_preference};
 use projects::{
     ProjectStorageState, create_project, list_projects, open_project, update_project_instructions,
@@ -36,6 +35,10 @@ use std::sync::Arc as StdArc;
 use tauri::{Emitter, Manager};
 use tauri_plugin_opener::OpenerExt;
 use tule_core::AgentRepository;
+use xai_subscription::{
+    DevicePairingNotifier, DevicePairingResponse, XAI_DEVICE_PAIRING_CHANGED_EVENT,
+    XaiSubscriptionAdapter,
+};
 
 #[derive(Debug, serde::Serialize)]
 struct ApplicationInfoResponse {
@@ -71,7 +74,7 @@ fn initialize_store<R: tauri::Runtime>(app: &tauri::App<R>) -> Option<Arc<Sqlite
 }
 
 fn current_connection_status(state: &AgentState) -> ConnectionStatus {
-    state.chatgpt().map_or_else(
+    state.xai().map_or_else(
         || state.provider.connection_status(),
         |adapter| adapter.connection_status_with_store(state.store.as_ref()),
     )
@@ -107,8 +110,6 @@ fn emit_stale_model_surfaces(app: &tauri::AppHandle, store: &SqliteStore) {
     }
 }
 
-/// Selects the status that connect terminal paths emit without altering
-/// the original command result.
 fn terminal_status_for_emit(
     result: &Result<ConnectionStatus, PublicError>,
     status_on_error: ConnectionStatus,
@@ -119,18 +120,14 @@ fn terminal_status_for_emit(
     }
 }
 
-/// Production cancel path used by `cancel_chatgpt_connect`.
-/// Requests cancellation only — never samples or emits connection status.
-fn cancel_chatgpt_connect_inner(
-    adapter: Option<&openai_chatgpt::ChatGptAdapter>,
+fn cancel_xai_connect_inner(
+    adapter: Option<&xai_subscription::XaiSubscriptionAdapter>,
 ) -> Result<(), PublicError> {
     let adapter = adapter.ok_or(PublicError::ProviderUnavailable)?;
     adapter.cancel_connect()
 }
 
-/// Production settle path used by `connect_chatgpt` after the connect future
-/// completes. This is the sole terminal-status emitter for connect/cancel races.
-fn settle_connect_chatgpt(
+fn settle_connect_xai(
     emit: impl FnOnce(&ConnectionStatus),
     result: Result<ConnectionStatus, PublicError>,
     status_on_error: ConnectionStatus,
@@ -155,33 +152,50 @@ fn sync_connection_status(
     status
 }
 
-/// Connection setup is intentionally native-only. The frontend is never given
-/// URLs, callback data, PKCE state, or credential material.
 #[tauri::command]
-async fn connect_chatgpt(
+fn get_xai_device_pairing(
+    state: tauri::State<'_, AgentState>,
+) -> Result<Option<DevicePairingResponse>, PublicError> {
+    Ok(state.xai().and_then(|adapter| adapter.device_pairing()))
+}
+
+#[tauri::command]
+async fn connect_xai(
     app: tauri::AppHandle,
     state: tauri::State<'_, AgentState>,
 ) -> Result<ConnectionStatus, PublicError> {
     let _operation = state.try_operation()?;
-    let Some(adapter) = state.chatgpt() else {
+    let Some(adapter) = state.xai() else {
         let status = state.provider.connection_status();
         emit_connection_status(&app, &status);
         return Ok(status);
     };
     let store = StdArc::clone(&state.store);
     let opener = app.clone();
+    let pairing_notifier: DevicePairingNotifier = Arc::new({
+        let app = app.clone();
+        move |pairing| {
+            let payload = pairing.unwrap_or(DevicePairingResponse {
+                verification_uri: String::new(),
+                user_code: String::new(),
+            });
+            let _ = app.emit(XAI_DEVICE_PAIRING_CHANGED_EVENT, &payload);
+        }
+    });
     let result = adapter
-        .connect_in_browser(store, move |url| {
-            opener
-                .opener()
-                .open_url(url, None::<&str>)
-                .map_err(|_| PublicError::ProviderUnavailable)?;
-            Ok(())
-        })
+        .connect_device_code(
+            store,
+            move |url| {
+                opener
+                    .opener()
+                    .open_url(url, None::<&str>)
+                    .map_err(|_| PublicError::ProviderUnavailable)?;
+                Ok(())
+            },
+            Some(pairing_notifier),
+        )
         .await;
-    // Emit the authoritative terminal status on success and failure without
-    // replacing the original command error.
-    let settled = settle_connect_chatgpt(
+    let settled = settle_connect_xai(
         |status| emit_connection_status(&app, status),
         result,
         current_connection_status(&state),
@@ -189,7 +203,7 @@ async fn connect_chatgpt(
     if settled
         .as_ref()
         .is_ok_and(|status| status.state == provider::ConnectionState::Connected)
-        && let Some(adapter) = state.chatgpt()
+        && let Some(adapter) = state.xai()
     {
         match adapter
             .refresh_model_catalog(state.store.as_ref(), true)
@@ -208,18 +222,12 @@ async fn connect_chatgpt(
 }
 
 #[tauri::command]
-fn cancel_chatgpt_connect(state: tauri::State<'_, AgentState>) -> Result<(), PublicError> {
-    // Request cancellation only. Do not sample or emit connection status here:
-    // a stale Connecting snapshot can race ahead of the in-flight connect
-    // command's terminal emission and strand windows that consume the event
-    // stream. connect_chatgpt emits the authoritative terminal status after it
-    // settles; late Cancel keeps its original safe error for frontend
-    // reconciliation.
-    cancel_chatgpt_connect_inner(state.chatgpt().as_deref())
+fn cancel_xai_connect(state: tauri::State<'_, AgentState>) -> Result<(), PublicError> {
+    cancel_xai_connect_inner(state.xai().as_deref())
 }
 
 #[tauri::command]
-async fn disconnect_chatgpt(
+async fn disconnect_xai(
     app: tauri::AppHandle,
     state: tauri::State<'_, AgentState>,
 ) -> Result<ConnectionStatus, PublicError> {
@@ -231,7 +239,7 @@ async fn disconnect_chatgpt(
     {
         return Err(PublicError::SessionBusy);
     }
-    let Some(adapter) = state.chatgpt() else {
+    let Some(adapter) = state.xai() else {
         let status = state.provider.connection_status();
         emit_connection_status(&app, &status);
         return Ok(status);
@@ -247,7 +255,7 @@ async fn get_provider_model_catalog(
     app: tauri::AppHandle,
     state: tauri::State<'_, AgentState>,
 ) -> Result<ProviderModelCatalogResponse, PublicError> {
-    if let Some(adapter) = state.chatgpt() {
+    if let Some(adapter) = state.xai() {
         let connected = matches!(
             adapter
                 .connection_status_with_store(state.store.as_ref())
@@ -264,8 +272,6 @@ async fn get_provider_model_catalog(
                     return Ok(catalog);
                 }
                 Err(error) => {
-                    // Retain/emit last-known as visibly stale, but never convert a
-                    // failed refresh into a successful catalog response.
                     emit_stale_model_surfaces(&app, state.store.as_ref());
                     return Err(error);
                 }
@@ -278,8 +284,6 @@ async fn get_provider_model_catalog(
         .map_err(|_| PublicError::AgentStorageUnavailable)?
 }
 
-/// Cache-only catalog read used after a failed automatic refresh so the UI can
-/// retain last-known models without treating the refresh as success.
 #[tauri::command(rename_all = "camelCase")]
 async fn get_persisted_provider_model_catalog(
     state: tauri::State<'_, AgentState>,
@@ -295,7 +299,7 @@ async fn refresh_provider_model_catalog(
     app: tauri::AppHandle,
     state: tauri::State<'_, AgentState>,
 ) -> Result<ProviderModelCatalogResponse, PublicError> {
-    let adapter = state.chatgpt().ok_or(PublicError::ProviderUnavailable)?;
+    let adapter = state.xai().ok_or(PublicError::ProviderUnavailable)?;
     match adapter
         .refresh_model_catalog(state.store.as_ref(), true)
         .await
@@ -359,11 +363,12 @@ pub fn run() {
             tule_core::interrupt_inflight_turns(store.as_ref()).map_err(|_| {
                 std::io::Error::other("Agent storage recovery failed during startup")
             })?;
-            let chatgpt = Arc::new(ChatGptAdapter::new(native_store()));
-            let provider: Arc<dyn provider::ProviderAdapter> = Arc::clone(&chatgpt) as _;
+            let xai = Arc::new(XaiSubscriptionAdapter::new(native_store()));
+            xai.supersede_legacy_chatgpt_credentials();
+            let provider: Arc<dyn provider::ProviderAdapter> = Arc::clone(&xai) as _;
             app.manage(ProjectStorageState::ready_shared(Arc::clone(&store)));
             app.manage(DesktopPreferenceState::ready_shared(Arc::clone(&store)));
-            app.manage(AgentState::new(store, provider, Some(chatgpt)));
+            app.manage(AgentState::new(store, provider, Some(xai)));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -383,9 +388,10 @@ pub fn run() {
             set_agent_session_project,
             connection_status,
             sync_connection_status,
-            connect_chatgpt,
-            cancel_chatgpt_connect,
-            disconnect_chatgpt,
+            get_xai_device_pairing,
+            connect_xai,
+            cancel_xai_connect,
+            disconnect_xai,
             get_provider_model_catalog,
             get_persisted_provider_model_catalog,
             refresh_provider_model_catalog,
@@ -412,14 +418,13 @@ pub fn run() {
 mod tests {
     use super::*;
     use crate::credentials::FakeCredentialStore;
-    use crate::openai_chatgpt::{
-        ChatGptAdapter, MockInference, TestTransport, TokenBundle, TokenValues,
+    use crate::xai_subscription::{
+        MockInference, TestTransport, TokenBundle, TokenValues, XaiSubscriptionAdapter,
     };
     use provider::ConnectionState;
     use reqwest::header::HeaderMap;
     use std::sync::{Arc, Mutex};
 
-    // Fixed callback ports cannot be shared across parallel browser-connect tests.
     static CONNECT_COMMAND_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     fn connecting_follows_terminal(events: &[ConnectionStatus]) -> bool {
@@ -434,15 +439,28 @@ mod tests {
         false
     }
 
-    struct SuccessExchange;
-    impl TestTransport for SuccessExchange {
-        fn exchange_token(
+    fn test_device_response() -> xai_subscription::DeviceCodeResponse {
+        xai_subscription::DeviceCodeResponse {
+            device_code: "device-code".into(),
+            user_code: "ABCD-1234".into(),
+            verification_uri: "https://auth.x.ai/device".into(),
+            verification_uri_complete: None,
+            expires_in: Some(300),
+            interval: Some(5),
+        }
+    }
+
+    struct SuccessDeviceConnect;
+    impl TestTransport for SuccessDeviceConnect {
+        fn request_device_code(
             &self,
-            _: &str,
-            _: &str,
-            _: &str,
-            _: &str,
-        ) -> Result<TokenBundle, PublicError> {
+            url: &str,
+        ) -> Result<xai_subscription::DeviceCodeResponse, PublicError> {
+            assert_eq!(url, xai_subscription::DEVICE_CODE_URL);
+            Ok(test_device_response())
+        }
+        fn poll_device_code_token(&self, url: &str, _: &str) -> Result<TokenBundle, PublicError> {
+            assert_eq!(url, xai_subscription::TOKEN_URL);
             Ok(TokenBundle::Success(TokenValues::for_test(
                 "access", "refresh", "account",
             )))
@@ -474,13 +492,13 @@ mod tests {
     fn terminal_status_emit_preserves_success_and_uses_authoritative_error_status() {
         let connected = ConnectionStatus {
             state: ConnectionState::Connected,
-            provider_id: "openai-chatgpt-compat",
-            model: "gpt-5.5",
+            provider_id: "xai-subscription-oauth",
+            model: "grok-3",
         };
         let disconnected = ConnectionStatus {
             state: ConnectionState::Disconnected,
-            provider_id: "openai-chatgpt-compat",
-            model: "gpt-5.5",
+            provider_id: "xai-subscription-oauth",
+            model: "grok-3",
         };
 
         assert_eq!(
@@ -502,17 +520,14 @@ mod tests {
         let _guard = CONNECT_COMMAND_TEST_LOCK.lock().await;
         let events = Arc::new(Mutex::new(Vec::<ConnectionStatus>::new()));
 
-        // --- Active cancellation: Cancel requests only; settle emits terminal. ---
         {
             let fake = Arc::new(FakeCredentialStore::default());
-            let adapter = Arc::new(ChatGptAdapter::new(fake));
+            let adapter = Arc::new(XaiSubscriptionAdapter::new(fake));
             let dir = tempfile::Builder::new()
                 .prefix("tule-connect-cmd-cancel-")
                 .tempdir()
                 .unwrap();
             let store = Arc::new(SqliteStore::open(dir.path().join("tule.sqlite3")).unwrap());
-            // std channels: open_url is synchronous. Multi-thread runtime lets the
-            // test task progress while connect blocks in open_url without sleeps.
             let (entered_tx, entered_rx) = std::sync::mpsc::channel();
             let (release_tx, release_rx) = std::sync::mpsc::channel();
 
@@ -520,11 +535,15 @@ mod tests {
             let connect_store = Arc::clone(&store);
             let connect = tokio::spawn(async move {
                 connect_adapter
-                    .connect_in_browser(connect_store, move |_url| {
-                        entered_tx.send(()).unwrap();
-                        release_rx.recv().unwrap();
-                        Ok(())
-                    })
+                    .connect_device_code(
+                        connect_store,
+                        move |_url| {
+                            entered_tx.send(()).unwrap();
+                            release_rx.recv().unwrap();
+                            Ok(())
+                        },
+                        None,
+                    )
                     .await
             });
 
@@ -532,18 +551,14 @@ mod tests {
             let sampled_while_connecting = adapter.connection_status_with_store(store.as_ref());
             assert_eq!(sampled_while_connecting.state, ConnectionState::Connecting);
 
-            // Production cancel path used by the command: request only.
-            assert_eq!(cancel_chatgpt_connect_inner(Some(adapter.as_ref())), Ok(()));
-            assert!(
-                events.lock().unwrap().is_empty(),
-                "cancel must not emit; a reintroduced sample would be Connecting ({sampled_while_connecting:?})"
-            );
+            assert_eq!(cancel_xai_connect_inner(Some(adapter.as_ref())), Ok(()));
+            assert!(events.lock().unwrap().is_empty());
 
             release_tx.send(()).expect("release open_url");
             let result = connect.await.expect("join");
             assert_eq!(result, Err(PublicError::Cancelled));
 
-            let settled = settle_connect_chatgpt(
+            let settled = settle_connect_xai(
                 |status| events.lock().unwrap().push(status.clone()),
                 result,
                 adapter.connection_status_with_store(store.as_ref()),
@@ -555,12 +570,11 @@ mod tests {
             assert!(!connecting_follows_terminal(&snapshot));
         }
 
-        // --- Success then late Cancel: terminal Connected is preserved. ---
         {
             events.lock().unwrap().clear();
             let fake = Arc::new(FakeCredentialStore::default());
-            let adapter = ChatGptAdapter::new(fake);
-            adapter.set_test_transport(Arc::new(SuccessExchange));
+            let adapter = XaiSubscriptionAdapter::new(fake);
+            adapter.set_test_transport(Arc::new(SuccessDeviceConnect));
             let dir = tempfile::Builder::new()
                 .prefix("tule-connect-cmd-success-")
                 .tempdir()
@@ -568,14 +582,14 @@ mod tests {
             let store = Arc::new(SqliteStore::open(dir.path().join("tule.sqlite3")).unwrap());
 
             let result = adapter
-                .connect_in_browser_with_test_callback(Arc::clone(&store), "ok")
+                .connect_with_test_device_code(Arc::clone(&store))
                 .await;
             assert!(matches!(
                 &result,
                 Ok(status) if status.state == ConnectionState::Connected
             ));
 
-            let settled = settle_connect_chatgpt(
+            let settled = settle_connect_xai(
                 |status| events.lock().unwrap().push(status.clone()),
                 result,
                 adapter.connection_status_with_store(store.as_ref()),
@@ -583,9 +597,8 @@ mod tests {
             assert_eq!(settled.as_ref().unwrap().state, ConnectionState::Connected);
             assert_eq!(events.lock().unwrap().len(), 1);
 
-            // Late Cancel keeps InvalidInput and must not emit over Connected.
             assert_eq!(
-                cancel_chatgpt_connect_inner(Some(&adapter)),
+                cancel_xai_connect_inner(Some(&adapter)),
                 Err(PublicError::InvalidInput)
             );
             let snapshot = events.lock().unwrap().clone();
@@ -594,10 +607,9 @@ mod tests {
             assert!(!connecting_follows_terminal(&snapshot));
         }
 
-        // --- Provider failure: settle emits terminal; Cancel still does not. ---
         {
             events.lock().unwrap().clear();
-            let adapter = ChatGptAdapter::new(Arc::new(FakeCredentialStore::default()));
+            let adapter = XaiSubscriptionAdapter::new(Arc::new(FakeCredentialStore::default()));
             let dir = tempfile::Builder::new()
                 .prefix("tule-connect-cmd-fail-")
                 .tempdir()
@@ -605,20 +617,22 @@ mod tests {
             let store = Arc::new(SqliteStore::open(dir.path().join("tule.sqlite3")).unwrap());
 
             let result = adapter
-                .connect_in_browser(Arc::clone(&store), |_url| {
-                    Err(PublicError::ProviderUnavailable)
-                })
+                .connect_device_code(
+                    Arc::clone(&store),
+                    |_url| Err(PublicError::ProviderUnavailable),
+                    None,
+                )
                 .await;
             assert_eq!(result, Err(PublicError::ProviderUnavailable));
 
-            let settled = settle_connect_chatgpt(
+            let settled = settle_connect_xai(
                 |status| events.lock().unwrap().push(status.clone()),
                 result,
                 adapter.connection_status_with_store(store.as_ref()),
             );
             assert_eq!(settled, Err(PublicError::ProviderUnavailable));
             assert_eq!(
-                cancel_chatgpt_connect_inner(Some(&adapter)),
+                cancel_xai_connect_inner(Some(&adapter)),
                 Err(PublicError::InvalidInput)
             );
             let snapshot = events.lock().unwrap().clone();

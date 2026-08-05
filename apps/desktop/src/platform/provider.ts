@@ -10,6 +10,11 @@ export interface ConnectionStatus {
   model: string;
 }
 
+export interface DevicePairingInfo {
+  verificationUri: string;
+  userCode: string;
+}
+
 export interface ProviderModelEntry {
   id: string;
   displayName: string;
@@ -124,6 +129,32 @@ export function validateConnectionStatusExport(value: unknown): ConnectionStatus
   return value;
 }
 
+function isDevicePairingInfo(value: unknown): value is DevicePairingInfo {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return false;
+  }
+
+  return (
+    "verificationUri" in value &&
+    typeof value.verificationUri === "string" &&
+    "userCode" in value &&
+    typeof value.userCode === "string"
+  );
+}
+
+export function validateDevicePairingInfo(value: unknown): DevicePairingInfo | null {
+  if (value === null || value === undefined) {
+    return null;
+  }
+  if (!isDevicePairingInfo(value)) {
+    throw new ProviderError("provider_unavailable");
+  }
+  if (value.verificationUri === "" && value.userCode === "") {
+    return null;
+  }
+  return value;
+}
+
 function isProviderModelEntry(value: unknown): value is ProviderModelEntry {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     return false;
@@ -208,12 +239,12 @@ export async function getConnectionStatus(): Promise<ConnectionStatus> {
   return validateConnectionStatusExport(await invokeProviderCommand("connection_status"));
 }
 
-export async function connectChatgpt(): Promise<ConnectionStatus> {
-  return validateConnectionStatusExport(await invokeProviderCommand("connect_chatgpt"));
+export async function connectXai(): Promise<ConnectionStatus> {
+  return validateConnectionStatusExport(await invokeProviderCommand("connect_xai"));
 }
 
-export async function cancelChatgptConnect(): Promise<void> {
-  await invokeProviderCommand("cancel_chatgpt_connect");
+export async function cancelXaiConnect(): Promise<void> {
+  await invokeProviderCommand("cancel_xai_connect");
 }
 
 /**
@@ -225,8 +256,20 @@ export function isStaleConnectCancellation(error: unknown): boolean {
   return getProviderErrorCode(error) === "invalid_input";
 }
 
-export async function disconnectChatgpt(): Promise<ConnectionStatus> {
-  return validateConnectionStatusExport(await invokeProviderCommand("disconnect_chatgpt"));
+export async function disconnectXai(): Promise<ConnectionStatus> {
+  return validateConnectionStatusExport(await invokeProviderCommand("disconnect_xai"));
+}
+
+export async function getXaiDevicePairing(): Promise<DevicePairingInfo | null> {
+  return validateDevicePairingInfo(await invokeProviderCommand("get_xai_device_pairing"));
+}
+
+export async function listenXaiDevicePairingChanged(
+  onPairing: (pairing: DevicePairingInfo | null) => void,
+): Promise<UnlistenFn> {
+  return listen("xai-device-pairing-changed", (event) => {
+    onPairing(validateDevicePairingInfo(event.payload));
+  });
 }
 
 export async function getProviderModelCatalog(): Promise<ProviderModelCatalog> {

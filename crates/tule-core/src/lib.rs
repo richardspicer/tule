@@ -17,8 +17,9 @@ pub use agent::{
     CHECKPOINT_INTERVAL_MS, CompletedTurnContext, FIXED_INSTRUCTION, IllegalAgentTurnTransition,
     InvalidAgentEventKind, InvalidAgentId, InvalidAgentTurnState, MAX_AGENT_OUTPUT_UTF8,
     MAX_CONTEXT_UTF8, MAX_USER_TEXT_UTF8, MODEL_ID, PROMPT_VERSION, PROVIDER_PROFILE_ID,
-    ProviderRequestId, TITLE_MAX_SCALARS, assemble_instructions, assemble_responses_request_json,
-    derive_session_title, should_checkpoint, validate_user_text,
+    ProviderRequestId, TITLE_MAX_SCALARS, assemble_chat_completions_request_json,
+    assemble_instructions, assemble_responses_request_json, derive_session_title,
+    should_checkpoint, validate_user_text,
 };
 pub use agent_repository::{AgentRepository, ProviderProfile};
 pub use agent_source::{

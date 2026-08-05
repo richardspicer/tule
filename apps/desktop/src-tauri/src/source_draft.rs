@@ -58,7 +58,9 @@ fn parse_folder_draft_members(
     let mut members = Vec::new();
     let mut offset = 0;
     while offset < content.len() {
-        let rest = &content[offset..];
+        let rest = content
+            .get(offset..)
+            .ok_or(SourceValidationError::UnsafeDisplayName)?;
         let Some(after_member) = rest.strip_prefix("member: ") else {
             return Err(SourceValidationError::UnsafeDisplayName);
         };
@@ -82,10 +84,10 @@ fn parse_folder_draft_members(
             .ok_or(SourceValidationError::TooLarge {
                 byte_count: content.len(),
             })?;
-        if body_end > content.len() {
-            return Err(SourceValidationError::UnsafeDisplayName);
-        }
-        let body = content[body_start..body_end].to_owned();
+        let body = content
+            .get(body_start..body_end)
+            .ok_or(SourceValidationError::UnsafeDisplayName)?
+            .to_owned();
         validate_source_content(&body)?;
         members.push((basename.to_owned(), body));
         offset = body_end;
@@ -619,6 +621,15 @@ mod tests {
         assert!(matches!(
             capture_picked_source(&store, &picker, &reader),
             Err(SourceDraftError::TooLarge)
+        ));
+    }
+
+    #[test]
+    fn parse_folder_draft_members_rejects_length_on_non_utf8_boundary() {
+        let content = "member: a.txt\ncontent-bytes: 1\né";
+        assert!(matches!(
+            parse_folder_draft_members(content),
+            Err(SourceValidationError::UnsafeDisplayName)
         ));
     }
 

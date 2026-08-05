@@ -439,7 +439,9 @@ pub fn count_folder_members(content: &str) -> Result<u32, SourceValidationError>
     let mut offset = 0;
     let mut count = 0_u32;
     while offset < content.len() {
-        let rest = &content[offset..];
+        let rest = content
+            .get(offset..)
+            .ok_or(SourceValidationError::UnsafeDisplayName)?;
         let Some(after_member) = rest.strip_prefix("member: ") else {
             return Err(SourceValidationError::UnsafeDisplayName);
         };
@@ -463,10 +465,10 @@ pub fn count_folder_members(content: &str) -> Result<u32, SourceValidationError>
             .ok_or(SourceValidationError::TooLarge {
                 byte_count: content.len(),
             })?;
-        if body_end > content.len() {
-            return Err(SourceValidationError::UnsafeDisplayName);
-        }
-        validate_source_content(&content[body_start..body_end])?;
+        let body = content
+            .get(body_start..body_end)
+            .ok_or(SourceValidationError::UnsafeDisplayName)?;
+        validate_source_content(body)?;
         count = count
             .checked_add(1)
             .ok_or(SourceValidationError::TooManyMembers {
@@ -667,6 +669,16 @@ mod tests {
         assert!(matches!(
             validate_source_content(&"a".repeat(MAX_SOURCE_UTF8 + 1)),
             Err(SourceValidationError::TooLarge { .. })
+        ));
+    }
+
+    #[test]
+    fn count_folder_members_rejects_length_on_non_utf8_boundary() {
+        // "é" is two UTF-8 bytes; a claimed length of 1 would slice mid-character.
+        let content = "member: a.txt\ncontent-bytes: 1\né";
+        assert!(matches!(
+            count_folder_members(content),
+            Err(SourceValidationError::UnsafeDisplayName)
         ));
     }
 

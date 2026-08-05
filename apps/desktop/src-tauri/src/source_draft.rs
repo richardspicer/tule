@@ -2,14 +2,15 @@
 
 use std::{
     collections::HashMap,
-    fs::File,
+    fs::{self, File},
     io::{Read, Seek, SeekFrom},
     path::{Path, PathBuf},
     sync::Mutex,
 };
 
 use tule_core::{
-    AgentSessionId, MAX_SOURCE_UTF8, SOURCE_ORIGIN_LOCAL_TEXT_FILE, Source, SourceValidationError,
+    AgentSessionId, MAX_FOLDER_MEMBERS, MAX_SOURCE_UTF8, SOURCE_ORIGIN_LOCAL_TEXT_FILE,
+    SOURCE_ORIGIN_LOCAL_TEXT_FOLDER, Source, SourceValidationError, frame_folder_members,
     validate_source_content, validate_source_display_name,
 };
 
@@ -27,6 +28,8 @@ pub(crate) enum ComposerScope {
 pub(crate) struct SourceDraft {
     pub(crate) display_name: String,
     pub(crate) content: String,
+    pub(crate) origin_kind: String,
+    pub(crate) member_count: u32,
     scope: ComposerScope,
 }
 
@@ -36,8 +39,60 @@ impl SourceDraft {
     }
 
     pub(crate) fn into_source(self) -> Result<Source, SourceValidationError> {
-        Source::new_local_text(self.display_name, self.content)
+        match self.origin_kind.as_str() {
+            SOURCE_ORIGIN_LOCAL_TEXT_FILE => {
+                Source::new_local_text(self.display_name, self.content)
+            }
+            SOURCE_ORIGIN_LOCAL_TEXT_FOLDER => {
+                let members = parse_folder_draft_members(&self.content)?;
+                Source::new_local_text_folder(self.display_name, &members)
+            }
+            _ => Err(SourceValidationError::UnsafeDisplayName),
+        }
     }
+}
+
+fn parse_folder_draft_members(
+    content: &str,
+) -> Result<Vec<(String, String)>, SourceValidationError> {
+    let mut members = Vec::new();
+    let mut offset = 0;
+    while offset < content.len() {
+        let rest = content
+            .get(offset..)
+            .ok_or(SourceValidationError::UnsafeDisplayName)?;
+        let Some(after_member) = rest.strip_prefix("member: ") else {
+            return Err(SourceValidationError::UnsafeDisplayName);
+        };
+        let Some((basename, after_basename)) = after_member.split_once('\n') else {
+            return Err(SourceValidationError::UnsafeDisplayName);
+        };
+        validate_source_display_name(basename)?;
+        let Some(after_bytes_label) = after_basename.strip_prefix("content-bytes: ") else {
+            return Err(SourceValidationError::UnsafeDisplayName);
+        };
+        let Some((len_text, after_len)) = after_bytes_label.split_once('\n') else {
+            return Err(SourceValidationError::UnsafeDisplayName);
+        };
+        let byte_len: usize = len_text
+            .parse()
+            .map_err(|_| SourceValidationError::UnsafeDisplayName)?;
+        let header_len = rest.len() - after_len.len();
+        let body_start = offset + header_len;
+        let body_end = body_start
+            .checked_add(byte_len)
+            .ok_or(SourceValidationError::TooLarge {
+                byte_count: content.len(),
+            })?;
+        let body = content
+            .get(body_start..body_end)
+            .ok_or(SourceValidationError::UnsafeDisplayName)?
+            .to_owned();
+        validate_source_content(&body)?;
+        members.push((basename.to_owned(), body));
+        offset = body_end;
+    }
+    Ok(members)
 }
 
 /// Process-scoped draft handles for the main-window composer.
@@ -111,6 +166,8 @@ impl SourceDraftStore {
         &self,
         display_name: String,
         content: String,
+        origin_kind: String,
+        member_count: u32,
     ) -> Result<String, SourceDraftError> {
         let handle = generate_draft_handle()?;
         let scope = self.current_scope();
@@ -119,6 +176,8 @@ impl SourceDraftStore {
             SourceDraft {
                 display_name,
                 content,
+                origin_kind,
+                member_count,
                 scope,
             },
         );
@@ -151,9 +210,11 @@ impl SourceDraftStore {
         &self,
         display_name: String,
         content: String,
+        origin_kind: String,
+        member_count: u32,
     ) -> Result<String, SourceDraftError> {
         self.clear_all();
-        self.insert(display_name, content)
+        self.insert(display_name, content, origin_kind, member_count)
     }
 
     /// Builds the send-target scope for an optional session identifier.
@@ -182,6 +243,7 @@ pub(crate) enum PickSourceOutcome {
         display_name: String,
         byte_count: u64,
         origin_kind: String,
+        member_count: u32,
     },
 }
 
@@ -199,9 +261,19 @@ pub(crate) trait SourceFilePicker: Send + Sync {
     fn pick_file(&self) -> Option<PathBuf>;
 }
 
+/// Folder picker boundary used by production and tests.
+pub(crate) trait SourceFolderPicker: Send + Sync {
+    fn pick_folder(&self) -> Option<PathBuf>;
+}
+
 /// One-time bounded reader boundary used by production and tests.
 pub(crate) trait SourceFileReader: Send + Sync {
     fn read_regular_file(&self, path: &Path) -> Result<Vec<u8>, SourceDraftError>;
+}
+
+/// Shallow folder enumeration boundary used by production and tests.
+pub(crate) trait SourceFolderReader: Send + Sync {
+    fn read_shallow_folder(&self, path: &Path) -> Result<Vec<(String, Vec<u8>)>, SourceDraftError>;
 }
 
 /// Operating-system file reader with a hard byte ceiling.
@@ -238,6 +310,73 @@ impl SourceFileReader for NativeSourceFileReader {
     }
 }
 
+/// Operating-system shallow folder reader with aggregate and member ceilings.
+#[derive(Debug, Default)]
+pub(crate) struct NativeSourceFolderReader;
+
+impl SourceFolderReader for NativeSourceFolderReader {
+    fn read_shallow_folder(&self, path: &Path) -> Result<Vec<(String, Vec<u8>)>, SourceDraftError> {
+        collect_shallow_folder_members(path, &NativeSourceFileReader)
+    }
+}
+
+fn collect_shallow_folder_members(
+    path: &Path,
+    file_reader: &impl SourceFileReader,
+) -> Result<Vec<(String, Vec<u8>)>, SourceDraftError> {
+    let metadata = fs::metadata(path).map_err(|_| SourceDraftError::Unreadable)?;
+    if !metadata.is_dir() {
+        return Err(SourceDraftError::Unsupported);
+    }
+    let mut eligible = Vec::new();
+    let entries = fs::read_dir(path).map_err(|_| SourceDraftError::Unreadable)?;
+    for entry in entries {
+        let Ok(entry) = entry else {
+            continue;
+        };
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if file_type.is_symlink() {
+            continue;
+        }
+        if !file_type.is_file() {
+            continue;
+        }
+        let file_path = entry.path();
+        let Some(basename) = lossless_basename(&file_path) else {
+            continue;
+        };
+        if validate_source_display_name(&basename).is_err() {
+            continue;
+        }
+        let Ok(file_metadata) = entry.metadata() else {
+            continue;
+        };
+        if !file_metadata.is_file() {
+            continue;
+        }
+        if file_metadata.len() > MAX_SOURCE_UTF8 as u64 {
+            continue;
+        }
+        let Ok(bytes) = file_reader.read_regular_file(&file_path) else {
+            continue;
+        };
+        if std::str::from_utf8(&bytes).is_err() {
+            continue;
+        }
+        if bytes.contains(&0) {
+            continue;
+        }
+        // Cap already filled: fail closed without reading remaining siblings.
+        if eligible.len() >= MAX_FOLDER_MEMBERS {
+            return Err(SourceDraftError::Unsupported);
+        }
+        eligible.push((basename, bytes));
+    }
+    Ok(eligible)
+}
+
 /// Captures one selected file into an ephemeral draft without retaining the path.
 pub(crate) fn capture_picked_source<P, R>(
     store: &SourceDraftStore,
@@ -259,12 +398,66 @@ where
     let content = std::str::from_utf8(&bytes).map_err(|_| SourceDraftError::Unsupported)?;
     validate_source_content(content).map_err(map_validation)?;
     let byte_count = content.len() as u64;
-    let draft_handle = store.replace_with(display_name.clone(), content.to_owned())?;
+    let draft_handle = store.replace_with(
+        display_name.clone(),
+        content.to_owned(),
+        SOURCE_ORIGIN_LOCAL_TEXT_FILE.to_owned(),
+        1,
+    )?;
     Ok(PickSourceOutcome::Selected {
         draft_handle,
         display_name,
         byte_count,
         origin_kind: SOURCE_ORIGIN_LOCAL_TEXT_FILE.to_owned(),
+        member_count: 1,
+    })
+}
+
+/// Captures one selected folder into an ephemeral draft without retaining the path.
+pub(crate) fn capture_picked_folder<P, R>(
+    store: &SourceDraftStore,
+    picker: &P,
+    reader: &R,
+) -> Result<PickSourceOutcome, SourceDraftError>
+where
+    P: SourceFolderPicker + ?Sized,
+    R: SourceFolderReader + ?Sized,
+{
+    let Some(path) = picker.pick_folder() else {
+        return Ok(PickSourceOutcome::Cancelled);
+    };
+    let display_name = lossless_basename(&path).ok_or(SourceDraftError::Unsupported)?;
+    validate_source_display_name(&display_name).map_err(map_validation)?;
+    let raw_members = reader.read_shallow_folder(&path)?;
+    drop(path);
+    if raw_members.is_empty() {
+        return Err(SourceDraftError::Unsupported);
+    }
+    if raw_members.len() > MAX_FOLDER_MEMBERS {
+        return Err(SourceDraftError::Unsupported);
+    }
+    let mut members = Vec::with_capacity(raw_members.len());
+    for (basename, bytes) in raw_members {
+        let content = std::str::from_utf8(&bytes).map_err(|_| SourceDraftError::Unsupported)?;
+        validate_source_content(content).map_err(map_validation)?;
+        members.push((basename, content.to_owned()));
+    }
+    let framed = frame_folder_members(&members).map_err(map_validation)?;
+    validate_source_content(&framed).map_err(map_validation)?;
+    let member_count = u32::try_from(members.len()).map_err(|_| SourceDraftError::Unsupported)?;
+    let byte_count = framed.len() as u64;
+    let draft_handle = store.replace_with(
+        display_name.clone(),
+        framed,
+        SOURCE_ORIGIN_LOCAL_TEXT_FOLDER.to_owned(),
+        member_count,
+    )?;
+    Ok(PickSourceOutcome::Selected {
+        draft_handle,
+        display_name,
+        byte_count,
+        origin_kind: SOURCE_ORIGIN_LOCAL_TEXT_FOLDER.to_owned(),
+        member_count,
     })
 }
 
@@ -277,6 +470,8 @@ fn map_validation(error: SourceValidationError) -> SourceDraftError {
         SourceValidationError::TooLarge { .. } => SourceDraftError::TooLarge,
         SourceValidationError::UnsafeDisplayName
         | SourceValidationError::ContainsNul
+        | SourceValidationError::NoEligibleMembers
+        | SourceValidationError::TooManyMembers { .. }
         | SourceValidationError::Time(_) => SourceDraftError::Unsupported,
     }
 }
@@ -307,6 +502,12 @@ mod tests {
         }
     }
 
+    impl SourceFolderPicker for FakePicker {
+        fn pick_folder(&self) -> Option<PathBuf> {
+            self.path.lock().unwrap().clone()
+        }
+    }
+
     struct FakeReader {
         bytes: Mutex<Result<Vec<u8>, SourceDraftError>>,
         reads: Mutex<u32>,
@@ -316,6 +517,23 @@ mod tests {
         fn read_regular_file(&self, _path: &Path) -> Result<Vec<u8>, SourceDraftError> {
             *self.reads.lock().unwrap() += 1;
             self.bytes.lock().unwrap().clone()
+        }
+    }
+
+    struct FakeFolderReader {
+        members: Mutex<FolderReadResult>,
+        reads: Mutex<u32>,
+    }
+
+    type FolderReadResult = Result<Vec<(String, Vec<u8>)>, SourceDraftError>;
+
+    impl SourceFolderReader for FakeFolderReader {
+        fn read_shallow_folder(
+            &self,
+            _path: &Path,
+        ) -> Result<Vec<(String, Vec<u8>)>, SourceDraftError> {
+            *self.reads.lock().unwrap() += 1;
+            self.members.lock().unwrap().clone()
         }
     }
 
@@ -353,6 +571,7 @@ mod tests {
             display_name,
             byte_count,
             origin_kind,
+            member_count,
         } = outcome
         else {
             panic!("expected selection");
@@ -360,6 +579,7 @@ mod tests {
         assert_eq!(display_name, "notes.txt");
         assert_eq!(byte_count, 7);
         assert_eq!(origin_kind, SOURCE_ORIGIN_LOCAL_TEXT_FILE);
+        assert_eq!(member_count, 1);
         assert_eq!(draft_handle.len(), 32);
         let draft = store.get(&draft_handle).unwrap();
         assert_eq!(draft.content, "hello\r\n");
@@ -405,12 +625,183 @@ mod tests {
     }
 
     #[test]
+    fn parse_folder_draft_members_rejects_length_on_non_utf8_boundary() {
+        let content = "member: a.txt\ncontent-bytes: 1\né";
+        assert!(matches!(
+            parse_folder_draft_members(content),
+            Err(SourceValidationError::UnsafeDisplayName)
+        ));
+    }
+
+    #[test]
+    fn folder_capture_skips_unreadable_sibling_and_succeeds_with_one_eligible() {
+        struct FailLockedReader;
+
+        impl SourceFileReader for FailLockedReader {
+            fn read_regular_file(&self, path: &Path) -> Result<Vec<u8>, SourceDraftError> {
+                if path.file_name().is_some_and(|name| name == "locked.txt") {
+                    return Err(SourceDraftError::Unreadable);
+                }
+                NativeSourceFileReader.read_regular_file(path)
+            }
+        }
+
+        let store = SourceDraftStore::new();
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("good.txt"), "alpha").unwrap();
+        std::fs::write(root.path().join("locked.txt"), "secret").unwrap();
+        let members = collect_shallow_folder_members(root.path(), &FailLockedReader).unwrap();
+        assert_eq!(members.len(), 1);
+        assert_eq!(members[0].0, "good.txt");
+
+        let picker = FakePicker {
+            path: Mutex::new(Some(root.path().to_path_buf())),
+        };
+        struct FolderReaderWithLockedSibling;
+        impl SourceFolderReader for FolderReaderWithLockedSibling {
+            fn read_shallow_folder(
+                &self,
+                path: &Path,
+            ) -> Result<Vec<(String, Vec<u8>)>, SourceDraftError> {
+                collect_shallow_folder_members(path, &FailLockedReader)
+            }
+        }
+        let outcome =
+            capture_picked_folder(&store, &picker, &FolderReaderWithLockedSibling).unwrap();
+        let PickSourceOutcome::Selected { member_count, .. } = outcome else {
+            panic!("expected selection");
+        };
+        assert_eq!(member_count, 1);
+    }
+
+    #[test]
+    fn folder_capture_skips_ineligible_and_excludes_nested_files() {
+        let store = SourceDraftStore::new();
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("a.txt"), "alpha").unwrap();
+        std::fs::create_dir(root.path().join("nested")).unwrap();
+        std::fs::write(root.path().join("nested").join("hidden.txt"), "no").unwrap();
+        std::fs::write(root.path().join("binary.bin"), [0xff, 0xfe]).unwrap();
+        let picker = FakePicker {
+            path: Mutex::new(Some(root.path().to_path_buf())),
+        };
+        let reader = NativeSourceFolderReader;
+        let outcome = capture_picked_folder(&store, &picker, &reader).unwrap();
+        let PickSourceOutcome::Selected {
+            display_name,
+            member_count,
+            origin_kind,
+            ..
+        } = outcome
+        else {
+            panic!("expected selection");
+        };
+        assert_eq!(
+            display_name,
+            root.path().file_name().unwrap().to_str().unwrap()
+        );
+        assert_eq!(member_count, 1);
+        assert_eq!(origin_kind, SOURCE_ORIGIN_LOCAL_TEXT_FOLDER);
+    }
+
+    #[test]
+    fn folder_capture_fails_on_zero_eligible_over_count_and_over_budget() {
+        let store = SourceDraftStore::new();
+        let empty = tempfile::tempdir().unwrap();
+        let picker = FakePicker {
+            path: Mutex::new(Some(empty.path().to_path_buf())),
+        };
+        let reader = NativeSourceFolderReader;
+        assert!(matches!(
+            capture_picked_folder(&store, &picker, &reader),
+            Err(SourceDraftError::Unsupported)
+        ));
+
+        let over_count = tempfile::tempdir().unwrap();
+        for index in 0..=MAX_FOLDER_MEMBERS {
+            std::fs::write(over_count.path().join(format!("f{index}.txt")), "x").unwrap();
+        }
+        let picker = FakePicker {
+            path: Mutex::new(Some(over_count.path().to_path_buf())),
+        };
+        assert!(matches!(
+            capture_picked_folder(&store, &picker, &reader),
+            Err(SourceDraftError::Unsupported)
+        ));
+
+        let large = tempfile::tempdir().unwrap();
+        let total_files = MAX_FOLDER_MEMBERS + 20;
+        for index in 0..total_files {
+            std::fs::write(large.path().join(format!("f{index:03}.txt")), "x").unwrap();
+        }
+        struct CountingReader {
+            reads: Mutex<usize>,
+        }
+        impl SourceFileReader for CountingReader {
+            fn read_regular_file(&self, path: &Path) -> Result<Vec<u8>, SourceDraftError> {
+                *self.reads.lock().unwrap() += 1;
+                NativeSourceFileReader.read_regular_file(path)
+            }
+        }
+        let counting = CountingReader {
+            reads: Mutex::new(0),
+        };
+        assert!(matches!(
+            collect_shallow_folder_members(large.path(), &counting),
+            Err(SourceDraftError::Unsupported)
+        ));
+        let reads = *counting.reads.lock().unwrap();
+        assert_eq!(reads, MAX_FOLDER_MEMBERS + 1);
+        assert!(reads < total_files);
+
+        let members = vec![("big.txt".to_owned(), vec![b'a'; MAX_SOURCE_UTF8])];
+        let fake_reader = FakeFolderReader {
+            members: Mutex::new(Ok(members)),
+            reads: Mutex::new(0),
+        };
+        let picker = FakePicker {
+            path: Mutex::new(Some(PathBuf::from("docs"))),
+        };
+        assert!(matches!(
+            capture_picked_folder(&store, &picker, &fake_reader),
+            Err(SourceDraftError::TooLarge)
+        ));
+    }
+
+    #[test]
+    fn folder_snapshot_ignores_post_capture_disk_mutation() {
+        let store = SourceDraftStore::new();
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("a.txt");
+        std::fs::write(&file, "before").unwrap();
+        let picker = FakePicker {
+            path: Mutex::new(Some(root.path().to_path_buf())),
+        };
+        let outcome = capture_picked_folder(&store, &picker, &NativeSourceFolderReader).unwrap();
+        let PickSourceOutcome::Selected { draft_handle, .. } = outcome else {
+            panic!("expected selection");
+        };
+        std::fs::write(&file, "after").unwrap();
+        std::fs::remove_file(&file).unwrap();
+        let draft = store.get(&draft_handle).unwrap();
+        assert!(draft.content.contains("before"));
+        assert!(!draft.content.contains("after"));
+    }
+
+    #[test]
     fn cross_session_handle_cannot_be_substituted() {
         let store = SourceDraftStore::new();
         let session_a = AgentSessionId::generate();
         let session_b = AgentSessionId::generate();
         store.bind_session_scope(session_a);
-        let handle = store.insert("a.txt".into(), "from-a".into()).unwrap();
+        let handle = store
+            .insert(
+                "a.txt".into(),
+                "from-a".into(),
+                SOURCE_ORIGIN_LOCAL_TEXT_FILE.into(),
+                1,
+            )
+            .unwrap();
         assert!(
             store
                 .resolve_for_send(&handle, &ComposerScope::Session(session_a))
@@ -431,10 +822,24 @@ mod tests {
     #[test]
     fn repeated_new_session_scope_advances_and_invalidates() {
         let store = SourceDraftStore::new();
-        let first = store.insert("a.txt".into(), "one".into()).unwrap();
+        let first = store
+            .insert(
+                "a.txt".into(),
+                "one".into(),
+                SOURCE_ORIGIN_LOCAL_TEXT_FILE.into(),
+                1,
+            )
+            .unwrap();
         store.begin_new_session_scope();
         assert!(store.get(&first).is_none());
-        let second = store.insert("b.txt".into(), "two".into()).unwrap();
+        let second = store
+            .insert(
+                "b.txt".into(),
+                "two".into(),
+                SOURCE_ORIGIN_LOCAL_TEXT_FILE.into(),
+                1,
+            )
+            .unwrap();
         let generation = match store.current_scope() {
             ComposerScope::NewSession { generation } => generation,
             ComposerScope::Session(_) => panic!("expected new-session scope"),
@@ -458,7 +863,14 @@ mod tests {
         let session_a = AgentSessionId::generate();
         let session_b = AgentSessionId::generate();
         store.bind_session_scope(session_a);
-        let handle = store.insert("a.txt".into(), "body".into()).unwrap();
+        let handle = store
+            .insert(
+                "a.txt".into(),
+                "body".into(),
+                SOURCE_ORIGIN_LOCAL_TEXT_FILE.into(),
+                1,
+            )
+            .unwrap();
         store.bind_session_scope(session_b);
         assert!(store.get(&handle).is_none());
         store.bind_session_scope(session_a);
@@ -478,14 +890,28 @@ mod tests {
                 .resolve_for_send("deadbeef".repeat(4).as_str(), &store.current_scope())
                 .is_none()
         );
-        let handle = store.insert("a.txt".into(), "x".into()).unwrap();
+        let handle = store
+            .insert(
+                "a.txt".into(),
+                "x".into(),
+                SOURCE_ORIGIN_LOCAL_TEXT_FILE.into(),
+                1,
+            )
+            .unwrap();
         store.clear_handle(&handle);
         assert!(
             store
                 .resolve_for_send(&handle, &store.current_scope())
                 .is_none()
         );
-        let handle = store.insert("a.txt".into(), "x".into()).unwrap();
+        let handle = store
+            .insert(
+                "a.txt".into(),
+                "x".into(),
+                SOURCE_ORIGIN_LOCAL_TEXT_FILE.into(),
+                1,
+            )
+            .unwrap();
         store.clear_all();
         assert!(
             store

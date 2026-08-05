@@ -24,8 +24,9 @@ use crate::{
         build_selection_response, build_stale_catalog_response,
     },
     source_draft::{
-        NativeSourceFileReader, PickSourceOutcome, SourceDraftError, SourceDraftStore,
-        SourceFilePicker, capture_picked_source,
+        NativeSourceFileReader, NativeSourceFolderReader, PickSourceOutcome, SourceDraftError,
+        SourceDraftStore, SourceFilePicker, SourceFolderPicker, capture_picked_folder,
+        capture_picked_source,
     },
     sqlite::SqliteStore,
 };
@@ -199,6 +200,7 @@ pub(crate) struct SourceMetadataResponse {
     display_name: String,
     byte_count: u64,
     content_sha256: String,
+    member_count: u32,
 }
 
 impl From<&Source> for SourceMetadataResponse {
@@ -209,6 +211,7 @@ impl From<&Source> for SourceMetadataResponse {
             display_name: value.display_name().into(),
             byte_count: value.byte_count(),
             content_sha256: value.content_sha256().into(),
+            member_count: value.member_count(),
         }
     }
 }
@@ -261,6 +264,7 @@ pub(crate) struct PickAgentTextSourceResponse {
     display_name: Option<String>,
     byte_count: Option<u64>,
     origin_kind: Option<String>,
+    member_count: Option<u32>,
 }
 
 fn require_main_window(webview: &Webview) -> Result<(), AgentIpcError> {
@@ -277,6 +281,15 @@ struct AppDialogPicker {
 impl SourceFilePicker for AppDialogPicker {
     fn pick_file(&self) -> Option<std::path::PathBuf> {
         match self.app.dialog().file().blocking_pick_file()? {
+            FilePath::Path(path) => Some(path),
+            FilePath::Url(_) => None,
+        }
+    }
+}
+
+impl SourceFolderPicker for AppDialogPicker {
+    fn pick_folder(&self) -> Option<std::path::PathBuf> {
+        match self.app.dialog().file().blocking_pick_folder()? {
             FilePath::Path(path) => Some(path),
             FilePath::Url(_) => None,
         }
@@ -480,18 +493,62 @@ pub(crate) async fn pick_agent_text_source(
             display_name: None,
             byte_count: None,
             origin_kind: None,
+            member_count: None,
         },
         PickSourceOutcome::Selected {
             draft_handle,
             display_name,
             byte_count,
             origin_kind,
+            member_count,
         } => PickAgentTextSourceResponse {
             status: "selected".into(),
             draft_handle: Some(draft_handle),
             display_name: Some(display_name),
             byte_count: Some(byte_count),
             origin_kind: Some(origin_kind),
+            member_count: Some(member_count),
+        },
+    })
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub(crate) async fn pick_agent_text_folder_source(
+    app: AppHandle,
+    webview: Webview,
+    state: State<'_, AgentState>,
+) -> Result<PickAgentTextSourceResponse, AgentIpcError> {
+    require_main_window(&webview)?;
+    let _operation = begin_draft_mutation(&state)?;
+    let drafts = Arc::clone(&state.source_drafts);
+    let picker = AppDialogPicker { app };
+    let outcome = tauri::async_runtime::spawn_blocking(move || {
+        capture_picked_folder(&drafts, &picker, &NativeSourceFolderReader)
+    })
+    .await
+    .map_err(|_| AgentIpcError::SourceUnreadable)??;
+    Ok(match outcome {
+        PickSourceOutcome::Cancelled => PickAgentTextSourceResponse {
+            status: "cancelled".into(),
+            draft_handle: None,
+            display_name: None,
+            byte_count: None,
+            origin_kind: None,
+            member_count: None,
+        },
+        PickSourceOutcome::Selected {
+            draft_handle,
+            display_name,
+            byte_count,
+            origin_kind,
+            member_count,
+        } => PickAgentTextSourceResponse {
+            status: "selected".into(),
+            draft_handle: Some(draft_handle),
+            display_name: Some(display_name),
+            byte_count: Some(byte_count),
+            origin_kind: Some(origin_kind),
+            member_count: Some(member_count),
         },
     })
 }
@@ -1061,7 +1118,12 @@ mod tests {
         let (directory, state) = test_state();
         let first_handle = state
             .source_drafts
-            .insert("first.txt".into(), "first-body".into())
+            .insert(
+                "first.txt".into(),
+                "first-body".into(),
+                tule_core::SOURCE_ORIGIN_LOCAL_TEXT_FILE.into(),
+                1,
+            )
             .unwrap();
         let new_session_scope = state.source_drafts.current_scope();
         assert!(matches!(
@@ -1090,7 +1152,12 @@ mod tests {
 
         let follow_handle = state
             .source_drafts
-            .insert("follow.txt".into(), "follow-body".into())
+            .insert(
+                "follow.txt".into(),
+                "follow-body".into(),
+                tule_core::SOURCE_ORIGIN_LOCAL_TEXT_FILE.into(),
+                1,
+            )
             .unwrap();
         assert!(
             state
@@ -1123,7 +1190,12 @@ mod tests {
         let (directory, state) = test_state();
         let handle = state
             .source_drafts
-            .insert("notes.txt".into(), "original-body".into())
+            .insert(
+                "notes.txt".into(),
+                "original-body".into(),
+                tule_core::SOURCE_ORIGIN_LOCAL_TEXT_FILE.into(),
+                1,
+            )
             .unwrap();
         let send_target = state.source_drafts.current_scope();
         let held = state.try_send_operation().unwrap();

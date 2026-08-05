@@ -9,8 +9,10 @@ import {
   type UIEvent,
 } from "react";
 import {
-  formatSourceByteCount,
+  formatSourceAttachmentSummary,
   getSafeAgentErrorMessageForCode,
+  sourceAttachmentKindLabel,
+  type AgentSourceMetadata,
   type AgentTurn,
   type PendingSourceAttachment,
 } from "../platform/agents";
@@ -54,6 +56,7 @@ interface AgentWorkspaceProps {
   onSend: () => void;
   onCancel: () => void;
   onAttach: () => void;
+  onAttachFolder: () => void;
   onRemoveAttachment: () => void;
   onProjectChange: (projectId: string | null) => void;
   onModelChange: (modelId: string) => void;
@@ -74,6 +77,24 @@ function turnStateLabel(state: string): string | null {
     default:
       return null;
   }
+}
+
+function formatPersistedAttachmentSummary(source: AgentSourceMetadata): string {
+  return formatSourceAttachmentSummary(source);
+}
+
+function attachmentActionLabel(
+  pendingAttachment: PendingSourceAttachment | null,
+  kind: "file" | "folder",
+): string {
+  if (pendingAttachment === null) {
+    return kind === "folder" ? "Attach a folder" : "Attach a text file";
+  }
+  const currentKind = sourceAttachmentKindLabel(pendingAttachment.originKind);
+  if (currentKind === kind) {
+    return `Replace the attached ${kind}`;
+  }
+  return `Replace with a ${kind}`;
 }
 
 function isNearBottom(element: HTMLElement): boolean {
@@ -101,6 +122,7 @@ export function AgentWorkspace({
   onSend,
   onCancel,
   onAttach,
+  onAttachFolder,
   onRemoveAttachment,
   onProjectChange,
   onModelChange,
@@ -282,8 +304,8 @@ export function AgentWorkspace({
                       <pre className="turn-text">{turn.userText}</pre>
                       {attachment === null ? null : (
                         <p className="turn-attachment">
-                          Attached snapshot: {attachment.displayName} (
-                          {formatSourceByteCount(attachment.byteCount)})
+                          Attached {sourceAttachmentKindLabel(attachment.originKind)} snapshot:{" "}
+                          {formatPersistedAttachmentSummary(attachment)}
                         </p>
                       )}
                     </div>
@@ -346,8 +368,8 @@ export function AgentWorkspace({
               {pendingAttachment === null ? null : (
                 <div className="composer-attachment" aria-live="polite">
                   <p>
-                    Captured snapshot: {pendingAttachment.displayName} (
-                    {formatSourceByteCount(pendingAttachment.byteCount)})
+                    Captured {sourceAttachmentKindLabel(pendingAttachment.originKind)} snapshot:{" "}
+                    {formatSourceAttachmentSummary(pendingAttachment)}
                   </p>
                   <button
                     className="secondary-action"
@@ -365,14 +387,19 @@ export function AgentWorkspace({
                   className="secondary-action"
                   type="button"
                   disabled={sending}
-                  aria-label={
-                    pendingAttachment === null
-                      ? "Attach a text file"
-                      : "Replace the attached text file"
-                  }
+                  aria-label={attachmentActionLabel(pendingAttachment, "file")}
                   onClick={onAttach}
                 >
-                  {pendingAttachment === null ? "Attach" : "Replace"}
+                  {pendingAttachment === null ? "Attach file" : "Replace file"}
+                </button>
+                <button
+                  className="secondary-action"
+                  type="button"
+                  disabled={sending}
+                  aria-label={attachmentActionLabel(pendingAttachment, "folder")}
+                  onClick={onAttachFolder}
+                >
+                  {pendingAttachment === null ? "Attach folder" : "Replace folder"}
                 </button>
                 {sending ? (
                   <button

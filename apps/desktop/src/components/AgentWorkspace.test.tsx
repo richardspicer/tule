@@ -60,6 +60,7 @@ describe("AgentWorkspace", () => {
         onSend={vi.fn()}
         onCancel={vi.fn()}
         onAttach={vi.fn()}
+        onAttachFolder={vi.fn()}
         onRemoveAttachment={vi.fn()}
         onProjectChange={vi.fn()}
         onOpenProvidersSettings={onOpenProvidersSettings}
@@ -97,6 +98,7 @@ describe("AgentWorkspace", () => {
                 displayName: "notes.txt",
                 byteCount: 12,
                 contentSha256: "a".repeat(64),
+                memberCount: 1,
               },
             ],
           },
@@ -107,6 +109,7 @@ describe("AgentWorkspace", () => {
           displayName: "draft.txt",
           byteCount: 4,
           originKind: "local_text_file",
+          memberCount: 1,
         }}
         connected
         sending={false}
@@ -118,15 +121,16 @@ describe("AgentWorkspace", () => {
         onSend={vi.fn()}
         onCancel={vi.fn()}
         onAttach={onAttach}
+        onAttachFolder={vi.fn()}
         onRemoveAttachment={onRemoveAttachment}
         onProjectChange={vi.fn()}
         onOpenProvidersSettings={vi.fn()}
       />,
     );
 
-    expect(screen.getByText(/Attached snapshot: notes.txt/)).toBeInTheDocument();
-    expect(screen.getByText(/Captured snapshot: draft.txt/)).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Replace the attached text file" }));
+    expect(screen.getByText(/Attached file snapshot: notes.txt/)).toBeInTheDocument();
+    expect(screen.getByText(/Captured file snapshot: draft.txt/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Replace the attached file" }));
     expect(onAttach).toHaveBeenCalled();
     fireEvent.click(screen.getByRole("button", { name: "Remove attachment draft.txt" }));
     expect(onRemoveAttachment).toHaveBeenCalled();
@@ -150,6 +154,7 @@ describe("AgentWorkspace", () => {
           displayName: "draft.txt",
           byteCount: 4,
           originKind: "local_text_file",
+          memberCount: 1,
         }}
         connected
         sending
@@ -161,13 +166,15 @@ describe("AgentWorkspace", () => {
         onSend={vi.fn()}
         onCancel={vi.fn()}
         onAttach={vi.fn()}
+        onAttachFolder={vi.fn()}
         onRemoveAttachment={vi.fn()}
         onProjectChange={vi.fn()}
         onOpenProvidersSettings={vi.fn()}
       />,
     );
 
-    expect(screen.getByRole("button", { name: "Replace the attached text file" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Replace the attached file" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Replace with a folder" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Remove attachment draft.txt" })).toBeDisabled();
   });
 
@@ -195,6 +202,7 @@ describe("AgentWorkspace", () => {
         onSend={vi.fn()}
         onCancel={vi.fn()}
         onAttach={vi.fn()}
+        onAttachFolder={vi.fn()}
         onRemoveAttachment={vi.fn()}
         onProjectChange={vi.fn()}
         onOpenProvidersSettings={vi.fn()}
@@ -230,6 +238,7 @@ describe("AgentWorkspace", () => {
         onSend={onSend}
         onCancel={onCancel}
         onAttach={vi.fn()}
+        onAttachFolder={vi.fn()}
         onRemoveAttachment={vi.fn()}
         onProjectChange={vi.fn()}
         onOpenProvidersSettings={vi.fn()}
@@ -265,6 +274,7 @@ describe("AgentWorkspace", () => {
         onSend={onSend}
         onCancel={onCancel}
         onAttach={vi.fn()}
+        onAttachFolder={vi.fn()}
         onRemoveAttachment={vi.fn()}
         onProjectChange={vi.fn()}
         onOpenProvidersSettings={vi.fn()}
@@ -303,6 +313,7 @@ describe("AgentWorkspace", () => {
         onSend={vi.fn()}
         onCancel={vi.fn()}
         onAttach={vi.fn()}
+        onAttachFolder={vi.fn()}
         onRemoveAttachment={vi.fn()}
         onProjectChange={vi.fn()}
         onOpenProvidersSettings={vi.fn()}
@@ -341,6 +352,7 @@ describe("AgentWorkspace", () => {
         onSend={vi.fn()}
         onCancel={vi.fn()}
         onAttach={vi.fn()}
+        onAttachFolder={vi.fn()}
         onRemoveAttachment={vi.fn()}
         onProjectChange={vi.fn()}
         onOpenProvidersSettings={vi.fn()}
@@ -376,6 +388,7 @@ describe("AgentWorkspace", () => {
         onSend={vi.fn()}
         onCancel={vi.fn()}
         onAttach={vi.fn()}
+        onAttachFolder={vi.fn()}
         onRemoveAttachment={vi.fn()}
         onProjectChange={vi.fn()}
         onOpenProvidersSettings={vi.fn()}
@@ -416,6 +429,7 @@ describe("AgentWorkspace", () => {
         onSend={vi.fn()}
         onCancel={vi.fn()}
         onAttach={vi.fn()}
+        onAttachFolder={vi.fn()}
         onRemoveAttachment={vi.fn()}
         onProjectChange={vi.fn()}
         onOpenProvidersSettings={vi.fn()}
@@ -456,6 +470,7 @@ describe("AgentWorkspace", () => {
         onSend={vi.fn()}
         onCancel={vi.fn()}
         onAttach={vi.fn()}
+        onAttachFolder={vi.fn()}
         onRemoveAttachment={vi.fn()}
         onProjectChange={vi.fn()}
         onOpenProvidersSettings={vi.fn()}
@@ -503,6 +518,7 @@ describe("AgentWorkspace", () => {
         onSend={vi.fn()}
         onCancel={vi.fn()}
         onAttach={vi.fn()}
+        onAttachFolder={vi.fn()}
         onRemoveAttachment={vi.fn()}
         onProjectChange={onProjectChange}
         onOpenProvidersSettings={vi.fn()}

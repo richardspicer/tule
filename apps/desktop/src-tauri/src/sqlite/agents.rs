@@ -299,7 +299,7 @@ impl AgentRepository for SqliteStore {
         let mut statement = connection
             .prepare(
                 "SELECT t.id, s.id, s.origin_kind, s.display_name, s.byte_count, s.content_sha256,
-                        s.content, s.created_at_unix_ms, ts.attachment_order
+                        s.content, s.created_at_unix_ms, s.member_count, ts.attachment_order
                  FROM agent_turn_sources ts
                  INNER JOIN agent_sources s ON s.id = ts.source_id
                  INNER JOIN agent_turns t ON t.id = ts.turn_id
@@ -318,7 +318,8 @@ impl AgentRepository for SqliteStore {
                     row.get::<_, String>(5)?,
                     row.get::<_, String>(6)?,
                     row.get::<_, i64>(7)?,
-                    row.get::<_, i64>(8)?,
+                    row.get::<_, Option<i64>>(8)?,
+                    row.get::<_, i64>(9)?,
                 ))
             })
             .map_err(SqliteStoreError::Database)?;
@@ -333,11 +334,15 @@ impl AgentRepository for SqliteStore {
                 content_sha256,
                 content,
                 created_at_unix_ms,
+                stored_member_count,
                 attachment_order,
             ) = row.map_err(SqliteStoreError::Database)?;
             let byte_count = u64::try_from(byte_count).map_err(|_| SqliteStoreError::Numeric)?;
             let attachment_order =
                 u32::try_from(attachment_order).map_err(|_| SqliteStoreError::Numeric)?;
+            let member_count = stored_member_count
+                .map(|value| u32::try_from(value).map_err(|_| SqliteStoreError::Numeric))
+                .transpose()?;
             let source = Source::from_stored_parts(
                 &source_id,
                 origin_kind,
@@ -345,6 +350,7 @@ impl AgentRepository for SqliteStore {
                 byte_count,
                 content_sha256,
                 content,
+                member_count,
                 created_at_unix_ms,
             )
             .map_err(SqliteStoreError::MalformedSource)?;
@@ -516,12 +522,13 @@ fn insert_source_with_association(
     attachment_order: u32,
 ) -> Result<(), SqliteStoreError> {
     let byte_count = i64::try_from(source.byte_count()).map_err(|_| SqliteStoreError::Numeric)?;
+    let member_count = i64::from(source.member_count());
     let attachment_order = i64::from(attachment_order);
     connection
         .execute(
             "INSERT INTO agent_sources (
-                id, origin_kind, display_name, byte_count, content_sha256, content, created_at_unix_ms
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                id, origin_kind, display_name, byte_count, content_sha256, content, created_at_unix_ms, member_count
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 source.id().to_string(),
                 source.origin_kind(),
@@ -529,7 +536,8 @@ fn insert_source_with_association(
                 byte_count,
                 source.content_sha256(),
                 source.content(),
-                source.created_at_unix_ms()
+                source.created_at_unix_ms(),
+                member_count
             ],
         )
         .map_err(SqliteStoreError::Database)?;
@@ -961,6 +969,37 @@ mod tests {
                 AgentTurnState::Pending
             );
         }
+    }
+
+    #[test]
+    fn folder_source_round_trip_preserves_member_count() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = SqliteStore::open(directory.path().join("folder-sources.sqlite3")).unwrap();
+        let members = vec![
+            ("b.txt".to_owned(), "beta".to_owned()),
+            ("a.txt".to_owned(), "alpha".to_owned()),
+        ];
+        let source = Source::new_local_text_folder("docs", &members).unwrap();
+        let prepared = prepare_agent_send(
+            &store,
+            None,
+            "Use folder",
+            None,
+            "",
+            "gpt-5.5",
+            Some(&source),
+        )
+        .unwrap();
+        let listed = store.list_turn_sources(&prepared.session.id()).unwrap();
+        assert_eq!(listed[0].source().member_count(), 2);
+        assert_eq!(listed[0].source().origin_kind(), "local_text_folder");
+
+        let path = directory.path().join("folder-sources.sqlite3");
+        drop(store);
+        let reopened = SqliteStore::open(&path).unwrap();
+        let again = reopened.list_turn_sources(&prepared.session.id()).unwrap();
+        assert_eq!(again[0].source().member_count(), 2);
+        assert_eq!(again[0].source().display_name(), "docs");
     }
 
     #[test]

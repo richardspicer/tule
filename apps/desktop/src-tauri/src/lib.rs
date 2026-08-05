@@ -12,8 +12,8 @@ use std::{fs, sync::Arc};
 
 use agents::{
     AgentState, cancel_agent_turn, clear_agent_text_source_draft, get_agent_session,
-    list_agent_sessions, pick_agent_text_source, send_agent_message, set_agent_session_project,
-    set_agent_source_draft_scope,
+    list_agent_sessions, pick_agent_text_folder_source, pick_agent_text_source, send_agent_message,
+    set_agent_session_project, set_agent_source_draft_scope,
 };
 use credentials::native_store;
 use openai_chatgpt::ChatGptAdapter;
@@ -375,6 +375,7 @@ pub fn run() {
             list_agent_sessions,
             get_agent_session,
             pick_agent_text_source,
+            pick_agent_text_folder_source,
             clear_agent_text_source_draft,
             set_agent_source_draft_scope,
             send_agent_message,

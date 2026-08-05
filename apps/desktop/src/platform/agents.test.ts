@@ -8,6 +8,7 @@ import {
   getSafeAgentErrorMessage,
   listAgentSessions,
   pickAgentTextSource,
+  pickAgentTextFolderSource,
   sendAgentMessage,
   setAgentSourceDraftScope,
 } from "./agents";
@@ -31,6 +32,14 @@ const validSource = {
   displayName: "notes.txt",
   byteCount: 5,
   contentSha256: "a".repeat(64),
+  memberCount: 1,
+};
+
+const validFolderSource = {
+  ...validSource,
+  originKind: "local_text_folder" as const,
+  displayName: "docs",
+  memberCount: 2,
 };
 
 describe("agents platform", () => {
@@ -65,6 +74,9 @@ describe("agents platform", () => {
       { ...validSource, id: "01900000-0000-4000-8000-000000000001" },
       { ...validSource, id: "01900000-0000-7000-c000-000000000001" },
       { ...validSource, originKind: "folder" },
+      { ...validSource, memberCount: 0 },
+      { ...validSource, memberCount: 33 },
+      { ...validFolderSource, memberCount: 1.5 },
       { ...validSource, displayName: "" },
       { ...validSource, displayName: "bad\nname" },
       { ...validSource, displayName: "bad\u202Ename" },
@@ -197,6 +209,7 @@ describe("agents platform", () => {
       displayName: "notes.txt",
       byteCount: 12,
       originKind: "local_text_file",
+      memberCount: 1,
     });
     await expect(pickAgentTextSource()).resolves.toEqual({
       status: "selected",
@@ -205,6 +218,26 @@ describe("agents platform", () => {
         displayName: "notes.txt",
         byteCount: 12,
         originKind: "local_text_file",
+        memberCount: 1,
+      },
+    });
+
+    invokeMock.mockResolvedValueOnce({
+      status: "selected",
+      draftHandle: "deadbeef".repeat(4),
+      displayName: "docs",
+      byteCount: 120,
+      originKind: "local_text_folder",
+      memberCount: 3,
+    });
+    await expect(pickAgentTextFolderSource()).resolves.toEqual({
+      status: "selected",
+      attachment: {
+        draftHandle: "deadbeef".repeat(4),
+        displayName: "docs",
+        byteCount: 120,
+        originKind: "local_text_folder",
+        memberCount: 3,
       },
     });
 
@@ -214,6 +247,7 @@ describe("agents platform", () => {
       displayName: null,
       byteCount: null,
       originKind: null,
+      memberCount: null,
     });
     await expect(pickAgentTextSource()).resolves.toEqual({ status: "cancelled" });
 
@@ -259,13 +293,15 @@ describe("agents platform", () => {
         displayName: "notes.txt",
         byteCount: 64 * 1024 + 1,
         originKind: "local_text_file",
+        memberCount: 1,
       },
       {
         status: "selected",
         draftHandle: "deadbeef".repeat(4),
-        displayName: "notes.txt",
+        displayName: "docs",
         byteCount: 12,
-        originKind: "folder",
+        originKind: "local_text_folder",
+        memberCount: 0,
       },
       {
         status: "selected",
@@ -281,6 +317,7 @@ describe("agents platform", () => {
         displayName: null,
         byteCount: null,
         originKind: null,
+        memberCount: null,
       },
       {
         status: "cancelled",
@@ -288,6 +325,7 @@ describe("agents platform", () => {
         displayName: null,
         byteCount: null,
         originKind: null,
+        memberCount: null,
         path: "C:\\\\secret",
       },
       { status: "cancelled" },
@@ -297,6 +335,7 @@ describe("agents platform", () => {
         displayName: null,
         byteCount: null,
         originKind: null,
+        memberCount: null,
       },
     ];
     for (const payload of hostilePicks) {
@@ -332,7 +371,7 @@ describe("agents platform", () => {
       "TULE stopped receiving the response.",
     );
     expect(getSafeAgentErrorMessage(new AgentError("source_too_large"))).toBe(
-      "That file is too large to attach.",
+      "That attachment is too large.",
     );
     expect(getAgentErrorCode({ message: "source_draft_expired" })).toBe("source_draft_expired");
   });

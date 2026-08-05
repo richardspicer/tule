@@ -11,9 +11,9 @@ mod xai_subscription;
 use std::{fs, sync::Arc};
 
 use agents::{
-    AgentState, cancel_agent_turn, clear_agent_text_source_draft, get_agent_session,
-    list_agent_sessions, pick_agent_text_folder_source, pick_agent_text_source, send_agent_message,
-    set_agent_session_project, set_agent_source_draft_scope,
+    AgentState, attach_agent_text_link_source, cancel_agent_turn, clear_agent_text_source_draft,
+    get_agent_session, list_agent_sessions, pick_agent_text_folder_source, pick_agent_text_source,
+    send_agent_message, set_agent_session_project, set_agent_source_draft_scope,
 };
 use credentials::native_store;
 use preferences::{DesktopPreferenceState, get_appearance_preference, set_appearance_preference};
@@ -381,6 +381,7 @@ pub fn run() {
             get_agent_session,
             pick_agent_text_source,
             pick_agent_text_folder_source,
+            attach_agent_text_link_source,
             clear_agent_text_source_draft,
             set_agent_source_draft_scope,
             send_agent_message,

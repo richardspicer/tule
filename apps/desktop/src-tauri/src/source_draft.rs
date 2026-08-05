@@ -10,7 +10,8 @@ use std::{
 
 use tule_core::{
     AgentSessionId, MAX_FOLDER_MEMBERS, MAX_SOURCE_UTF8, SOURCE_ORIGIN_LOCAL_TEXT_FILE,
-    SOURCE_ORIGIN_LOCAL_TEXT_FOLDER, Source, SourceValidationError, frame_folder_members,
+    SOURCE_ORIGIN_LOCAL_TEXT_FOLDER, SOURCE_ORIGIN_REMOTE_TEXT_URL, Source, SourceValidationError,
+    derive_remote_source_display_name, frame_folder_members, validate_canonical_https_url,
     validate_source_content, validate_source_display_name,
 };
 
@@ -30,6 +31,7 @@ pub(crate) struct SourceDraft {
     pub(crate) content: String,
     pub(crate) origin_kind: String,
     pub(crate) member_count: u32,
+    pub(crate) canonical_url: Option<String>,
     scope: ComposerScope,
 }
 
@@ -46,6 +48,13 @@ impl SourceDraft {
             SOURCE_ORIGIN_LOCAL_TEXT_FOLDER => {
                 let members = parse_folder_draft_members(&self.content)?;
                 Source::new_local_text_folder(self.display_name, &members)
+            }
+            SOURCE_ORIGIN_REMOTE_TEXT_URL => {
+                let canonical_url = self
+                    .canonical_url
+                    .clone()
+                    .ok_or(SourceValidationError::InvalidCanonicalUrl)?;
+                Source::new_remote_text_url(self.display_name, self.content, canonical_url)
             }
             _ => Err(SourceValidationError::UnsafeDisplayName),
         }
@@ -168,6 +177,7 @@ impl SourceDraftStore {
         content: String,
         origin_kind: String,
         member_count: u32,
+        canonical_url: Option<String>,
     ) -> Result<String, SourceDraftError> {
         let handle = generate_draft_handle()?;
         let scope = self.current_scope();
@@ -178,6 +188,7 @@ impl SourceDraftStore {
                 content,
                 origin_kind,
                 member_count,
+                canonical_url,
                 scope,
             },
         );
@@ -212,9 +223,16 @@ impl SourceDraftStore {
         content: String,
         origin_kind: String,
         member_count: u32,
+        canonical_url: Option<String>,
     ) -> Result<String, SourceDraftError> {
         self.clear_all();
-        self.insert(display_name, content, origin_kind, member_count)
+        self.insert(
+            display_name,
+            content,
+            origin_kind,
+            member_count,
+            canonical_url,
+        )
     }
 
     /// Builds the send-target scope for an optional session identifier.
@@ -244,6 +262,7 @@ pub(crate) enum PickSourceOutcome {
         byte_count: u64,
         origin_kind: String,
         member_count: u32,
+        canonical_url: Option<String>,
     },
 }
 
@@ -403,6 +422,7 @@ where
         content.to_owned(),
         SOURCE_ORIGIN_LOCAL_TEXT_FILE.to_owned(),
         1,
+        None,
     )?;
     Ok(PickSourceOutcome::Selected {
         draft_handle,
@@ -410,6 +430,7 @@ where
         byte_count,
         origin_kind: SOURCE_ORIGIN_LOCAL_TEXT_FILE.to_owned(),
         member_count: 1,
+        canonical_url: None,
     })
 }
 
@@ -451,6 +472,7 @@ where
         framed,
         SOURCE_ORIGIN_LOCAL_TEXT_FOLDER.to_owned(),
         member_count,
+        None,
     )?;
     Ok(PickSourceOutcome::Selected {
         draft_handle,
@@ -458,7 +480,252 @@ where
         byte_count,
         origin_kind: SOURCE_ORIGIN_LOCAL_TEXT_FOLDER.to_owned(),
         member_count,
+        canonical_url: None,
     })
+}
+
+/// Maximum HTTPS redirects followed while capturing a link Source.
+pub(crate) const MAX_LINK_REDIRECTS: usize = 5;
+
+/// HTTPS fetch boundary used by production and tests.
+pub(crate) trait SourceUrlFetcher: Send + Sync {
+    fn fetch_https_text(&self, url: &str) -> Result<FetchedUrlBody, SourceDraftError>;
+}
+
+/// Bounded response from one native link fetch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FetchedUrlBody {
+    pub(crate) bytes: Vec<u8>,
+    pub(crate) content_type: Option<String>,
+}
+
+/// Captures one HTTPS URL into an ephemeral draft without retaining live references.
+pub(crate) fn capture_link_source<F>(
+    store: &SourceDraftStore,
+    url: &str,
+    fetcher: &F,
+) -> Result<PickSourceOutcome, SourceDraftError>
+where
+    F: SourceUrlFetcher + ?Sized,
+{
+    let trimmed = url.trim();
+    if trimmed.is_empty() {
+        return Err(SourceDraftError::Unsupported);
+    }
+    validate_canonical_https_url(trimmed).map_err(map_validation)?;
+    validate_link_destination(trimmed)?;
+    let display_name = derive_remote_source_display_name(trimmed).map_err(map_validation)?;
+    let fetched = fetcher.fetch_https_text(trimmed)?;
+    if !is_allowed_link_content_type(fetched.content_type.as_deref()) {
+        return Err(SourceDraftError::Unsupported);
+    }
+    if fetched.bytes.len() > MAX_SOURCE_UTF8 {
+        return Err(SourceDraftError::TooLarge);
+    }
+    let content = std::str::from_utf8(&fetched.bytes).map_err(|_| SourceDraftError::Unsupported)?;
+    validate_source_content(content).map_err(map_validation)?;
+    let byte_count = content.len() as u64;
+    let draft_handle = store.replace_with(
+        display_name.clone(),
+        content.to_owned(),
+        SOURCE_ORIGIN_REMOTE_TEXT_URL.to_owned(),
+        1,
+        Some(trimmed.to_owned()),
+    )?;
+    Ok(PickSourceOutcome::Selected {
+        draft_handle,
+        display_name,
+        byte_count,
+        origin_kind: SOURCE_ORIGIN_REMOTE_TEXT_URL.to_owned(),
+        member_count: 1,
+        canonical_url: Some(trimmed.to_owned()),
+    })
+}
+
+fn is_allowed_link_content_type(content_type: Option<&str>) -> bool {
+    let Some(raw) = content_type else {
+        return false;
+    };
+    let value = raw
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    if value.is_empty() {
+        return false;
+    }
+    if value.starts_with("text/") {
+        return true;
+    }
+    matches!(
+        value.as_str(),
+        "application/json"
+            | "application/xml"
+            | "application/javascript"
+            | "application/ecmascript"
+            | "application/x-javascript"
+    )
+}
+
+fn validate_link_destination(url: &str) -> Result<(), SourceDraftError> {
+    let parsed = url::Url::parse(url).map_err(|_| SourceDraftError::Unsupported)?;
+    if parsed.scheme() != "https" {
+        return Err(SourceDraftError::Unsupported);
+    }
+    validate_link_host(parsed.host_str().ok_or(SourceDraftError::Unsupported)?)
+}
+
+fn validate_link_host(host: &str) -> Result<(), SourceDraftError> {
+    let normalized = host.trim_end_matches('.').to_ascii_lowercase();
+    if normalized.is_empty() {
+        return Err(SourceDraftError::Unsupported);
+    }
+    if normalized == "localhost" || normalized.ends_with(".localhost") {
+        return Err(SourceDraftError::Unsupported);
+    }
+    if let Ok(ip) = normalized.parse::<std::net::IpAddr>() {
+        return if is_blocked_ip(ip) {
+            Err(SourceDraftError::Unsupported)
+        } else {
+            Ok(())
+        };
+    }
+    if normalized.starts_with('[') && normalized.ends_with(']') {
+        let inner = &normalized[1..normalized.len() - 1];
+        if let Ok(ip) = inner.parse::<std::net::IpAddr>() {
+            return if is_blocked_ip(ip) {
+                Err(SourceDraftError::Unsupported)
+            } else {
+                Ok(())
+            };
+        }
+    }
+    resolve_and_validate_host(&normalized)
+}
+
+fn resolve_and_validate_host(host: &str) -> Result<(), SourceDraftError> {
+    use std::net::ToSocketAddrs;
+    let authority = format!("{host}:443");
+    let mut addresses = authority
+        .to_socket_addrs()
+        .map_err(|_| SourceDraftError::Unsupported)?;
+    let Some(first) = addresses.next() else {
+        return Err(SourceDraftError::Unsupported);
+    };
+    if is_blocked_ip(first.ip()) {
+        return Err(SourceDraftError::Unsupported);
+    }
+    for address in addresses {
+        if is_blocked_ip(address.ip()) {
+            return Err(SourceDraftError::Unsupported);
+        }
+    }
+    Ok(())
+}
+
+fn is_blocked_ip(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            let octets = v4.octets();
+            octets[0] == 0
+                || octets[0] == 10
+                || octets[0] == 127
+                || (octets[0] == 100 && (octets[1] & 0xC0) == 64)
+                || (octets[0] == 169 && octets[1] == 254)
+                || (octets[0] == 172 && (octets[1] >= 16 && octets[1] <= 31))
+                || (octets[0] == 192 && octets[1] == 168)
+                || octets[0] >= 224
+        }
+        std::net::IpAddr::V6(v6) => {
+            let segments = v6.segments();
+            segments[0] == 0
+                || (segments[0] & 0xFE00) == 0xFC00
+                || (segments[0] & 0xFFC0) == 0xFE80
+                || segments == [0, 0, 0, 0, 0, 0, 0, 1]
+        }
+    }
+}
+
+/// Production HTTPS fetcher with redirect validation and a fixed redirect budget.
+#[derive(Debug)]
+pub(crate) struct NativeSourceUrlFetcher {
+    client: reqwest::blocking::Client,
+}
+
+impl NativeSourceUrlFetcher {
+    pub(crate) fn new() -> Result<Self, SourceDraftError> {
+        let client = reqwest::blocking::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .map_err(|_| SourceDraftError::Unreadable)?;
+        Ok(Self { client })
+    }
+
+    fn fetch_once(&self, url: &str) -> Result<reqwest::blocking::Response, SourceDraftError> {
+        self.client
+            .get(url)
+            .send()
+            .map_err(|_| SourceDraftError::Unreadable)
+    }
+}
+
+impl SourceUrlFetcher for NativeSourceUrlFetcher {
+    fn fetch_https_text(&self, url: &str) -> Result<FetchedUrlBody, SourceDraftError> {
+        validate_link_destination(url)?;
+        let mut current = url.to_owned();
+        for _ in 0..=MAX_LINK_REDIRECTS {
+            let response = self.fetch_once(&current)?;
+            let status = response.status();
+            if status.is_redirection() {
+                let location = response
+                    .headers()
+                    .get(reqwest::header::LOCATION)
+                    .and_then(|value| value.to_str().ok())
+                    .ok_or(SourceDraftError::Unsupported)?;
+                let next = url::Url::parse(location)
+                    .or_else(|_| url::Url::parse(&current).and_then(|base| base.join(location)))
+                    .map_err(|_| SourceDraftError::Unsupported)?;
+                if next.scheme() != "https" {
+                    return Err(SourceDraftError::Unsupported);
+                }
+                let next_url = next.to_string();
+                validate_canonical_https_url(&next_url).map_err(map_validation)?;
+                validate_link_destination(&next_url)?;
+                current = next_url;
+                continue;
+            }
+            if !status.is_success() {
+                return Err(SourceDraftError::Unreadable);
+            }
+            let content_type = response
+                .headers()
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_owned);
+            let mut buffer = Vec::new();
+            let mut reader = response;
+            let mut chunk = [0_u8; 8192];
+            loop {
+                let read = reader
+                    .read(&mut chunk)
+                    .map_err(|_| SourceDraftError::Unreadable)?;
+                if read == 0 {
+                    break;
+                }
+                if buffer.len() + read > MAX_SOURCE_UTF8 {
+                    return Err(SourceDraftError::TooLarge);
+                }
+                buffer.extend_from_slice(&chunk[..read]);
+            }
+            return Ok(FetchedUrlBody {
+                bytes: buffer,
+                content_type,
+            });
+        }
+        Err(SourceDraftError::Unsupported)
+    }
 }
 
 fn lossless_basename(path: &Path) -> Option<String> {
@@ -472,6 +739,7 @@ fn map_validation(error: SourceValidationError) -> SourceDraftError {
         | SourceValidationError::ContainsNul
         | SourceValidationError::NoEligibleMembers
         | SourceValidationError::TooManyMembers { .. }
+        | SourceValidationError::InvalidCanonicalUrl
         | SourceValidationError::Time(_) => SourceDraftError::Unsupported,
     }
 }
@@ -572,6 +840,7 @@ mod tests {
             byte_count,
             origin_kind,
             member_count,
+            canonical_url,
         } = outcome
         else {
             panic!("expected selection");
@@ -580,6 +849,7 @@ mod tests {
         assert_eq!(byte_count, 7);
         assert_eq!(origin_kind, SOURCE_ORIGIN_LOCAL_TEXT_FILE);
         assert_eq!(member_count, 1);
+        assert_eq!(canonical_url, None);
         assert_eq!(draft_handle.len(), 32);
         let draft = store.get(&draft_handle).unwrap();
         assert_eq!(draft.content, "hello\r\n");
@@ -800,6 +1070,7 @@ mod tests {
                 "from-a".into(),
                 SOURCE_ORIGIN_LOCAL_TEXT_FILE.into(),
                 1,
+                None,
             )
             .unwrap();
         assert!(
@@ -828,6 +1099,7 @@ mod tests {
                 "one".into(),
                 SOURCE_ORIGIN_LOCAL_TEXT_FILE.into(),
                 1,
+                None,
             )
             .unwrap();
         store.begin_new_session_scope();
@@ -838,6 +1110,7 @@ mod tests {
                 "two".into(),
                 SOURCE_ORIGIN_LOCAL_TEXT_FILE.into(),
                 1,
+                None,
             )
             .unwrap();
         let generation = match store.current_scope() {
@@ -869,6 +1142,7 @@ mod tests {
                 "body".into(),
                 SOURCE_ORIGIN_LOCAL_TEXT_FILE.into(),
                 1,
+                None,
             )
             .unwrap();
         store.bind_session_scope(session_b);
@@ -896,6 +1170,7 @@ mod tests {
                 "x".into(),
                 SOURCE_ORIGIN_LOCAL_TEXT_FILE.into(),
                 1,
+                None,
             )
             .unwrap();
         store.clear_handle(&handle);
@@ -910,6 +1185,7 @@ mod tests {
                 "x".into(),
                 SOURCE_ORIGIN_LOCAL_TEXT_FILE.into(),
                 1,
+                None,
             )
             .unwrap();
         store.clear_all();
@@ -927,5 +1203,130 @@ mod tests {
         assert_ne!(first, second);
         assert_eq!(first.len(), 32);
         assert!(first.chars().all(|ch| matches!(ch, '0'..='9' | 'a'..='f')));
+    }
+
+    struct FakeUrlFetcher {
+        responses:
+            Mutex<std::collections::HashMap<String, Result<FetchedUrlBody, SourceDraftError>>>,
+        reads: Mutex<u32>,
+    }
+
+    impl SourceUrlFetcher for FakeUrlFetcher {
+        fn fetch_https_text(&self, url: &str) -> Result<FetchedUrlBody, SourceDraftError> {
+            *self.reads.lock().unwrap() += 1;
+            self.responses
+                .lock()
+                .unwrap()
+                .get(url)
+                .cloned()
+                .unwrap_or(Err(SourceDraftError::Unreadable))
+        }
+    }
+
+    #[test]
+    fn link_capture_reads_once_and_persists_snapshot_without_refetch() {
+        let store = SourceDraftStore::new();
+        let url = "https://example.com/readme.txt";
+        let fetcher = FakeUrlFetcher {
+            responses: Mutex::new(std::collections::HashMap::from([(
+                url.to_owned(),
+                Ok(FetchedUrlBody {
+                    bytes: b"hello link".to_vec(),
+                    content_type: Some("text/plain".into()),
+                }),
+            )])),
+            reads: Mutex::new(0),
+        };
+        let outcome = capture_link_source(&store, url, &fetcher).unwrap();
+        let PickSourceOutcome::Selected {
+            draft_handle,
+            display_name,
+            byte_count,
+            origin_kind,
+            canonical_url,
+            ..
+        } = outcome
+        else {
+            panic!("expected selection");
+        };
+        assert_eq!(display_name, "example.com/readme.txt");
+        assert_eq!(byte_count, 10);
+        assert_eq!(origin_kind, SOURCE_ORIGIN_REMOTE_TEXT_URL);
+        assert_eq!(canonical_url.as_deref(), Some(url));
+        let draft = store.get(&draft_handle).unwrap();
+        assert_eq!(draft.content, "hello link");
+        assert_eq!(draft.canonical_url.as_deref(), Some(url));
+        let source = draft.into_source().unwrap();
+        assert_eq!(source.content(), "hello link");
+        assert_eq!(*fetcher.reads.lock().unwrap(), 1);
+    }
+
+    #[test]
+    fn link_capture_rejects_http_private_loopback_and_bad_redirects() {
+        let store = SourceDraftStore::new();
+        let fetcher = FakeUrlFetcher {
+            responses: Mutex::new(std::collections::HashMap::new()),
+            reads: Mutex::new(0),
+        };
+        for url in [
+            "http://example.com/a.txt",
+            "https://127.0.0.1/a.txt",
+            "https://localhost/a.txt",
+            "https://192.168.0.1/a.txt",
+            "https://10.0.0.1/a.txt",
+            "file:///etc/passwd",
+        ] {
+            assert!(
+                matches!(
+                    capture_link_source(&store, url, &fetcher),
+                    Err(SourceDraftError::Unsupported)
+                ),
+                "expected rejection for {url}"
+            );
+        }
+    }
+
+    #[test]
+    fn link_capture_rejects_over_budget_unsupported_type_and_invalid_utf8() {
+        let store = SourceDraftStore::new();
+        let url = "https://example.com/a.txt";
+        let fetcher = FakeUrlFetcher {
+            responses: Mutex::new(std::collections::HashMap::from([(
+                url.to_owned(),
+                Ok(FetchedUrlBody {
+                    bytes: vec![0xff, 0xfe],
+                    content_type: Some("text/plain".into()),
+                }),
+            )])),
+            reads: Mutex::new(0),
+        };
+        assert!(matches!(
+            capture_link_source(&store, url, &fetcher),
+            Err(SourceDraftError::Unsupported)
+        ));
+
+        *fetcher.responses.lock().unwrap() = std::collections::HashMap::from([(
+            url.to_owned(),
+            Ok(FetchedUrlBody {
+                bytes: vec![b'a'; MAX_SOURCE_UTF8 + 1],
+                content_type: Some("text/plain".into()),
+            }),
+        )]);
+        assert!(matches!(
+            capture_link_source(&store, url, &fetcher),
+            Err(SourceDraftError::TooLarge)
+        ));
+
+        *fetcher.responses.lock().unwrap() = std::collections::HashMap::from([(
+            url.to_owned(),
+            Ok(FetchedUrlBody {
+                bytes: b"ok".to_vec(),
+                content_type: Some("application/octet-stream".into()),
+            }),
+        )]);
+        assert!(matches!(
+            capture_link_source(&store, url, &fetcher),
+            Err(SourceDraftError::Unsupported)
+        ));
     }
 }

@@ -15,6 +15,7 @@ import {
   listAgentSessions,
   pickAgentTextSource,
   pickAgentTextFolderSource,
+  attachAgentTextLinkSource,
   sendAgentMessage,
   setAgentSessionProject,
   setAgentSourceDraftScope,
@@ -606,6 +607,7 @@ function App() {
                 byteCount: attachment.byteCount,
                 contentSha256: "0".repeat(64),
                 memberCount: attachment.memberCount,
+                canonicalUrl: attachment.canonicalUrl,
               },
             ],
     };
@@ -723,6 +725,24 @@ function App() {
     setAgentError(null);
     try {
       const result = await pickAgentTextFolderSource();
+      if (result.status === "cancelled") {
+        return;
+      }
+
+      setPendingAttachment(result.attachment);
+    } catch (error: unknown) {
+      setAgentError(getSafeAgentErrorMessage(error));
+    }
+  }
+
+  async function handleAttachLink(url: string) {
+    if (sendingRef.current) {
+      return;
+    }
+
+    setAgentError(null);
+    try {
+      const result = await attachAgentTextLinkSource(url);
       if (result.status === "cancelled") {
         return;
       }
@@ -1053,6 +1073,7 @@ function App() {
               onCancel={handleCancel}
               onAttach={() => void handleAttach()}
               onAttachFolder={() => void handleAttachFolder()}
+              onAttachLink={(url) => void handleAttachLink(url)}
               onRemoveAttachment={() => void handleRemoveAttachment()}
               onProjectChange={(projectId) => void handleChangePersistedProject(projectId)}
               onModelChange={setPendingModelId}

@@ -166,6 +166,29 @@ export function AttachFolderIcon({ className }: IconProps) {
   );
 }
 
+export function AttachLinkIcon({ className }: IconProps) {
+  return (
+    <svg className={className} viewBox="0 0 20 20" width="20" height="20" aria-hidden="true">
+      <path
+        d="M8.13 11.88a2.5 2.5 0 0 0 3.54 0l2.5-2.5a2.5 2.5 0 1 0-3.54-3.54l-.94.94"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.5"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <path
+        d="M11.88 8.13a2.5 2.5 0 0 0-3.54 0l-2.5 2.5a2.5 2.5 0 1 0 3.54 3.54l.94-.94"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.5"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
 export function RemoveIcon({ className }: IconProps) {
   return (
     <svg className={className} viewBox="0 0 20 20" width="20" height="20" aria-hidden="true">

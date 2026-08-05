@@ -60,6 +60,7 @@ describe("AgentWorkspace", () => {
         onCancel={vi.fn()}
         onAttach={vi.fn()}
         onAttachFolder={vi.fn()}
+        onAttachLink={vi.fn()}
         onRemoveAttachment={vi.fn()}
         onProjectChange={vi.fn()}
       />,
@@ -95,6 +96,7 @@ describe("AgentWorkspace", () => {
                 byteCount: 12,
                 contentSha256: "a".repeat(64),
                 memberCount: 1,
+                canonicalUrl: null,
               },
             ],
           },
@@ -106,6 +108,7 @@ describe("AgentWorkspace", () => {
           byteCount: 4,
           originKind: "local_text_file",
           memberCount: 1,
+          canonicalUrl: null,
         }}
         connected
         sending={false}
@@ -118,6 +121,7 @@ describe("AgentWorkspace", () => {
         onCancel={vi.fn()}
         onAttach={onAttach}
         onAttachFolder={vi.fn()}
+        onAttachLink={vi.fn()}
         onRemoveAttachment={onRemoveAttachment}
         onProjectChange={vi.fn()}
       />,
@@ -173,6 +177,7 @@ describe("AgentWorkspace", () => {
         onCancel={vi.fn()}
         onAttach={onAttach}
         onAttachFolder={onAttachFolder}
+        onAttachLink={vi.fn()}
         onRemoveAttachment={vi.fn()}
         onProjectChange={vi.fn()}
       />,
@@ -231,6 +236,7 @@ describe("AgentWorkspace", () => {
         onCancel={vi.fn()}
         onAttach={vi.fn()}
         onAttachFolder={vi.fn()}
+        onAttachLink={vi.fn()}
         onRemoveAttachment={vi.fn()}
         onProjectChange={vi.fn()}
       />,
@@ -259,6 +265,7 @@ describe("AgentWorkspace", () => {
           byteCount: 4,
           originKind: "local_text_file",
           memberCount: 1,
+          canonicalUrl: null,
         }}
         connected
         sending
@@ -271,6 +278,7 @@ describe("AgentWorkspace", () => {
         onCancel={vi.fn()}
         onAttach={vi.fn()}
         onAttachFolder={vi.fn()}
+        onAttachLink={vi.fn()}
         onRemoveAttachment={vi.fn()}
         onProjectChange={vi.fn()}
       />,
@@ -300,6 +308,7 @@ describe("AgentWorkspace", () => {
           byteCount: 4,
           originKind: "local_text_file",
           memberCount: 1,
+          canonicalUrl: null,
         }}
         connected
         sending={false}
@@ -312,6 +321,7 @@ describe("AgentWorkspace", () => {
         onCancel={vi.fn()}
         onAttach={vi.fn()}
         onAttachFolder={vi.fn()}
+        onAttachLink={vi.fn()}
         onRemoveAttachment={vi.fn()}
         onProjectChange={vi.fn()}
       />,
@@ -350,6 +360,7 @@ describe("AgentWorkspace", () => {
         onCancel={vi.fn()}
         onAttach={vi.fn()}
         onAttachFolder={vi.fn()}
+        onAttachLink={vi.fn()}
         onRemoveAttachment={vi.fn()}
         onProjectChange={vi.fn()}
       />,
@@ -385,6 +396,7 @@ describe("AgentWorkspace", () => {
         onCancel={onCancel}
         onAttach={vi.fn()}
         onAttachFolder={vi.fn()}
+        onAttachLink={vi.fn()}
         onRemoveAttachment={vi.fn()}
         onProjectChange={vi.fn()}
       />,
@@ -420,6 +432,7 @@ describe("AgentWorkspace", () => {
         onCancel={onCancel}
         onAttach={vi.fn()}
         onAttachFolder={vi.fn()}
+        onAttachLink={vi.fn()}
         onRemoveAttachment={vi.fn()}
         onProjectChange={vi.fn()}
       />,
@@ -458,6 +471,7 @@ describe("AgentWorkspace", () => {
         onCancel={vi.fn()}
         onAttach={vi.fn()}
         onAttachFolder={vi.fn()}
+        onAttachLink={vi.fn()}
         onRemoveAttachment={vi.fn()}
         onProjectChange={vi.fn()}
       />,
@@ -496,6 +510,7 @@ describe("AgentWorkspace", () => {
         onCancel={vi.fn()}
         onAttach={vi.fn()}
         onAttachFolder={vi.fn()}
+        onAttachLink={vi.fn()}
         onRemoveAttachment={vi.fn()}
         onProjectChange={vi.fn()}
       />,
@@ -531,6 +546,7 @@ describe("AgentWorkspace", () => {
         onCancel={vi.fn()}
         onAttach={vi.fn()}
         onAttachFolder={vi.fn()}
+        onAttachLink={vi.fn()}
         onRemoveAttachment={vi.fn()}
         onProjectChange={vi.fn()}
       />,
@@ -571,6 +587,7 @@ describe("AgentWorkspace", () => {
         onCancel={vi.fn()}
         onAttach={vi.fn()}
         onAttachFolder={vi.fn()}
+        onAttachLink={vi.fn()}
         onRemoveAttachment={vi.fn()}
         onProjectChange={vi.fn()}
       />,
@@ -611,6 +628,7 @@ describe("AgentWorkspace", () => {
         onCancel={vi.fn()}
         onAttach={vi.fn()}
         onAttachFolder={vi.fn()}
+        onAttachLink={vi.fn()}
         onRemoveAttachment={vi.fn()}
         onProjectChange={vi.fn()}
       />,
@@ -658,6 +676,7 @@ describe("AgentWorkspace", () => {
         onCancel={vi.fn()}
         onAttach={vi.fn()}
         onAttachFolder={vi.fn()}
+        onAttachLink={vi.fn()}
         onRemoveAttachment={vi.fn()}
         onProjectChange={onProjectChange}
       />,

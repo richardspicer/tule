@@ -33,6 +33,7 @@ const validSource = {
   byteCount: 5,
   contentSha256: "a".repeat(64),
   memberCount: 1,
+  canonicalUrl: null,
 };
 
 const validFolderSource = {
@@ -40,6 +41,13 @@ const validFolderSource = {
   originKind: "local_text_folder" as const,
   displayName: "docs",
   memberCount: 2,
+};
+
+const validLinkSource = {
+  ...validSource,
+  originKind: "remote_text_url" as const,
+  displayName: "example.com/readme.txt",
+  canonicalUrl: "https://example.com/readme.txt",
 };
 
 describe("agents platform", () => {
@@ -145,13 +153,13 @@ describe("agents platform", () => {
           agentText: "Hi",
           state: "completed",
           errorCode: null,
-          sources: [validSource],
+          sources: [validSource, validLinkSource],
         },
       ],
     });
 
     const detail = await getAgentSession("s1");
-    expect(detail.turns[0]?.sources).toEqual([validSource]);
+    expect(detail.turns[0]?.sources).toEqual([validSource, validLinkSource]);
   });
 
   it("sends through a typed channel and preserves event order", async () => {
@@ -210,6 +218,7 @@ describe("agents platform", () => {
       byteCount: 12,
       originKind: "local_text_file",
       memberCount: 1,
+      canonicalUrl: null,
     });
     await expect(pickAgentTextSource()).resolves.toEqual({
       status: "selected",
@@ -219,6 +228,7 @@ describe("agents platform", () => {
         byteCount: 12,
         originKind: "local_text_file",
         memberCount: 1,
+        canonicalUrl: null,
       },
     });
 
@@ -229,6 +239,7 @@ describe("agents platform", () => {
       byteCount: 120,
       originKind: "local_text_folder",
       memberCount: 3,
+      canonicalUrl: null,
     });
     await expect(pickAgentTextFolderSource()).resolves.toEqual({
       status: "selected",
@@ -238,6 +249,30 @@ describe("agents platform", () => {
         byteCount: 120,
         originKind: "local_text_folder",
         memberCount: 3,
+        canonicalUrl: null,
+      },
+    });
+
+    invokeMock.mockResolvedValueOnce({
+      status: "selected",
+      draftHandle: "deadbeef".repeat(4),
+      displayName: "example.com/readme.txt",
+      byteCount: 40,
+      originKind: "remote_text_url",
+      memberCount: 1,
+      canonicalUrl: "https://example.com/readme.txt",
+    });
+    await expect(
+      (await import("./agents")).attachAgentTextLinkSource("https://example.com/readme.txt"),
+    ).resolves.toEqual({
+      status: "selected",
+      attachment: {
+        draftHandle: "deadbeef".repeat(4),
+        displayName: "example.com/readme.txt",
+        byteCount: 40,
+        originKind: "remote_text_url",
+        memberCount: 1,
+        canonicalUrl: "https://example.com/readme.txt",
       },
     });
 
@@ -248,6 +283,7 @@ describe("agents platform", () => {
       byteCount: null,
       originKind: null,
       memberCount: null,
+      canonicalUrl: null,
     });
     await expect(pickAgentTextSource()).resolves.toEqual({ status: "cancelled" });
 

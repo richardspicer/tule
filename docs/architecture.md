@@ -89,21 +89,29 @@ autonomous retries, and active-session model switching are out of scope for this
 slice.
 
 Turn-scoped local text Sources extend that Agent boundary. The native host owns
-file- and folder-picker invocation, one-time bounded reading or shallow
-enumeration, and ephemeral draft handles for the main-window composer. React
-receives only an opaque draft handle and allowlisted metadata—never a path,
-file or directory content, or listing—and gains no generic dialog or
-filesystem capability. On send, the host resolves the handle, validates the
-snapshot in `tule-core`, and atomically persists the Source with the pending
-turn and events before provider transmission. Folder snapshots include only
-immediate-child regular UTF-8 text files (at most 32 members) under a single
-origin kind distinct from single-file attachments; member count, aggregate byte
-count, and deterministic framed content round-trip through SQLite. Provider
-context includes the current Source and Sources from completed prior turns in
-owning-turn order under prompt version `tule-direct-agent-v2`, with explicit
-untrusted-data framing subordinate to fixed and saved Project instructions.
-Routine IPC, transcripts, events, and safe errors expose only Source
-identifier, origin kind, display name, byte count, member count, and hash.
+file-, folder-, and link-picker or URL intake, one-time bounded reading,
+shallow enumeration, or HTTPS fetch, and ephemeral draft handles for the
+main-window composer. React receives only an opaque draft handle and allowlisted
+metadata—including the canonical requested URL string for link snapshots—and
+never a path, file or directory content, listing, or fetched body. It gains no
+generic dialog, filesystem, or network capability. On send, the host resolves
+the handle, validates the snapshot in `tule-core`, and atomically persists the
+Source with the pending turn and events before provider transmission. Folder
+snapshots include only immediate-child regular UTF-8 text files (at most 32
+members) under a single origin kind distinct from single-file attachments;
+link snapshots use origin kind `remote_text_url` with a one-time native HTTPS
+fetch at attach time (at most five redirect hops to other allowed HTTPS
+targets; loopback, link-local, and private/reserved destinations fail closed).
+Each hop resolves DNS once, rejects any blocked address in the result set, and
+connects through a short-lived client pinned to those validated addresses while
+still using the hostname for TLS SNI and certificate verification.
+Member count, aggregate byte count, canonical URL metadata, and deterministic
+framed content round-trip through SQLite. Provider context includes the current
+Source and Sources from completed prior turns in owning-turn order under prompt
+version `tule-direct-agent-v2`, with explicit untrusted-data framing
+subordinate to fixed and saved Project instructions. Routine IPC, transcripts,
+events, and safe errors expose only Source identifier, origin kind, display
+name, byte count, member count, hash, and—for link Sources—the canonical URL.
 Failed, cancelled, and interrupted turns retain that metadata but do not enter
 later context. The final serialized request still honors the existing 128 KiB
 ceiling without truncation or silent omission.

@@ -585,6 +585,25 @@ textarea:focus-visible {
   margin-top: 8px;
 }
 
+.composer-link-entry {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.composer-link-entry input {
+  flex: 1 1 12rem;
+  min-width: 0;
+  padding: 6px 8px;
+  border: 1px solid var(--divider);
+  border-radius: 6px;
+  background: var(--panel);
+  color: var(--text);
+  font: inherit;
+}
+
 .composer-attachment p,
 .turn-attachment {
   margin: 0;

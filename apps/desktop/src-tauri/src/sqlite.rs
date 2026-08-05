@@ -43,6 +43,9 @@ const MIGRATION_SET: &[M<'static>] = &[
     M::up(include_str!(
         "../migrations/0010_xai_subscription_provider.sql"
     )),
+    M::up(include_str!(
+        "../migrations/0011_agent_source_canonical_url.sql"
+    )),
 ];
 const MIGRATIONS: Migrations<'static> = Migrations::from_slice(MIGRATION_SET);
 
@@ -448,7 +451,7 @@ mod tests {
             .unwrap()
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 10);
+        assert_eq!(version, 11);
         drop(repository);
 
         let reopened = open_repository(&path);
@@ -458,7 +461,7 @@ mod tests {
             .unwrap()
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 10);
+        assert_eq!(version, 11);
     }
 
     #[test]
@@ -490,7 +493,7 @@ mod tests {
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
 
-        assert_eq!(version, 10);
+        assert_eq!(version, 11);
         assert_eq!(projects.len(), 1);
         assert_eq!(projects[0].id().to_string(), id);
         assert_eq!(projects[0].name().as_str(), "Existing project");
@@ -527,7 +530,7 @@ mod tests {
             .unwrap()
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 10);
+        assert_eq!(version, 11);
     }
 
     #[test]

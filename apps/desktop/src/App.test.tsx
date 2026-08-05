@@ -35,6 +35,7 @@ const {
   openSettingsWindowMock,
   pickAgentTextSourceMock,
   pickAgentTextFolderSourceMock,
+  attachAgentTextLinkSourceMock,
   sendAgentMessageMock,
   setAgentSessionProjectMock,
   setAgentSourceDraftScopeMock,
@@ -64,6 +65,7 @@ const {
   openSettingsWindowMock: vi.fn(),
   pickAgentTextSourceMock: vi.fn(),
   pickAgentTextFolderSourceMock: vi.fn(),
+  attachAgentTextLinkSourceMock: vi.fn(),
   sendAgentMessageMock: vi.fn(),
   setAgentSessionProjectMock: vi.fn(),
   setAgentSourceDraftScopeMock: vi.fn(),
@@ -125,6 +127,7 @@ vi.mock("./platform/agents", async (importOriginal) => {
     setAgentSessionProject: setAgentSessionProjectMock,
     pickAgentTextSource: pickAgentTextSourceMock,
     pickAgentTextFolderSource: pickAgentTextFolderSourceMock,
+    attachAgentTextLinkSource: attachAgentTextLinkSourceMock,
     clearAgentTextSourceDraft: clearAgentTextSourceDraftMock,
     setAgentSourceDraftScope: setAgentSourceDraftScopeMock,
   };
@@ -159,6 +162,7 @@ describe("App", () => {
     openSettingsWindowMock.mockReset();
     pickAgentTextSourceMock.mockReset();
     pickAgentTextFolderSourceMock.mockReset();
+    attachAgentTextLinkSourceMock.mockReset();
     sendAgentMessageMock.mockReset();
     setAgentSessionProjectMock.mockReset();
     setAgentSourceDraftScopeMock.mockReset();
@@ -166,6 +170,7 @@ describe("App", () => {
     clearAgentTextSourceDraftMock.mockResolvedValue(undefined);
     pickAgentTextSourceMock.mockResolvedValue({ status: "cancelled" });
     pickAgentTextFolderSourceMock.mockResolvedValue({ status: "cancelled" });
+    attachAgentTextLinkSourceMock.mockResolvedValue({ status: "cancelled" });
     setAgentSourceDraftScopeMock.mockResolvedValue(undefined);
     updateProjectInstructionsMock.mockReset();
     listAgentSessionsMock.mockReset();
@@ -412,6 +417,7 @@ describe("App", () => {
         byteCount: 5,
         originKind: "local_text_file",
         memberCount: 1,
+        canonicalUrl: null,
       },
     });
 
@@ -514,6 +520,7 @@ describe("App", () => {
         byteCount: 5,
         originKind: "local_text_file",
         memberCount: 1,
+        canonicalUrl: null,
       },
     });
     sendAgentMessageMock.mockImplementation(
@@ -544,6 +551,7 @@ describe("App", () => {
                 byteCount: 5,
                 contentSha256: "a".repeat(64),
                 memberCount: 1,
+                canonicalUrl: null,
               },
             ],
           },
@@ -627,6 +635,7 @@ describe("App", () => {
                   byteCount: 4,
                   contentSha256: "b".repeat(64),
                   memberCount: 1,
+                  canonicalUrl: null,
                 },
               ],
             },
@@ -642,6 +651,7 @@ describe("App", () => {
         byteCount: 4,
         originKind: "local_text_file",
         memberCount: 1,
+        canonicalUrl: null,
       },
     });
 

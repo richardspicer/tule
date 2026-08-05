@@ -24,9 +24,9 @@ use crate::{
         build_selection_response, build_stale_catalog_response,
     },
     source_draft::{
-        NativeSourceFileReader, NativeSourceFolderReader, PickSourceOutcome, SourceDraftError,
-        SourceDraftStore, SourceFilePicker, SourceFolderPicker, capture_picked_folder,
-        capture_picked_source,
+        NativeSourceFileReader, NativeSourceFolderReader, NativeSourceUrlFetcher,
+        PickSourceOutcome, SourceDraftError, SourceDraftStore, SourceFilePicker,
+        SourceFolderPicker, capture_link_source, capture_picked_folder, capture_picked_source,
     },
     sqlite::SqliteStore,
 };
@@ -95,6 +95,7 @@ pub(crate) struct AgentState {
     pub(crate) provider: Arc<dyn ProviderAdapter>,
     pub(crate) xai: Option<Arc<crate::xai_subscription::XaiSubscriptionAdapter>>,
     pub(crate) source_drafts: Arc<SourceDraftStore>,
+    source_url_fetcher: Arc<NativeSourceUrlFetcher>,
     operation_gate: Arc<OperationGate>,
     cancellation: Arc<Mutex<Option<(String, CancellationToken)>>>,
 }
@@ -138,6 +139,9 @@ impl AgentState {
             provider,
             xai,
             source_drafts: Arc::new(SourceDraftStore::new()),
+            source_url_fetcher: Arc::new(
+                NativeSourceUrlFetcher::new().expect("native link fetcher initialization"),
+            ),
             operation_gate: Arc::new(OperationGate::default()),
             cancellation: Arc::new(Mutex::new(None)),
         }
@@ -201,6 +205,7 @@ pub(crate) struct SourceMetadataResponse {
     byte_count: u64,
     content_sha256: String,
     member_count: u32,
+    canonical_url: Option<String>,
 }
 
 impl From<&Source> for SourceMetadataResponse {
@@ -212,6 +217,7 @@ impl From<&Source> for SourceMetadataResponse {
             byte_count: value.byte_count(),
             content_sha256: value.content_sha256().into(),
             member_count: value.member_count(),
+            canonical_url: value.canonical_url().map(str::to_owned),
         }
     }
 }
@@ -265,6 +271,7 @@ pub(crate) struct PickAgentTextSourceResponse {
     byte_count: Option<u64>,
     origin_kind: Option<String>,
     member_count: Option<u32>,
+    canonical_url: Option<String>,
 }
 
 fn require_main_window(webview: &Webview) -> Result<(), AgentIpcError> {
@@ -494,6 +501,7 @@ pub(crate) async fn pick_agent_text_source(
             byte_count: None,
             origin_kind: None,
             member_count: None,
+            canonical_url: None,
         },
         PickSourceOutcome::Selected {
             draft_handle,
@@ -501,6 +509,7 @@ pub(crate) async fn pick_agent_text_source(
             byte_count,
             origin_kind,
             member_count,
+            canonical_url,
         } => PickAgentTextSourceResponse {
             status: "selected".into(),
             draft_handle: Some(draft_handle),
@@ -508,6 +517,52 @@ pub(crate) async fn pick_agent_text_source(
             byte_count: Some(byte_count),
             origin_kind: Some(origin_kind),
             member_count: Some(member_count),
+            canonical_url,
+        },
+    })
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub(crate) async fn attach_agent_text_link_source(
+    webview: Webview,
+    url: String,
+    state: State<'_, AgentState>,
+) -> Result<PickAgentTextSourceResponse, AgentIpcError> {
+    require_main_window(&webview)?;
+    let _operation = begin_draft_mutation(&state)?;
+    let drafts = Arc::clone(&state.source_drafts);
+    let fetcher = Arc::clone(&state.source_url_fetcher);
+    let trimmed = url.trim().to_owned();
+    let outcome = tauri::async_runtime::spawn_blocking(move || {
+        capture_link_source(&drafts, &trimmed, fetcher.as_ref())
+    })
+    .await
+    .map_err(|_| AgentIpcError::SourceUnreadable)??;
+    Ok(match outcome {
+        PickSourceOutcome::Cancelled => PickAgentTextSourceResponse {
+            status: "cancelled".into(),
+            draft_handle: None,
+            display_name: None,
+            byte_count: None,
+            origin_kind: None,
+            member_count: None,
+            canonical_url: None,
+        },
+        PickSourceOutcome::Selected {
+            draft_handle,
+            display_name,
+            byte_count,
+            origin_kind,
+            member_count,
+            canonical_url,
+        } => PickAgentTextSourceResponse {
+            status: "selected".into(),
+            draft_handle: Some(draft_handle),
+            display_name: Some(display_name),
+            byte_count: Some(byte_count),
+            origin_kind: Some(origin_kind),
+            member_count: Some(member_count),
+            canonical_url,
         },
     })
 }
@@ -535,6 +590,7 @@ pub(crate) async fn pick_agent_text_folder_source(
             byte_count: None,
             origin_kind: None,
             member_count: None,
+            canonical_url: None,
         },
         PickSourceOutcome::Selected {
             draft_handle,
@@ -542,6 +598,7 @@ pub(crate) async fn pick_agent_text_folder_source(
             byte_count,
             origin_kind,
             member_count,
+            canonical_url,
         } => PickAgentTextSourceResponse {
             status: "selected".into(),
             draft_handle: Some(draft_handle),
@@ -549,6 +606,7 @@ pub(crate) async fn pick_agent_text_folder_source(
             byte_count: Some(byte_count),
             origin_kind: Some(origin_kind),
             member_count: Some(member_count),
+            canonical_url,
         },
     })
 }
@@ -1123,6 +1181,7 @@ mod tests {
                 "first-body".into(),
                 tule_core::SOURCE_ORIGIN_LOCAL_TEXT_FILE.into(),
                 1,
+                None,
             )
             .unwrap();
         let new_session_scope = state.source_drafts.current_scope();
@@ -1157,6 +1216,7 @@ mod tests {
                 "follow-body".into(),
                 tule_core::SOURCE_ORIGIN_LOCAL_TEXT_FILE.into(),
                 1,
+                None,
             )
             .unwrap();
         assert!(
@@ -1195,6 +1255,7 @@ mod tests {
                 "original-body".into(),
                 tule_core::SOURCE_ORIGIN_LOCAL_TEXT_FILE.into(),
                 1,
+                None,
             )
             .unwrap();
         let send_target = state.source_drafts.current_scope();

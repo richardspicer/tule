@@ -25,7 +25,7 @@ const agentTurnStates: readonly AgentTurnState[] = [
   "interrupted",
 ];
 
-export type SourceOriginKind = "local_text_file" | "local_text_folder";
+export type SourceOriginKind = "local_text_file" | "local_text_folder" | "remote_text_url";
 
 export interface AgentSourceMetadata {
   id: string;
@@ -34,6 +34,7 @@ export interface AgentSourceMetadata {
   byteCount: number;
   contentSha256: string;
   memberCount: number;
+  canonicalUrl: string | null;
 }
 
 export interface AgentTurn {
@@ -74,6 +75,7 @@ export interface PendingSourceAttachment {
   byteCount: number;
   originKind: SourceOriginKind;
   memberCount: number;
+  canonicalUrl: string | null;
 }
 
 export type PickAgentTextSourceResult =
@@ -151,8 +153,10 @@ function isAgentSession(value: unknown): value is AgentSession {
 
 const MAX_SOURCE_UTF8 = 64 * 1024;
 const MAX_FOLDER_MEMBERS = 32;
+const MAX_CANONICAL_URL_UTF8 = 2048;
 const SOURCE_METADATA_KEYS = [
   "byteCount",
+  "canonicalUrl",
   "contentSha256",
   "displayName",
   "id",
@@ -161,6 +165,7 @@ const SOURCE_METADATA_KEYS = [
 ] as const;
 const PICK_RESULT_KEYS = [
   "byteCount",
+  "canonicalUrl",
   "displayName",
   "draftHandle",
   "memberCount",
@@ -218,18 +223,64 @@ function hasExactKeys(record: Record<string, unknown>, allowed: readonly string[
   return keys.length === allowed.length && keys.every((key, index) => key === allowed[index]);
 }
 
+function isCanonicalHttpsUrl(value: string): boolean {
+  if (value.length === 0) {
+    return false;
+  }
+  const utf8Length = new TextEncoder().encode(value).length;
+  if (utf8Length > MAX_CANONICAL_URL_UTF8) {
+    return false;
+  }
+  if (!value.startsWith("https://")) {
+    return false;
+  }
+  const afterScheme = value.slice("https://".length);
+  const hostEnd = (() => {
+    const slash = afterScheme.indexOf("/");
+    const query = afterScheme.indexOf("?");
+    const fragment = afterScheme.indexOf("#");
+    const candidates = [slash, query, fragment].filter((index) => index !== -1);
+    return candidates.length === 0 ? afterScheme.length : Math.min(...candidates);
+  })();
+  if (afterScheme.slice(0, hostEnd).length === 0) {
+    return false;
+  }
+  if (value.includes("@")) {
+    return false;
+  }
+  for (const char of value) {
+    const code = char.codePointAt(0);
+    if (code === undefined) {
+      return false;
+    }
+    if (code <= 0x1f || code === 0x7f || (code >= 0x80 && code <= 0x9f)) {
+      return false;
+    }
+  }
+  return true;
+}
+
 function isSourceOriginKind(value: unknown): value is SourceOriginKind {
-  return value === "local_text_file" || value === "local_text_folder";
+  return (
+    value === "local_text_file" || value === "local_text_folder" || value === "remote_text_url"
+  );
 }
 
 function isMemberCount(value: unknown, originKind: SourceOriginKind): value is number {
   if (typeof value !== "number" || !Number.isInteger(value)) {
     return false;
   }
-  if (originKind === "local_text_file") {
+  if (originKind === "local_text_file" || originKind === "remote_text_url") {
     return value === 1;
   }
   return value >= 1 && value <= MAX_FOLDER_MEMBERS;
+}
+
+function isCanonicalUrlField(value: unknown, originKind: SourceOriginKind): value is string | null {
+  if (originKind === "remote_text_url") {
+    return typeof value === "string" && isCanonicalHttpsUrl(value);
+  }
+  return value === null;
 }
 
 function isSourceMetadata(value: unknown): value is AgentSourceMetadata {
@@ -248,7 +299,8 @@ function isSourceMetadata(value: unknown): value is AgentSourceMetadata {
     isSourceByteCount(record.byteCount) &&
     typeof record.contentSha256 === "string" &&
     isCanonicalSha256(record.contentSha256) &&
-    isMemberCount(record.memberCount, record.originKind)
+    isMemberCount(record.memberCount, record.originKind) &&
+    isCanonicalUrlField(record.canonicalUrl, record.originKind)
   );
 }
 
@@ -362,7 +414,8 @@ function validatePickResult(value: unknown): PickAgentTextSourceResult {
       record.displayName !== null ||
       record.byteCount !== null ||
       record.originKind !== null ||
-      record.memberCount !== null
+      record.memberCount !== null ||
+      record.canonicalUrl !== null
     ) {
       throw new AgentError("agent_storage_unavailable");
     }
@@ -377,7 +430,8 @@ function validatePickResult(value: unknown): PickAgentTextSourceResult {
     isSafeSourceDisplayName(record.displayName) &&
     isSourceByteCount(record.byteCount) &&
     isSourceOriginKind(record.originKind) &&
-    isMemberCount(record.memberCount, record.originKind)
+    isMemberCount(record.memberCount, record.originKind) &&
+    isCanonicalUrlField(record.canonicalUrl, record.originKind)
   ) {
     return {
       status: "selected",
@@ -387,6 +441,7 @@ function validatePickResult(value: unknown): PickAgentTextSourceResult {
         byteCount: record.byteCount,
         originKind: record.originKind,
         memberCount: record.memberCount,
+        canonicalUrl: record.canonicalUrl,
       },
     };
   }
@@ -432,6 +487,10 @@ export async function pickAgentTextSource(): Promise<PickAgentTextSourceResult> 
 
 export async function pickAgentTextFolderSource(): Promise<PickAgentTextSourceResult> {
   return validatePickResult(await invokeAgentCommand("pick_agent_text_folder_source"));
+}
+
+export async function attachAgentTextLinkSource(url: string): Promise<PickAgentTextSourceResult> {
+  return validatePickResult(await invokeAgentCommand("attach_agent_text_link_source", { url }));
 }
 
 export async function clearAgentTextSourceDraft(draftHandle: string | null): Promise<void> {
@@ -536,7 +595,7 @@ export function formatSourceByteCount(byteCount: number): string {
 export function formatSourceAttachmentSummary(
   attachment: Pick<
     PendingSourceAttachment,
-    "originKind" | "displayName" | "byteCount" | "memberCount"
+    "originKind" | "displayName" | "byteCount" | "memberCount" | "canonicalUrl"
   >,
 ): string {
   const size = formatSourceByteCount(attachment.byteCount);
@@ -544,9 +603,18 @@ export function formatSourceAttachmentSummary(
     const files = attachment.memberCount === 1 ? "1 file" : `${attachment.memberCount} files`;
     return `${attachment.displayName} (${size}, ${files})`;
   }
+  if (attachment.originKind === "remote_text_url" && attachment.canonicalUrl !== null) {
+    return `${attachment.displayName} (${size}, ${attachment.canonicalUrl})`;
+  }
   return `${attachment.displayName} (${size})`;
 }
 
 export function sourceAttachmentKindLabel(originKind: SourceOriginKind): string {
-  return originKind === "local_text_folder" ? "folder" : "file";
+  if (originKind === "local_text_folder") {
+    return "folder";
+  }
+  if (originKind === "remote_text_url") {
+    return "link";
+  }
+  return "file";
 }

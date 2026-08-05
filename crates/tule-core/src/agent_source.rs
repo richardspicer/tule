@@ -13,6 +13,12 @@ pub const SOURCE_ORIGIN_LOCAL_TEXT_FILE: &str = "local_text_file";
 /// Origin kind for an explicitly selected shallow local folder snapshot.
 pub const SOURCE_ORIGIN_LOCAL_TEXT_FOLDER: &str = "local_text_folder";
 
+/// Origin kind for a native-fetched HTTPS link text snapshot.
+pub const SOURCE_ORIGIN_REMOTE_TEXT_URL: &str = "remote_text_url";
+
+/// Maximum stored canonical HTTPS URL length in UTF-8 bytes.
+pub const MAX_CANONICAL_URL_UTF8: usize = 2048;
+
 /// Maximum included immediate-child members in a folder Source.
 pub const MAX_FOLDER_MEMBERS: usize = 32;
 
@@ -71,6 +77,7 @@ pub struct Source {
     content_sha256: String,
     content: String,
     member_count: u32,
+    canonical_url: Option<String>,
     created_at_unix_ms: i64,
 }
 
@@ -96,6 +103,36 @@ impl Source {
             content_sha256: hash_source_bytes(content.as_bytes()),
             content,
             member_count: 1,
+            canonical_url: None,
+            created_at_unix_ms: unix_now_ms()?,
+        })
+    }
+
+    /// Creates a validated HTTPS link Source from exact captured UTF-8 content.
+    pub fn new_remote_text_url(
+        display_name: impl Into<String>,
+        content: impl Into<String>,
+        canonical_url: impl Into<String>,
+    ) -> Result<Self, SourceValidationError> {
+        let display_name = display_name.into();
+        let content = content.into();
+        let canonical_url = canonical_url.into();
+        validate_source_display_name(&display_name)?;
+        validate_source_content(&content)?;
+        validate_canonical_https_url(&canonical_url)?;
+        let byte_count =
+            u64::try_from(content.len()).map_err(|_| SourceValidationError::TooLarge {
+                byte_count: content.len(),
+            })?;
+        Ok(Self {
+            id: SourceId::generate(),
+            origin_kind: SOURCE_ORIGIN_REMOTE_TEXT_URL.to_owned(),
+            display_name,
+            byte_count,
+            content_sha256: hash_source_bytes(content.as_bytes()),
+            content,
+            member_count: 1,
+            canonical_url: Some(canonical_url),
             created_at_unix_ms: unix_now_ms()?,
         })
     }
@@ -137,6 +174,7 @@ impl Source {
             content_sha256: hash_source_bytes(content.as_bytes()),
             content,
             member_count,
+            canonical_url: None,
             created_at_unix_ms: unix_now_ms()?,
         })
     }
@@ -151,6 +189,7 @@ impl Source {
         content_sha256: impl Into<String>,
         content: impl Into<String>,
         member_count: Option<u32>,
+        canonical_url: Option<String>,
         created_at_unix_ms: i64,
     ) -> Result<Self, SourceReconstructionError> {
         let id = SourceId::parse(id)?;
@@ -165,7 +204,8 @@ impl Source {
             SourceValidationError::UnsafeDisplayName
             | SourceValidationError::Time(_)
             | SourceValidationError::NoEligibleMembers
-            | SourceValidationError::TooManyMembers { .. } => {
+            | SourceValidationError::TooManyMembers { .. }
+            | SourceValidationError::InvalidCanonicalUrl => {
                 SourceReconstructionError::InvalidContent
             }
         })?;
@@ -182,12 +222,15 @@ impl Source {
         if content_sha256 != recomputed {
             return Err(SourceReconstructionError::HashMismatch);
         }
-        let member_count = match origin_kind.as_str() {
+        let (member_count, stored_canonical_url) = match origin_kind.as_str() {
             SOURCE_ORIGIN_LOCAL_TEXT_FILE => {
                 if member_count.is_some_and(|count| count != 1) {
                     return Err(SourceReconstructionError::MemberCountMismatch);
                 }
-                1
+                if canonical_url.is_some() {
+                    return Err(SourceReconstructionError::InvalidCanonicalUrl);
+                }
+                (1, None)
             }
             SOURCE_ORIGIN_LOCAL_TEXT_FOLDER => {
                 let count = member_count.ok_or(SourceReconstructionError::MemberCountMismatch)?;
@@ -199,7 +242,21 @@ impl Source {
                 if parsed != count {
                     return Err(SourceReconstructionError::MemberCountMismatch);
                 }
-                count
+                if canonical_url.is_some() {
+                    return Err(SourceReconstructionError::InvalidCanonicalUrl);
+                }
+                (count, None)
+            }
+            SOURCE_ORIGIN_REMOTE_TEXT_URL => {
+                if member_count.is_some_and(|count| count != 1) {
+                    return Err(SourceReconstructionError::MemberCountMismatch);
+                }
+                let Some(url) = canonical_url else {
+                    return Err(SourceReconstructionError::InvalidCanonicalUrl);
+                };
+                validate_canonical_https_url(&url)
+                    .map_err(|_| SourceReconstructionError::InvalidCanonicalUrl)?;
+                (1, Some(url))
             }
             _ => return Err(SourceReconstructionError::InvalidOrigin),
         };
@@ -211,6 +268,7 @@ impl Source {
             content_sha256,
             content,
             member_count,
+            canonical_url: stored_canonical_url,
             created_at_unix_ms,
         })
     }
@@ -261,6 +319,12 @@ impl Source {
     #[must_use]
     pub const fn created_at_unix_ms(&self) -> i64 {
         self.created_at_unix_ms
+    }
+
+    /// Returns the canonical requested HTTPS URL for link Sources.
+    #[must_use]
+    pub fn canonical_url(&self) -> Option<&str> {
+        self.canonical_url.as_deref()
     }
 }
 
@@ -365,6 +429,66 @@ pub fn validate_source_display_name(display_name: &str) -> Result<(), SourceVali
         }
     }
     Ok(())
+}
+
+/// Validates a persisted or pending canonical HTTPS URL string.
+pub fn validate_canonical_https_url(url: &str) -> Result<(), SourceValidationError> {
+    if url.is_empty() || url.len() > MAX_CANONICAL_URL_UTF8 {
+        return Err(SourceValidationError::InvalidCanonicalUrl);
+    }
+    if url.as_bytes().contains(&0) {
+        return Err(SourceValidationError::ContainsNul);
+    }
+    let Some(after_scheme) = url.strip_prefix("https://") else {
+        return Err(SourceValidationError::InvalidCanonicalUrl);
+    };
+    if after_scheme.is_empty() {
+        return Err(SourceValidationError::InvalidCanonicalUrl);
+    }
+    let host_end = after_scheme
+        .find(['/', '?', '#'])
+        .unwrap_or(after_scheme.len());
+    if after_scheme[..host_end].is_empty() {
+        return Err(SourceValidationError::InvalidCanonicalUrl);
+    }
+    if after_scheme.contains('@') {
+        return Err(SourceValidationError::InvalidCanonicalUrl);
+    }
+    for ch in url.chars() {
+        let code = ch as u32;
+        if code <= 0x1F || code == 0x7F || (0x80..=0x9F).contains(&code) {
+            return Err(SourceValidationError::InvalidCanonicalUrl);
+        }
+    }
+    Ok(())
+}
+
+/// Derives a safe display name from a validated canonical HTTPS URL.
+pub fn derive_remote_source_display_name(
+    canonical_url: &str,
+) -> Result<String, SourceValidationError> {
+    validate_canonical_https_url(canonical_url)?;
+    let after_scheme = canonical_url
+        .strip_prefix("https://")
+        .ok_or(SourceValidationError::InvalidCanonicalUrl)?;
+    let host_end = after_scheme
+        .find(['/', '?', '#'])
+        .unwrap_or(after_scheme.len());
+    let host = &after_scheme[..host_end];
+    if host.is_empty() {
+        return Err(SourceValidationError::UnsafeDisplayName);
+    }
+    let mut display_name = host.to_ascii_lowercase();
+    let path = after_scheme.get(host_end..).unwrap_or("");
+    if let Some(path_only) = path.split(['?', '#']).next()
+        && let Some(tail) = path_only.rsplit('/').find(|segment| !segment.is_empty())
+        && validate_source_display_name(tail).is_ok()
+    {
+        display_name.push('/');
+        display_name.push_str(tail);
+    }
+    validate_source_display_name(&display_name)?;
+    Ok(display_name)
 }
 
 /// Validates exact Source text content bounds and NUL rejection.
@@ -511,6 +635,8 @@ pub enum SourceValidationError {
     },
     /// Clock failure while stamping creation time.
     Time(ProjectTimeError),
+    /// Canonical URL is missing or not a bounded HTTPS string.
+    InvalidCanonicalUrl,
 }
 
 impl From<ProjectTimeError> for SourceValidationError {
@@ -536,6 +662,9 @@ impl fmt::Display for SourceValidationError {
                 "folder snapshot has {member_count} members; the maximum is {MAX_FOLDER_MEMBERS}"
             ),
             Self::Time(error) => error.fmt(formatter),
+            Self::InvalidCanonicalUrl => {
+                formatter.write_str("source canonical URL must be a bounded HTTPS string")
+            }
         }
     }
 }
@@ -548,7 +677,8 @@ impl Error for SourceValidationError {
             | Self::TooLarge { .. }
             | Self::ContainsNul
             | Self::NoEligibleMembers
-            | Self::TooManyMembers { .. } => None,
+            | Self::TooManyMembers { .. }
+            | Self::InvalidCanonicalUrl => None,
         }
     }
 }
@@ -576,6 +706,8 @@ pub enum SourceReconstructionError {
     HashMismatch,
     /// Stored member count does not match framed folder content.
     MemberCountMismatch,
+    /// Canonical URL is missing or invalid for the origin kind.
+    InvalidCanonicalUrl,
 }
 
 impl From<InvalidAgentId> for SourceReconstructionError {
@@ -603,6 +735,9 @@ impl fmt::Display for SourceReconstructionError {
             Self::MemberCountMismatch => {
                 formatter.write_str("source member count does not match stored content")
             }
+            Self::InvalidCanonicalUrl => {
+                formatter.write_str("source canonical URL is invalid for the origin kind")
+            }
         }
     }
 }
@@ -619,7 +754,8 @@ impl Error for SourceReconstructionError {
             | Self::ByteCountMismatch
             | Self::InvalidHash
             | Self::HashMismatch
-            | Self::MemberCountMismatch => None,
+            | Self::MemberCountMismatch
+            | Self::InvalidCanonicalUrl => None,
         }
     }
 }
@@ -729,6 +865,7 @@ mod tests {
                 &hash,
                 source.content(),
                 Some(2),
+                None,
                 source.created_at_unix_ms(),
             ),
             Err(SourceReconstructionError::MemberCountMismatch)
@@ -742,6 +879,7 @@ mod tests {
                 &hash,
                 source.content(),
                 Some(1),
+                None,
                 source.created_at_unix_ms(),
             )
             .unwrap(),
@@ -764,12 +902,13 @@ mod tests {
                 &hash,
                 "hello",
                 None,
+                None,
                 1,
             ),
             Err(SourceReconstructionError::InvalidId(_))
         ));
         assert!(matches!(
-            Source::from_stored_parts(&id, "other", "ok.txt", 5, &hash, "hello", None, 1),
+            Source::from_stored_parts(&id, "other", "ok.txt", 5, &hash, "hello", None, None, 1),
             Err(SourceReconstructionError::InvalidOrigin)
         ));
         assert!(matches!(
@@ -780,6 +919,7 @@ mod tests {
                 5,
                 &hash,
                 "hello",
+                None,
                 None,
                 1
             ),
@@ -794,6 +934,7 @@ mod tests {
                 &hash,
                 "hello",
                 None,
+                None,
                 1,
             ),
             Err(SourceReconstructionError::InvalidDisplayName)
@@ -806,6 +947,7 @@ mod tests {
                 4,
                 &hash,
                 "hello",
+                None,
                 None,
                 1,
             ),
@@ -820,6 +962,7 @@ mod tests {
                 "ABCDEF",
                 "hello",
                 None,
+                None,
                 1,
             ),
             Err(SourceReconstructionError::InvalidHash)
@@ -832,6 +975,7 @@ mod tests {
                 5,
                 "a".repeat(64),
                 "hello",
+                None,
                 None,
                 1,
             ),
@@ -846,6 +990,7 @@ mod tests {
                 hash_source_bytes(b"a\0b"),
                 "a\0b",
                 None,
+                None,
                 1,
             ),
             Err(SourceReconstructionError::ContainsNul)
@@ -858,6 +1003,7 @@ mod tests {
                 5,
                 &hash,
                 "hello",
+                None,
                 None,
                 valid.created_at_unix_ms(),
             )
@@ -902,5 +1048,49 @@ mod tests {
         assert_eq!(&framed[payload_start..], content);
         assert!(framed.starts_with("Ask about the file\n\ntule-attached-source-v1\n"));
         assert_eq!(framed.matches("content-bytes:").count(), 2);
+    }
+
+    #[test]
+    fn validate_canonical_https_url_rejects_empty_host() {
+        for url in ["https://", "https:///path", "https://?q", "https://#f"] {
+            assert!(
+                matches!(
+                    validate_canonical_https_url(url),
+                    Err(SourceValidationError::InvalidCanonicalUrl)
+                ),
+                "expected rejection for {url}"
+            );
+        }
+        assert!(validate_canonical_https_url("https://example.com/path").is_ok());
+    }
+
+    #[test]
+    fn remote_text_url_source_preserves_canonical_url_and_exact_body() {
+        let url = "https://example.com/readme.txt";
+        let source =
+            Source::new_remote_text_url("example.com/readme.txt", "<html>ok</html>", url).unwrap();
+        assert_eq!(source.origin_kind(), SOURCE_ORIGIN_REMOTE_TEXT_URL);
+        assert_eq!(source.canonical_url(), Some(url));
+        assert_eq!(source.content(), "<html>ok</html>");
+        assert_eq!(source.member_count(), 1);
+        assert!(matches!(
+            validate_canonical_https_url("http://example.com/a"),
+            Err(SourceValidationError::InvalidCanonicalUrl)
+        ));
+        let id = source.id().to_string();
+        let hash = source.content_sha256().to_owned();
+        let restored = Source::from_stored_parts(
+            &id,
+            SOURCE_ORIGIN_REMOTE_TEXT_URL,
+            "example.com/readme.txt",
+            source.byte_count(),
+            &hash,
+            source.content(),
+            Some(1),
+            Some(url.to_owned()),
+            source.created_at_unix_ms(),
+        )
+        .unwrap();
+        assert_eq!(restored, source);
     }
 }

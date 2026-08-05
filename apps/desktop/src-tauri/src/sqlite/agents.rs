@@ -299,7 +299,7 @@ impl AgentRepository for SqliteStore {
         let mut statement = connection
             .prepare(
                 "SELECT t.id, s.id, s.origin_kind, s.display_name, s.byte_count, s.content_sha256,
-                        s.content, s.created_at_unix_ms, s.member_count, ts.attachment_order
+                        s.content, s.created_at_unix_ms, s.member_count, s.canonical_url, ts.attachment_order
                  FROM agent_turn_sources ts
                  INNER JOIN agent_sources s ON s.id = ts.source_id
                  INNER JOIN agent_turns t ON t.id = ts.turn_id
@@ -319,7 +319,8 @@ impl AgentRepository for SqliteStore {
                     row.get::<_, String>(6)?,
                     row.get::<_, i64>(7)?,
                     row.get::<_, Option<i64>>(8)?,
-                    row.get::<_, i64>(9)?,
+                    row.get::<_, Option<String>>(9)?,
+                    row.get::<_, i64>(10)?,
                 ))
             })
             .map_err(SqliteStoreError::Database)?;
@@ -335,6 +336,7 @@ impl AgentRepository for SqliteStore {
                 content,
                 created_at_unix_ms,
                 stored_member_count,
+                canonical_url,
                 attachment_order,
             ) = row.map_err(SqliteStoreError::Database)?;
             let byte_count = u64::try_from(byte_count).map_err(|_| SqliteStoreError::Numeric)?;
@@ -351,6 +353,7 @@ impl AgentRepository for SqliteStore {
                 content_sha256,
                 content,
                 member_count,
+                canonical_url,
                 created_at_unix_ms,
             )
             .map_err(SqliteStoreError::MalformedSource)?;
@@ -527,8 +530,8 @@ fn insert_source_with_association(
     connection
         .execute(
             "INSERT INTO agent_sources (
-                id, origin_kind, display_name, byte_count, content_sha256, content, created_at_unix_ms, member_count
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                id, origin_kind, display_name, byte_count, content_sha256, content, created_at_unix_ms, member_count, canonical_url
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 source.id().to_string(),
                 source.origin_kind(),
@@ -537,7 +540,8 @@ fn insert_source_with_association(
                 source.content_sha256(),
                 source.content(),
                 source.created_at_unix_ms(),
-                member_count
+                member_count,
+                source.canonical_url()
             ],
         )
         .map_err(SqliteStoreError::Database)?;
@@ -1000,6 +1004,28 @@ mod tests {
         let again = reopened.list_turn_sources(&prepared.session.id()).unwrap();
         assert_eq!(again[0].source().member_count(), 2);
         assert_eq!(again[0].source().display_name(), "docs");
+    }
+
+    #[test]
+    fn link_source_round_trip_preserves_canonical_url() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = SqliteStore::open(directory.path().join("link-sources.sqlite3")).unwrap();
+        let url = "https://example.com/readme.txt";
+        let source =
+            Source::new_remote_text_url("example.com/readme.txt", "hello link", url).unwrap();
+        let prepared =
+            prepare_agent_send(&store, None, "Use link", None, "", "gpt-5.5", Some(&source))
+                .unwrap();
+        let listed = store.list_turn_sources(&prepared.session.id()).unwrap();
+        assert_eq!(listed[0].source().origin_kind(), "remote_text_url");
+        assert_eq!(listed[0].source().canonical_url(), Some(url));
+        assert_eq!(listed[0].source().content(), "hello link");
+
+        let path = directory.path().join("link-sources.sqlite3");
+        drop(store);
+        let reopened = SqliteStore::open(&path).unwrap();
+        let again = reopened.list_turn_sources(&prepared.session.id()).unwrap();
+        assert_eq!(again[0].source().canonical_url(), Some(url));
     }
 
     #[test]

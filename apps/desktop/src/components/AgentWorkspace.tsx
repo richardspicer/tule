@@ -17,7 +17,14 @@ import {
   type AgentTurn,
   type PendingSourceAttachment,
 } from "../platform/agents";
-import { AttachFileIcon, AttachFolderIcon, JumpToLatestIcon, RemoveIcon, SendIcon } from "./icons";
+import {
+  AttachFileIcon,
+  AttachFolderIcon,
+  AttachLinkIcon,
+  JumpToLatestIcon,
+  RemoveIcon,
+  SendIcon,
+} from "./icons";
 import { Tooltip } from "./Tooltip";
 import { TuleWordmark } from "./TuleWordmark";
 
@@ -58,6 +65,7 @@ interface AgentWorkspaceProps {
   onCancel: () => void;
   onAttach: () => void;
   onAttachFolder: () => void;
+  onAttachLink: (url: string) => void;
   onRemoveAttachment: () => void;
   onProjectChange: (projectId: string | null) => void;
   onModelChange: (modelId: string) => void;
@@ -85,16 +93,39 @@ function formatPersistedAttachmentSummary(source: AgentSourceMetadata): string {
 
 function attachmentActionLabel(
   pendingAttachment: PendingSourceAttachment | null,
-  kind: "file" | "folder",
+  kind: "file" | "folder" | "link",
 ): string {
   if (pendingAttachment === null) {
-    return kind === "folder" ? "Attach folder" : "Attach file";
+    if (kind === "folder") {
+      return "Attach folder";
+    }
+    if (kind === "link") {
+      return "Attach link";
+    }
+    return "Attach file";
   }
-  const pendingKind = pendingAttachment.originKind === "local_text_folder" ? "folder" : "file";
+  const pendingKind =
+    pendingAttachment.originKind === "local_text_folder"
+      ? "folder"
+      : pendingAttachment.originKind === "remote_text_url"
+        ? "link"
+        : "file";
   if (pendingKind === kind) {
-    return kind === "folder" ? "Replace folder" : "Replace file";
+    if (kind === "folder") {
+      return "Replace folder";
+    }
+    if (kind === "link") {
+      return "Replace link";
+    }
+    return "Replace file";
   }
-  return kind === "folder" ? "Replace with folder" : "Replace with file";
+  if (kind === "folder") {
+    return "Replace with folder";
+  }
+  if (kind === "link") {
+    return "Replace with link";
+  }
+  return "Replace with file";
 }
 
 function isNearBottom(element: HTMLElement): boolean {
@@ -123,6 +154,7 @@ export function AgentWorkspace({
   onCancel,
   onAttach,
   onAttachFolder,
+  onAttachLink,
   onRemoveAttachment,
   onProjectChange,
   onModelChange,
@@ -133,6 +165,9 @@ export function AgentWorkspace({
   const composerRef = useRef<HTMLTextAreaElement>(null);
   const followRef = useRef(true);
   const [showJumpToLatest, setShowJumpToLatest] = useState(false);
+  const [linkEntryOpen, setLinkEntryOpen] = useState(false);
+  const [linkDraft, setLinkDraft] = useState("");
+  const linkFieldId = useId();
   const previousTurnCountRef = useRef(0);
   const isEmptyNewSession = turns.length === 0 && title === "New session";
 
@@ -214,6 +249,36 @@ export function AgentWorkspace({
       if (connected && !sending && !sendBlocked) {
         onSend();
       }
+    }
+  }
+
+  function handleOpenLinkEntry() {
+    if (sending) {
+      return;
+    }
+    setLinkEntryOpen(true);
+  }
+
+  function handleCancelLinkEntry() {
+    setLinkEntryOpen(false);
+    setLinkDraft("");
+  }
+
+  function submitLinkEntry() {
+    const trimmed = linkDraft.trim();
+    if (trimmed.length === 0 || sending) {
+      return;
+    }
+    setLinkEntryOpen(false);
+    setLinkDraft("");
+    onAttachLink(trimmed);
+  }
+
+  function handleLinkEntryKeyDown(event: KeyboardEvent<HTMLInputElement>) {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      event.stopPropagation();
+      submitLinkEntry();
     }
   }
 
@@ -383,6 +448,41 @@ export function AgentWorkspace({
                   </Tooltip>
                 </div>
               )}
+              {linkEntryOpen ? (
+                <div className="composer-link-entry">
+                  <label className="sr-only" htmlFor={linkFieldId}>
+                    HTTPS link to attach
+                  </label>
+                  <input
+                    id={linkFieldId}
+                    type="url"
+                    inputMode="url"
+                    autoComplete="off"
+                    spellCheck={false}
+                    placeholder="https://example.com/document.txt"
+                    value={linkDraft}
+                    disabled={sending}
+                    onChange={(event) => setLinkDraft(event.currentTarget.value)}
+                    onKeyDown={handleLinkEntryKeyDown}
+                  />
+                  <button
+                    className="secondary-action"
+                    type="button"
+                    disabled={sending}
+                    onClick={submitLinkEntry}
+                  >
+                    Fetch
+                  </button>
+                  <button
+                    className="secondary-action"
+                    type="button"
+                    disabled={sending}
+                    onClick={handleCancelLinkEntry}
+                  >
+                    Cancel
+                  </button>
+                </div>
+              ) : null}
               <div className="composer-actions">
                 <Tooltip label={attachmentActionLabel(pendingAttachment, "file")}>
                   <button
@@ -404,6 +504,18 @@ export function AgentWorkspace({
                     onClick={onAttachFolder}
                   >
                     <AttachFolderIcon />
+                  </button>
+                </Tooltip>
+                <Tooltip label={attachmentActionLabel(pendingAttachment, "link")}>
+                  <button
+                    className="icon-button composer-icon"
+                    type="button"
+                    disabled={sending}
+                    aria-label={attachmentActionLabel(pendingAttachment, "link")}
+                    aria-expanded={linkEntryOpen}
+                    onClick={handleOpenLinkEntry}
+                  >
+                    <AttachLinkIcon />
                   </button>
                 </Tooltip>
                 {sending ? (

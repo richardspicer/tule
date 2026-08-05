@@ -241,9 +241,7 @@ describe("App", () => {
     expect(screen.getByRole("button", { name: "Manage projects" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Application menu" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Settings" })).toBeInTheDocument();
-    expect(
-      screen.getByText("Connect ChatGPT in Settings to message the Agent."),
-    ).toBeInTheDocument();
+    expect(screen.getByText("Add a Provider to get started.")).toBeInTheDocument();
   });
 
   it("converges on terminal Connected status from the native connection event", async () => {
@@ -268,9 +266,7 @@ describe("App", () => {
     );
 
     render(<App />);
-    expect(
-      await screen.findByText("Connect ChatGPT in Settings to message the Agent."),
-    ).toBeInTheDocument();
+    expect(await screen.findByText("Add a Provider to get started.")).toBeInTheDocument();
 
     act(() => {
       emitStatus?.({
@@ -281,9 +277,7 @@ describe("App", () => {
     });
 
     await waitFor(() => {
-      expect(
-        screen.queryByText("Connect ChatGPT in Settings to message the Agent."),
-      ).not.toBeInTheDocument();
+      expect(screen.queryByText("Add a Provider to get started.")).not.toBeInTheDocument();
     });
     expect(screen.getByRole("textbox", { name: "Message the Agent" })).toBeInTheDocument();
   });
@@ -350,9 +344,6 @@ describe("App", () => {
     await user.click(screen.getByRole("button", { name: "Application menu" }));
     await user.click(screen.getByRole("menuitem", { name: /Open Settings/i }));
     expect(openSettingsWindowMock).toHaveBeenCalledTimes(2);
-
-    await user.click(screen.getByRole("button", { name: "Open Settings" }));
-    expect(openSettingsWindowMock).toHaveBeenCalledWith("providers");
   });
 
   it("exposes only implemented application menu groups", async () => {
@@ -426,7 +417,7 @@ describe("App", () => {
 
     render(<App />);
     expect(await screen.findByRole("heading", { name: "Existing session" })).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "Attach a text file" }));
+    await user.click(screen.getByRole("button", { name: "Attach file" }));
     expect(await screen.findByText(/Captured file snapshot: notes\.txt/)).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Manage projects" }));
@@ -567,7 +558,7 @@ describe("App", () => {
     expect(await screen.findByRole("heading", { name: "Existing session" })).toBeInTheDocument();
     await waitFor(() => expect(setAgentSourceDraftScopeMock).toHaveBeenCalledWith(session.id));
 
-    await user.click(screen.getByRole("button", { name: "Attach a text file" }));
+    await user.click(screen.getByRole("button", { name: "Attach file" }));
     expect(await screen.findByText(/Captured file snapshot: notes\.txt/)).toBeInTheDocument();
     const composer = screen.getByRole("textbox", { name: "Message the Agent" });
     await user.type(composer, "Use the file");
@@ -661,7 +652,7 @@ describe("App", () => {
 
     await waitFor(() => expect(setAgentSourceDraftScopeMock).toHaveBeenCalledWith(sessionId));
 
-    await user.click(screen.getByRole("button", { name: "Attach a text file" }));
+    await user.click(screen.getByRole("button", { name: "Attach file" }));
     expect(await screen.findByText(/Captured file snapshot: follow\.txt/)).toBeInTheDocument();
     await user.type(screen.getByRole("textbox", { name: "Message the Agent" }), "With file");
     await user.click(screen.getByRole("button", { name: "Send" }));
@@ -1090,8 +1081,8 @@ describe("App", () => {
     await user.click(screen.getByRole("button", { name: "Send" }));
 
     await waitFor(() => expect(syncConnectionStatusMock).toHaveBeenCalled());
-    await user.click(screen.getByRole("button", { name: "Open Settings" }));
-    expect(openSettingsWindowMock).toHaveBeenCalledWith("providers");
+    expect(await screen.findByText("Add a Provider to get started.")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Open Settings" })).not.toBeInTheDocument();
   });
 
   it("queues an immediate cancel until the native Started event supplies the turn ID", async () => {

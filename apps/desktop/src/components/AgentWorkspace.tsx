@@ -9,6 +9,7 @@ import {
   type UIEvent,
 } from "react";
 import {
+  AGENT_COMPOSER_UNAVAILABLE_MESSAGE,
   formatSourceAttachmentSummary,
   getSafeAgentErrorMessageForCode,
   sourceAttachmentKindLabel,
@@ -16,7 +17,7 @@ import {
   type AgentTurn,
   type PendingSourceAttachment,
 } from "../platform/agents";
-import { JumpToLatestIcon } from "./icons";
+import { AttachFileIcon, AttachFolderIcon, JumpToLatestIcon, RemoveIcon, SendIcon } from "./icons";
 import { Tooltip } from "./Tooltip";
 import { TuleWordmark } from "./TuleWordmark";
 
@@ -60,7 +61,6 @@ interface AgentWorkspaceProps {
   onRemoveAttachment: () => void;
   onProjectChange: (projectId: string | null) => void;
   onModelChange: (modelId: string) => void;
-  onOpenProvidersSettings: () => void;
 }
 
 function turnStateLabel(state: string): string | null {
@@ -88,13 +88,13 @@ function attachmentActionLabel(
   kind: "file" | "folder",
 ): string {
   if (pendingAttachment === null) {
-    return kind === "folder" ? "Attach a folder" : "Attach a text file";
+    return kind === "folder" ? "Attach folder" : "Attach file";
   }
-  const currentKind = sourceAttachmentKindLabel(pendingAttachment.originKind);
-  if (currentKind === kind) {
-    return `Replace the attached ${kind}`;
+  const pendingKind = pendingAttachment.originKind === "local_text_folder" ? "folder" : "file";
+  if (pendingKind === kind) {
+    return kind === "folder" ? "Replace folder" : "Replace file";
   }
-  return `Replace with a ${kind}`;
+  return kind === "folder" ? "Replace with folder" : "Replace with file";
 }
 
 function isNearBottom(element: HTMLElement): boolean {
@@ -126,7 +126,6 @@ export function AgentWorkspace({
   onRemoveAttachment,
   onProjectChange,
   onModelChange,
-  onOpenProvidersSettings,
 }: AgentWorkspaceProps) {
   const titleId = useId();
   const modelSelectId = useId();
@@ -241,7 +240,7 @@ export function AgentWorkspace({
               ))}
             </select>
             <span aria-hidden="true">·</span>
-            <span>ChatGPT subscription</span>
+            <span>Provider</span>
             <span aria-hidden="true">·</span>
             {modelLocked || modelOptions.length === 0 ? (
               <span>{modelLabel}</span>
@@ -371,36 +370,42 @@ export function AgentWorkspace({
                     Captured {sourceAttachmentKindLabel(pendingAttachment.originKind)} snapshot:{" "}
                     {formatSourceAttachmentSummary(pendingAttachment)}
                   </p>
-                  <button
-                    className="secondary-action"
-                    type="button"
-                    disabled={sending}
-                    aria-label={`Remove attachment ${pendingAttachment.displayName}`}
-                    onClick={onRemoveAttachment}
-                  >
-                    Remove
-                  </button>
+                  <Tooltip label="Remove">
+                    <button
+                      className="icon-button composer-icon"
+                      type="button"
+                      disabled={sending}
+                      aria-label={`Remove attachment ${pendingAttachment.displayName}`}
+                      onClick={onRemoveAttachment}
+                    >
+                      <RemoveIcon />
+                    </button>
+                  </Tooltip>
                 </div>
               )}
               <div className="composer-actions">
-                <button
-                  className="secondary-action"
-                  type="button"
-                  disabled={sending}
-                  aria-label={attachmentActionLabel(pendingAttachment, "file")}
-                  onClick={onAttach}
-                >
-                  {pendingAttachment === null ? "Attach file" : "Replace file"}
-                </button>
-                <button
-                  className="secondary-action"
-                  type="button"
-                  disabled={sending}
-                  aria-label={attachmentActionLabel(pendingAttachment, "folder")}
-                  onClick={onAttachFolder}
-                >
-                  {pendingAttachment === null ? "Attach folder" : "Replace folder"}
-                </button>
+                <Tooltip label={attachmentActionLabel(pendingAttachment, "file")}>
+                  <button
+                    className="icon-button composer-icon"
+                    type="button"
+                    disabled={sending}
+                    aria-label={attachmentActionLabel(pendingAttachment, "file")}
+                    onClick={onAttach}
+                  >
+                    <AttachFileIcon />
+                  </button>
+                </Tooltip>
+                <Tooltip label={attachmentActionLabel(pendingAttachment, "folder")}>
+                  <button
+                    className="icon-button composer-icon"
+                    type="button"
+                    disabled={sending}
+                    aria-label={attachmentActionLabel(pendingAttachment, "folder")}
+                    onClick={onAttachFolder}
+                  >
+                    <AttachFolderIcon />
+                  </button>
+                </Tooltip>
                 {sending ? (
                   <button
                     className="secondary-action"
@@ -411,21 +416,27 @@ export function AgentWorkspace({
                     {cancelRequested ? "Cancelling…" : "Cancel"}
                   </button>
                 ) : null}
-                <button
-                  className="primary-action"
-                  type="submit"
-                  disabled={sending || sendBlocked || draft.trim().length === 0}
-                >
-                  {sending ? "Sending…" : "Send"}
-                </button>
+                {sending ? (
+                  <button className="primary-action" type="submit" disabled>
+                    Sending…
+                  </button>
+                ) : (
+                  <Tooltip label="Send">
+                    <button
+                      className="icon-button composer-icon composer-send"
+                      type="submit"
+                      disabled={sendBlocked || draft.trim().length === 0}
+                      aria-label="Send"
+                    >
+                      <SendIcon />
+                    </button>
+                  </Tooltip>
+                )}
               </div>
             </form>
           ) : (
             <div className="composer-unavailable">
-              <p>Connect ChatGPT in Settings to message the Agent.</p>
-              <button className="secondary-action" type="button" onClick={onOpenProvidersSettings}>
-                Open Settings
-              </button>
+              <p>{AGENT_COMPOSER_UNAVAILABLE_MESSAGE}</p>
             </div>
           )}
         </div>

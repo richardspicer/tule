@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { AgentWorkspace, COMPOSER_MAX_HEIGHT_PX, COMPOSER_MIN_HEIGHT_PX } from "./AgentWorkspace";
 import type { AgentTurn } from "../platform/agents";
@@ -35,8 +35,7 @@ const baseTurn: AgentTurn = {
 };
 
 describe("AgentWorkspace", () => {
-  it("blocks composer when disconnected and deep-links Providers settings", () => {
-    const onOpenProvidersSettings = vi.fn();
+  it("blocks composer when disconnected with a message-only prompt", () => {
     render(
       <AgentWorkspace
         title="New session"
@@ -63,16 +62,13 @@ describe("AgentWorkspace", () => {
         onAttachFolder={vi.fn()}
         onRemoveAttachment={vi.fn()}
         onProjectChange={vi.fn()}
-        onOpenProvidersSettings={onOpenProvidersSettings}
       />,
     );
 
     expect(screen.getByRole("img", { name: "TULE" })).toBeInTheDocument();
-    expect(
-      screen.getByText("Connect ChatGPT in Settings to message the Agent."),
-    ).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Open Settings" }));
-    expect(onOpenProvidersSettings).toHaveBeenCalled();
+    expect(screen.getByText("Add a Provider to get started.")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Open Settings" })).not.toBeInTheDocument();
+    expect(screen.getByText("Provider")).toBeInTheDocument();
   });
 
   it("exposes attachment controls and transcript metadata accessibly", () => {
@@ -124,16 +120,124 @@ describe("AgentWorkspace", () => {
         onAttachFolder={vi.fn()}
         onRemoveAttachment={onRemoveAttachment}
         onProjectChange={vi.fn()}
-        onOpenProvidersSettings={vi.fn()}
       />,
     );
 
     expect(screen.getByText(/Attached file snapshot: notes.txt/)).toBeInTheDocument();
     expect(screen.getByText(/Captured file snapshot: draft.txt/)).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Replace the attached file" }));
+
+    const replaceFile = screen.getByRole("button", { name: "Replace file" });
+    expect(replaceFile.textContent?.trim()).toBe("");
+    fireEvent.mouseEnter(replaceFile.parentElement!);
+    expect(within(replaceFile.parentElement!).getByRole("tooltip")).toHaveTextContent(
+      "Replace file",
+    );
+    fireEvent.mouseLeave(replaceFile.parentElement!);
+    fireEvent.click(replaceFile);
     expect(onAttach).toHaveBeenCalled();
-    fireEvent.click(screen.getByRole("button", { name: "Remove attachment draft.txt" }));
+
+    const remove = screen.getByRole("button", { name: "Remove attachment draft.txt" });
+    expect(remove.textContent?.trim()).toBe("");
+    fireEvent.mouseEnter(remove.parentElement!);
+    expect(within(remove.parentElement!).getByRole("tooltip")).toHaveTextContent("Remove");
+    fireEvent.mouseLeave(remove.parentElement!);
+    fireEvent.click(remove);
     expect(onRemoveAttachment).toHaveBeenCalled();
+  });
+
+  it("exposes idle composer icon actions with accessible names, tooltips, and callbacks", () => {
+    const onAttach = vi.fn();
+    const onAttachFolder = vi.fn();
+    const onSend = vi.fn();
+    render(
+      <AgentWorkspace
+        title="Hello"
+        projectId={null}
+        projects={[]}
+        modelLabel="GPT-5.5"
+        modelOptions={[{ id: "gpt-5.5", displayName: "GPT-5.5" }]}
+        selectedModelId="gpt-5.5"
+        modelLocked={false}
+        onModelChange={() => undefined}
+        turns={[]}
+        draft="Ask"
+        pendingAttachment={null}
+        connected
+        sending={false}
+        sendBlocked={false}
+        cancelRequested={false}
+        activeTurnId={null}
+        errorMessage={null}
+        onDraftChange={vi.fn()}
+        onSend={onSend}
+        onCancel={vi.fn()}
+        onAttach={onAttach}
+        onAttachFolder={onAttachFolder}
+        onRemoveAttachment={vi.fn()}
+        onProjectChange={vi.fn()}
+      />,
+    );
+
+    const attachFile = screen.getByRole("button", { name: "Attach file" });
+    expect(attachFile.textContent?.trim()).toBe("");
+    fireEvent.mouseEnter(attachFile.parentElement!);
+    expect(within(attachFile.parentElement!).getByRole("tooltip")).toHaveTextContent("Attach file");
+    fireEvent.mouseLeave(attachFile.parentElement!);
+    fireEvent.click(attachFile);
+    expect(onAttach).toHaveBeenCalled();
+
+    const attachFolder = screen.getByRole("button", { name: "Attach folder" });
+    fireEvent.mouseEnter(attachFolder.parentElement!);
+    expect(within(attachFolder.parentElement!).getByRole("tooltip")).toHaveTextContent(
+      "Attach folder",
+    );
+    fireEvent.mouseLeave(attachFolder.parentElement!);
+    fireEvent.click(attachFolder);
+    expect(onAttachFolder).toHaveBeenCalled();
+
+    const send = screen.getByRole("button", { name: "Send" });
+    expect(send.textContent?.trim()).toBe("");
+    fireEvent.mouseEnter(send.parentElement!);
+    expect(within(send.parentElement!).getByRole("tooltip")).toHaveTextContent("Send");
+    fireEvent.mouseLeave(send.parentElement!);
+    fireEvent.click(send);
+    expect(onSend).toHaveBeenCalled();
+
+    expect(screen.queryByRole("button", { name: "Open Settings" })).not.toBeInTheDocument();
+  });
+
+  it("keeps Cancel and Sending as visible text while streaming", () => {
+    render(
+      <AgentWorkspace
+        title="Hello"
+        projectId={null}
+        projects={[]}
+        modelLabel="GPT-5.5"
+        modelOptions={[{ id: "gpt-5.5", displayName: "GPT-5.5" }]}
+        selectedModelId="gpt-5.5"
+        modelLocked={false}
+        onModelChange={() => undefined}
+        turns={[baseTurn]}
+        draft="Ask"
+        pendingAttachment={null}
+        connected
+        sending
+        sendBlocked={false}
+        cancelRequested={false}
+        activeTurnId="t1"
+        errorMessage={null}
+        onDraftChange={vi.fn()}
+        onSend={vi.fn()}
+        onCancel={vi.fn()}
+        onAttach={vi.fn()}
+        onAttachFolder={vi.fn()}
+        onRemoveAttachment={vi.fn()}
+        onProjectChange={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: "Cancel" })).toHaveTextContent("Cancel");
+    expect(screen.getByRole("button", { name: "Sending…" })).toHaveTextContent("Sending…");
   });
 
   it("locks attachment actions while a send is in flight", () => {
@@ -169,13 +273,56 @@ describe("AgentWorkspace", () => {
         onAttachFolder={vi.fn()}
         onRemoveAttachment={vi.fn()}
         onProjectChange={vi.fn()}
-        onOpenProvidersSettings={vi.fn()}
       />,
     );
 
-    expect(screen.getByRole("button", { name: "Replace the attached file" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "Replace with a folder" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Replace file" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Replace with folder" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Remove attachment draft.txt" })).toBeDisabled();
+  });
+
+  it("labels cross-kind replace actions when a pending attachment already exists", () => {
+    render(
+      <AgentWorkspace
+        title="Hello"
+        projectId={null}
+        projects={[]}
+        modelLabel="GPT-5.5"
+        modelOptions={[{ id: "gpt-5.5", displayName: "GPT-5.5" }]}
+        selectedModelId="gpt-5.5"
+        modelLocked={false}
+        onModelChange={() => undefined}
+        turns={[]}
+        draft="Ask"
+        pendingAttachment={{
+          draftHandle: "handle",
+          displayName: "draft.txt",
+          byteCount: 4,
+          originKind: "local_text_file",
+          memberCount: 1,
+        }}
+        connected
+        sending={false}
+        sendBlocked={false}
+        cancelRequested={false}
+        activeTurnId={null}
+        errorMessage={null}
+        onDraftChange={vi.fn()}
+        onSend={vi.fn()}
+        onCancel={vi.fn()}
+        onAttach={vi.fn()}
+        onAttachFolder={vi.fn()}
+        onRemoveAttachment={vi.fn()}
+        onProjectChange={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: "Replace file" })).toBeInTheDocument();
+    const replaceWithFolder = screen.getByRole("button", { name: "Replace with folder" });
+    fireEvent.mouseEnter(replaceWithFolder.parentElement!);
+    expect(within(replaceWithFolder.parentElement!).getByRole("tooltip")).toHaveTextContent(
+      "Replace with folder",
+    );
   });
 
   it("hides the empty-session wordmark once a turn exists", () => {
@@ -205,7 +352,6 @@ describe("AgentWorkspace", () => {
         onAttachFolder={vi.fn()}
         onRemoveAttachment={vi.fn()}
         onProjectChange={vi.fn()}
-        onOpenProvidersSettings={vi.fn()}
       />,
     );
 
@@ -241,7 +387,6 @@ describe("AgentWorkspace", () => {
         onAttachFolder={vi.fn()}
         onRemoveAttachment={vi.fn()}
         onProjectChange={vi.fn()}
-        onOpenProvidersSettings={vi.fn()}
       />,
     );
 
@@ -277,7 +422,6 @@ describe("AgentWorkspace", () => {
         onAttachFolder={vi.fn()}
         onRemoveAttachment={vi.fn()}
         onProjectChange={vi.fn()}
-        onOpenProvidersSettings={vi.fn()}
       />,
     );
 
@@ -316,7 +460,6 @@ describe("AgentWorkspace", () => {
         onAttachFolder={vi.fn()}
         onRemoveAttachment={vi.fn()}
         onProjectChange={vi.fn()}
-        onOpenProvidersSettings={vi.fn()}
       />,
     );
 
@@ -355,7 +498,6 @@ describe("AgentWorkspace", () => {
         onAttachFolder={vi.fn()}
         onRemoveAttachment={vi.fn()}
         onProjectChange={vi.fn()}
-        onOpenProvidersSettings={vi.fn()}
       />,
     );
 
@@ -391,7 +533,6 @@ describe("AgentWorkspace", () => {
         onAttachFolder={vi.fn()}
         onRemoveAttachment={vi.fn()}
         onProjectChange={vi.fn()}
-        onOpenProvidersSettings={vi.fn()}
       />,
     );
     expect(metrics.scrollTop).toBe(1200);
@@ -432,7 +573,6 @@ describe("AgentWorkspace", () => {
         onAttachFolder={vi.fn()}
         onRemoveAttachment={vi.fn()}
         onProjectChange={vi.fn()}
-        onOpenProvidersSettings={vi.fn()}
       />,
     );
     expect(metrics.scrollTop).toBe(100);
@@ -473,7 +613,6 @@ describe("AgentWorkspace", () => {
         onAttachFolder={vi.fn()}
         onRemoveAttachment={vi.fn()}
         onProjectChange={vi.fn()}
-        onOpenProvidersSettings={vi.fn()}
       />,
     );
     expect(metrics.scrollTop).toBe(220);
@@ -521,7 +660,6 @@ describe("AgentWorkspace", () => {
         onAttachFolder={vi.fn()}
         onRemoveAttachment={vi.fn()}
         onProjectChange={onProjectChange}
-        onOpenProvidersSettings={vi.fn()}
       />,
     );
 

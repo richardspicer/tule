@@ -1056,7 +1056,6 @@ function App() {
               onRemoveAttachment={() => void handleRemoveAttachment()}
               onProjectChange={(projectId) => void handleChangePersistedProject(projectId)}
               onModelChange={setPendingModelId}
-              onOpenProvidersSettings={() => void openSettingsWindow("providers")}
             />
           )}
         </main>

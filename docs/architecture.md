@@ -102,6 +102,9 @@ members) under a single origin kind distinct from single-file attachments;
 link snapshots use origin kind `remote_text_url` with a one-time native HTTPS
 fetch at attach time (at most five redirect hops to other allowed HTTPS
 targets; loopback, link-local, and private/reserved destinations fail closed).
+Each hop resolves DNS once, rejects any blocked address in the result set, and
+connects through a short-lived client pinned to those validated addresses while
+still using the hostname for TLS SNI and certificate verification.
 Member count, aggregate byte count, canonical URL metadata, and deterministic
 framed content round-trip through SQLite. Provider context includes the current
 Source and Sources from completed prior turns in owning-turn order under prompt

@@ -568,15 +568,23 @@ fn is_allowed_link_content_type(content_type: Option<&str>) -> bool {
     )
 }
 
-fn validate_link_destination(url: &str) -> Result<(), SourceDraftError> {
+fn validate_link_destination(url: &str) -> Result<ValidatedLinkHost, SourceDraftError> {
     let parsed = url::Url::parse(url).map_err(|_| SourceDraftError::Unsupported)?;
     if parsed.scheme() != "https" {
         return Err(SourceDraftError::Unsupported);
     }
-    validate_link_host(parsed.host_str().ok_or(SourceDraftError::Unsupported)?)
+    let host = parsed.host_str().ok_or(SourceDraftError::Unsupported)?;
+    validate_link_host(host)
 }
 
-fn validate_link_host(host: &str) -> Result<(), SourceDraftError> {
+/// DNS-validated connect target for one HTTPS link hop.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ValidatedLinkHost {
+    host: String,
+    allowed_addrs: Vec<std::net::SocketAddr>,
+}
+
+fn validate_link_host(host: &str) -> Result<ValidatedLinkHost, SourceDraftError> {
     let normalized = host.trim_end_matches('.').to_ascii_lowercase();
     if normalized.is_empty() {
         return Err(SourceDraftError::Unsupported);
@@ -585,43 +593,65 @@ fn validate_link_host(host: &str) -> Result<(), SourceDraftError> {
         return Err(SourceDraftError::Unsupported);
     }
     if let Ok(ip) = normalized.parse::<std::net::IpAddr>() {
-        return if is_blocked_ip(ip) {
-            Err(SourceDraftError::Unsupported)
-        } else {
-            Ok(())
-        };
+        if is_blocked_ip(ip) {
+            return Err(SourceDraftError::Unsupported);
+        }
+        return Ok(ValidatedLinkHost {
+            host: normalized,
+            allowed_addrs: vec![std::net::SocketAddr::new(ip, 443)],
+        });
     }
     if normalized.starts_with('[') && normalized.ends_with(']') {
         let inner = &normalized[1..normalized.len() - 1];
         if let Ok(ip) = inner.parse::<std::net::IpAddr>() {
-            return if is_blocked_ip(ip) {
-                Err(SourceDraftError::Unsupported)
-            } else {
-                Ok(())
-            };
+            if is_blocked_ip(ip) {
+                return Err(SourceDraftError::Unsupported);
+            }
+            return Ok(ValidatedLinkHost {
+                host: normalized,
+                allowed_addrs: vec![std::net::SocketAddr::new(ip, 443)],
+            });
         }
     }
-    resolve_and_validate_host(&normalized)
+    let allowed_addrs = resolve_and_validate_host(&normalized)?;
+    Ok(ValidatedLinkHost {
+        host: normalized,
+        allowed_addrs,
+    })
 }
 
-fn resolve_and_validate_host(host: &str) -> Result<(), SourceDraftError> {
+fn resolve_and_validate_host(host: &str) -> Result<Vec<std::net::SocketAddr>, SourceDraftError> {
     use std::net::ToSocketAddrs;
     let authority = format!("{host}:443");
     let mut addresses = authority
         .to_socket_addrs()
         .map_err(|_| SourceDraftError::Unsupported)?;
-    let Some(first) = addresses.next() else {
-        return Err(SourceDraftError::Unsupported);
-    };
+    let first = addresses.next().ok_or(SourceDraftError::Unsupported)?;
+    let mut allowed_addrs = Vec::new();
     if is_blocked_ip(first.ip()) {
         return Err(SourceDraftError::Unsupported);
     }
+    allowed_addrs.push(first);
     for address in addresses {
         if is_blocked_ip(address.ip()) {
             return Err(SourceDraftError::Unsupported);
         }
+        allowed_addrs.push(address);
     }
-    Ok(())
+    Ok(allowed_addrs)
+}
+
+fn build_pinned_https_client(
+    host: &str,
+    allowed_addrs: &[std::net::SocketAddr],
+) -> Result<reqwest::blocking::Client, SourceDraftError> {
+    reqwest::blocking::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(std::time::Duration::from_secs(30))
+        .https_only(true)
+        .resolve_to_addrs(host, allowed_addrs)
+        .build()
+        .map_err(|_| SourceDraftError::Unreadable)
 }
 
 fn is_blocked_ip(ip: std::net::IpAddr) -> bool {
@@ -729,23 +759,21 @@ fn link_hop_from_response(
 }
 
 /// Production HTTPS fetcher with redirect validation and a fixed redirect budget.
-#[derive(Debug)]
-pub(crate) struct NativeSourceUrlFetcher {
-    client: reqwest::blocking::Client,
-}
+#[derive(Debug, Default)]
+pub(crate) struct NativeSourceUrlFetcher;
 
 impl NativeSourceUrlFetcher {
     pub(crate) fn new() -> Result<Self, SourceDraftError> {
-        let client = reqwest::blocking::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .timeout(std::time::Duration::from_secs(30))
-            .build()
-            .map_err(|_| SourceDraftError::Unreadable)?;
-        Ok(Self { client })
+        Ok(Self)
     }
 
     fn fetch_once(&self, url: &str) -> Result<reqwest::blocking::Response, SourceDraftError> {
-        self.client
+        let ValidatedLinkHost {
+            host,
+            allowed_addrs,
+        } = validate_link_destination(url)?;
+        let client = build_pinned_https_client(&host, &allowed_addrs)?;
+        client
             .get(url)
             .send()
             .map_err(|_| SourceDraftError::Unreadable)
@@ -760,7 +788,6 @@ impl SourceUrlFetcher for NativeSourceUrlFetcher {
 
 impl SourceUrlHopFetcher for NativeSourceUrlFetcher {
     fn fetch_hop(&self, url: &str) -> Result<LinkHopOutcome, SourceDraftError> {
-        validate_link_destination(url)?;
         link_hop_from_response(self.fetch_once(url)?)
     }
 }
@@ -1321,6 +1348,7 @@ mod tests {
             "https://192.168.0.1/a.txt",
             "https://10.0.0.1/a.txt",
             "https://[::ffff:127.0.0.1]/a.txt",
+            "https:///path.txt",
             "file:///etc/passwd",
         ] {
             assert!(
@@ -1450,5 +1478,18 @@ mod tests {
             capture_link_source(&store, start, &exhausted),
             Err(SourceDraftError::Unsupported)
         ));
+    }
+
+    #[test]
+    fn validate_link_destination_pins_literal_public_addresses() {
+        let validated = validate_link_destination("https://93.184.216.34/example.txt").unwrap();
+        assert_eq!(validated.host, "93.184.216.34");
+        assert_eq!(validated.allowed_addrs.len(), 1);
+        assert_eq!(validated.allowed_addrs[0].port(), 443);
+        assert_eq!(
+            validated.allowed_addrs[0].ip(),
+            std::net::IpAddr::V4(std::net::Ipv4Addr::new(93, 184, 216, 34))
+        );
+        assert!(build_pinned_https_client(&validated.host, &validated.allowed_addrs).is_ok());
     }
 }

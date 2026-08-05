@@ -224,10 +224,25 @@ function hasExactKeys(record: Record<string, unknown>, allowed: readonly string[
 }
 
 function isCanonicalHttpsUrl(value: string): boolean {
-  if (value.length === 0 || value.length > MAX_CANONICAL_URL_UTF8) {
+  if (value.length === 0) {
+    return false;
+  }
+  const utf8Length = new TextEncoder().encode(value).length;
+  if (utf8Length > MAX_CANONICAL_URL_UTF8) {
     return false;
   }
   if (!value.startsWith("https://")) {
+    return false;
+  }
+  const afterScheme = value.slice("https://".length);
+  const hostEnd = (() => {
+    const slash = afterScheme.indexOf("/");
+    const query = afterScheme.indexOf("?");
+    const fragment = afterScheme.indexOf("#");
+    const candidates = [slash, query, fragment].filter((index) => index !== -1);
+    return candidates.length === 0 ? afterScheme.length : Math.min(...candidates);
+  })();
+  if (afterScheme.slice(0, hostEnd).length === 0) {
     return false;
   }
   if (value.includes("@")) {

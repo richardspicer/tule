@@ -98,6 +98,8 @@ describe("agents platform", () => {
       { ...validSource, path: "C:\\\\secret" },
       { ...validLinkSource, canonicalUrl: null },
       { ...validLinkSource, canonicalUrl: "http://example.com/readme.txt" },
+      { ...validLinkSource, canonicalUrl: "https:///readme.txt" },
+      { ...validLinkSource, canonicalUrl: "https://example.com/" + "\u{10000}".repeat(513) },
       { ...validSource, canonicalUrl: "https://example.com/readme.txt" },
       { ...validFolderSource, canonicalUrl: "https://example.com/readme.txt" },
       {
@@ -401,6 +403,16 @@ describe("agents platform", () => {
         ...linkPickBase,
         originKind: "remote_text_url",
         canonicalUrl: "http://example.com/readme.txt",
+      },
+      {
+        ...linkPickBase,
+        originKind: "remote_text_url",
+        canonicalUrl: "https:///readme.txt",
+      },
+      {
+        ...linkPickBase,
+        originKind: "remote_text_url",
+        canonicalUrl: "https://example.com/" + "\u{10000}".repeat(513),
       },
       {
         ...linkPickBase,

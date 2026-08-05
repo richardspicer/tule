@@ -95,6 +95,7 @@ pub(crate) struct AgentState {
     pub(crate) provider: Arc<dyn ProviderAdapter>,
     pub(crate) xai: Option<Arc<crate::xai_subscription::XaiSubscriptionAdapter>>,
     pub(crate) source_drafts: Arc<SourceDraftStore>,
+    source_url_fetcher: Arc<NativeSourceUrlFetcher>,
     operation_gate: Arc<OperationGate>,
     cancellation: Arc<Mutex<Option<(String, CancellationToken)>>>,
 }
@@ -138,6 +139,9 @@ impl AgentState {
             provider,
             xai,
             source_drafts: Arc::new(SourceDraftStore::new()),
+            source_url_fetcher: Arc::new(
+                NativeSourceUrlFetcher::new().expect("native link fetcher initialization"),
+            ),
             operation_gate: Arc::new(OperationGate::default()),
             cancellation: Arc::new(Mutex::new(None)),
         }
@@ -527,10 +531,10 @@ pub(crate) async fn attach_agent_text_link_source(
     require_main_window(&webview)?;
     let _operation = begin_draft_mutation(&state)?;
     let drafts = Arc::clone(&state.source_drafts);
+    let fetcher = Arc::clone(&state.source_url_fetcher);
     let trimmed = url.trim().to_owned();
     let outcome = tauri::async_runtime::spawn_blocking(move || {
-        let fetcher = NativeSourceUrlFetcher::new()?;
-        capture_link_source(&drafts, &trimmed, &fetcher)
+        capture_link_source(&drafts, &trimmed, fetcher.as_ref())
     })
     .await
     .map_err(|_| AgentIpcError::SourceUnreadable)??;

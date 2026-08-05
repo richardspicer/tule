@@ -445,6 +445,12 @@ pub fn validate_canonical_https_url(url: &str) -> Result<(), SourceValidationErr
     if after_scheme.is_empty() {
         return Err(SourceValidationError::InvalidCanonicalUrl);
     }
+    let host_end = after_scheme
+        .find(['/', '?', '#'])
+        .unwrap_or(after_scheme.len());
+    if after_scheme[..host_end].is_empty() {
+        return Err(SourceValidationError::InvalidCanonicalUrl);
+    }
     if after_scheme.contains('@') {
         return Err(SourceValidationError::InvalidCanonicalUrl);
     }
@@ -1042,6 +1048,20 @@ mod tests {
         assert_eq!(&framed[payload_start..], content);
         assert!(framed.starts_with("Ask about the file\n\ntule-attached-source-v1\n"));
         assert_eq!(framed.matches("content-bytes:").count(), 2);
+    }
+
+    #[test]
+    fn validate_canonical_https_url_rejects_empty_host() {
+        for url in ["https://", "https:///path", "https://?q", "https://#f"] {
+            assert!(
+                matches!(
+                    validate_canonical_https_url(url),
+                    Err(SourceValidationError::InvalidCanonicalUrl)
+                ),
+                "expected rejection for {url}"
+            );
+        }
+        assert!(validate_canonical_https_url("https://example.com/path").is_ok());
     }
 
     #[test]

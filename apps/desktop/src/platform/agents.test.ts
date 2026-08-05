@@ -205,7 +205,11 @@ describe("agents platform", () => {
       { ...validEvent, turnId: "01900000-0000-4000-8000-000000000011" },
       { ...validEvent, sequence: -1 },
       { ...validEvent, sequence: 1.5 },
+      { ...validEvent, sequence: Number.MAX_SAFE_INTEGER + 1 },
       { ...validEvent, createdAtUnixMs: 1.5 },
+      { ...validEvent, createdAtUnixMs: -1 },
+      { ...validEvent, createdAtUnixMs: Number.MAX_SAFE_INTEGER + 1 },
+      { ...validEvent, createdAtUnixMs: 8_640_000_000_000_001 },
       { ...validEvent, payload: "secret" },
       {
         id: validEvent.id,

@@ -211,6 +211,8 @@ const EVENT_METADATA_KEYS = [
   "sessionId",
   "turnId",
 ] as const;
+/** ECMAScript Date time-value maximum (ms since Unix epoch). */
+const MAX_DATE_UNIX_MS = 8_640_000_000_000_000;
 
 function isUuidV7(value: string): boolean {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(value);
@@ -348,11 +350,16 @@ function isAgentEventKind(value: unknown): value is AgentEventKind {
 }
 
 function isEventSequence(value: unknown): value is number {
-  return typeof value === "number" && Number.isInteger(value) && value >= 0;
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 }
 
 function isEventTimestamp(value: unknown): value is number {
-  return typeof value === "number" && Number.isInteger(value);
+  return (
+    typeof value === "number" &&
+    Number.isSafeInteger(value) &&
+    value >= 0 &&
+    value <= MAX_DATE_UNIX_MS
+  );
 }
 
 function isAgentEvent(value: unknown): value is AgentEvent {

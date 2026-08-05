@@ -43,11 +43,12 @@ These instructions apply to the entire repository.
 
 ## Public Change History
 
-- Open authorized pull requests ready for review. TULE's GitHub automation may
-  request automated review when a pull request is created; that CI review bot is
-  not the primary implementation environment. Create a draft only when the user
-  explicitly requests one; this repository rule overrides generic
-  publishing-workflow defaults.
+- Open authorized pull requests when publication is granted. Draft pull requests
+  are permitted and may be used so automated review (including Copilot) can run
+  before the PR is marked ready for human review or merge. Ready-for-review and
+  draft are both valid publication states; choose draft when early automated
+  review is useful. GitHub automation and CI review bots are not the primary
+  implementation environment.
 - Prefer a short product-facing pull-request description: what changed, why it
   was needed, user or developer impact, and the concise verification outcome.
   Mention every new dependency and any material permission, persistence,

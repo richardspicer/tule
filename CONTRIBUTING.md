@@ -63,5 +63,5 @@ concise verification outcome. Call out new dependencies, Tauri permissions,
 persistence changes, credential handling, or changes to a trust boundary. Do
 not add Test plan or Verification checklist sections, command lists, artifact
 paths, or private planning material. Avoid promotional language. Never commit
-credentials or machine-specific paths. Create a draft pull request only when
-the owner explicitly asks for one.
+credentials or machine-specific paths. Draft pull requests are permitted and may
+be used so automated review can run before the pull request is marked ready.

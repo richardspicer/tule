@@ -28,7 +28,7 @@ Authoritative process lives in the TULE vault: `Project Governance`, the active 
    - Follow the Brief's **Git publication** line exactly (`NOT AUTHORIZED` / `COMMIT ONLY` / `COMMIT AND PUSH NAMED BRANCH`)
    - Builder/implementer never creates or edits pull requests, PR metadata, or review threads
    - Return a private handoff: branch, commit, verification result, artifact/owner checklist if required, deviations/blockers
-7. Pull-request creation is a **separate** owner/Lead gate after handoff. When authorized, publish a review-ready PR with a short product-facing paragraph only (no Test plan / Verification sections; no file paths; no private handoff dump). Do not merge unless separately authorized.
+7. Pull-request creation is a **separate** owner/Lead gate after handoff. When authorized, open the PR with a short product-facing paragraph only (no Test plan / Verification sections; no file paths; no private handoff dump). Draft PRs are permitted and preferred when automated review should run before ready-for-review. Do not merge unless separately authorized.
 
 ## Do not
 

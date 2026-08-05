@@ -19,7 +19,7 @@ describe("chrome and transcript icons", () => {
 
     const settings = screen.getByRole("button", { name: "Settings" });
     expect(settings.querySelector("svg")).toHaveAttribute("aria-hidden", "true");
-    expect(settings.querySelector("svg")).toHaveAttribute("viewBox", "0 0 16 16");
+    expect(settings.querySelector("svg")).toHaveAttribute("viewBox", "0 0 20 20");
     expect(settings).not.toHaveTextContent(/gear|settings/i);
 
     fireEvent.mouseEnter(settings.parentElement!);
@@ -45,11 +45,11 @@ describe("chrome and transcript icons", () => {
     expect(control.parentElement).toHaveAttribute("data-tooltip-align", "end");
   });
 
-  it("renders the Settings gear with the shared 16px icon contract", () => {
+  it("renders the Settings gear with the shared 20px icon contract", () => {
     const { container } = render(<SettingsIcon />);
     const svg = container.querySelector("svg");
-    expect(svg).toHaveAttribute("width", "16");
-    expect(svg).toHaveAttribute("height", "16");
+    expect(svg).toHaveAttribute("width", "20");
+    expect(svg).toHaveAttribute("height", "20");
     expect(svg).toHaveAttribute("aria-hidden", "true");
     expect(svg?.querySelector("circle")).toBeTruthy();
     expect(svg?.querySelector("path")).toHaveAttribute("stroke-width", "1.5");
@@ -59,11 +59,11 @@ describe("chrome and transcript icons", () => {
     const { container } = render(<SettingsIcon />);
     const svg = container.querySelector("svg");
     expect(svg).not.toBeNull();
-    expect(svg).toHaveAttribute("viewBox", "0 0 16 16");
+    expect(svg).toHaveAttribute("viewBox", "0 0 20 20");
 
     const bounds = settingsIconStrokedBounds(svg!);
     expect(bounds.min).toBeGreaterThanOrEqual(SETTINGS_ICON_EDGE_PADDING);
-    expect(bounds.max).toBeLessThanOrEqual(16 - SETTINGS_ICON_EDGE_PADDING);
+    expect(bounds.max).toBeLessThanOrEqual(20 - SETTINGS_ICON_EDGE_PADDING);
   });
 });
 
@@ -73,12 +73,12 @@ describe("composer icons", () => {
     ["Attach file", AttachFileIcon],
     ["Attach folder", AttachFolderIcon],
     ["Remove", RemoveIcon],
-  ] as const)("renders the %s icon at 16×16 with decorative SVG", (_label, Icon) => {
+  ] as const)("renders the %s icon at 20×20 with decorative SVG", (_label, Icon) => {
     const { container } = render(<Icon />);
     const svg = container.querySelector("svg");
-    expect(svg).toHaveAttribute("width", "16");
-    expect(svg).toHaveAttribute("height", "16");
-    expect(svg).toHaveAttribute("viewBox", "0 0 16 16");
+    expect(svg).toHaveAttribute("width", "20");
+    expect(svg).toHaveAttribute("height", "20");
+    expect(svg).toHaveAttribute("viewBox", "0 0 20 20");
     expect(svg).toHaveAttribute("aria-hidden", "true");
     expect(svg?.querySelector("path")).toHaveAttribute("stroke-width", "1.5");
   });

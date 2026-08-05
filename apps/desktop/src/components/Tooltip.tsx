@@ -1,4 +1,4 @@
-import { useId, useState, type ReactNode } from "react";
+import { useEffect, useId, useState, type ReactNode } from "react";
 
 export type TooltipAlign = "start" | "center" | "end";
 
@@ -11,6 +11,24 @@ interface TooltipProps {
 export function Tooltip({ label, align = "center", children }: TooltipProps) {
   const tooltipId = useId();
   const [visible, setVisible] = useState(false);
+
+  useEffect(() => {
+    if (!visible) {
+      return;
+    }
+
+    const dismiss = () => setVisible(false);
+
+    window.addEventListener("blur", dismiss);
+    window.addEventListener("pointercancel", dismiss);
+    document.addEventListener("visibilitychange", dismiss);
+
+    return () => {
+      window.removeEventListener("blur", dismiss);
+      window.removeEventListener("pointercancel", dismiss);
+      document.removeEventListener("visibilitychange", dismiss);
+    };
+  }, [visible]);
 
   return (
     <span

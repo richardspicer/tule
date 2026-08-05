@@ -37,6 +37,26 @@ const validSource = {
   canonicalUrl: null,
 };
 
+const validSessionDetail = {
+  session: {
+    id: "01900000-0000-7000-8000-000000000010",
+    title: "Hello",
+    projectId: null,
+    modelId: "gpt-5.5",
+  },
+  turns: [] as const,
+  events: [] as const,
+};
+
+const validEvent = {
+  id: "01900000-0000-7000-8000-000000000020",
+  sessionId: validSessionDetail.session.id,
+  turnId: "01900000-0000-7000-8000-000000000011",
+  sequence: 2,
+  kind: "turn_cancelled" as const,
+  createdAtUnixMs: 1_700_000_000_000,
+};
+
 const validFolderSource = {
   ...validSource,
   originKind: "local_text_folder" as const,
@@ -121,12 +141,7 @@ describe("agents platform", () => {
       })),
     ]) {
       invokeMock.mockResolvedValueOnce({
-        session: {
-          id: "s1",
-          title: "Hello",
-          projectId: null,
-          modelId: "gpt-5.5",
-        },
+        ...validSessionDetail,
         turns: [
           {
             id: "t1",
@@ -138,7 +153,7 @@ describe("agents platform", () => {
         ],
       });
 
-      await expect(getAgentSession("s1")).rejects.toMatchObject({
+      await expect(getAgentSession(validSessionDetail.session.id)).rejects.toMatchObject({
         code: "agent_storage_unavailable",
       });
     }
@@ -146,12 +161,7 @@ describe("agents platform", () => {
 
   it("accepts allowlisted source metadata on reopened turns", async () => {
     invokeMock.mockResolvedValue({
-      session: {
-        id: "s1",
-        title: "Hello",
-        projectId: null,
-        modelId: "gpt-5.5",
-      },
+      ...validSessionDetail,
       turns: [
         {
           id: "t1",
@@ -165,8 +175,60 @@ describe("agents platform", () => {
       ],
     });
 
-    const detail = await getAgentSession("s1");
+    const detail = await getAgentSession(validSessionDetail.session.id);
     expect(detail.turns[0]?.sources).toEqual([validSource, validLinkSource]);
+  });
+
+  it("accepts allowlisted session events and rejects unknown kinds or malformed objects", async () => {
+    invokeMock.mockResolvedValue({
+      ...validSessionDetail,
+      events: [
+        {
+          id: "01900000-0000-7000-8000-000000000021",
+          sessionId: validSessionDetail.session.id,
+          turnId: null,
+          sequence: 0,
+          kind: "session_created",
+          createdAtUnixMs: 1_700_000_000_000,
+        },
+        validEvent,
+      ],
+    });
+
+    const detail = await getAgentSession(validSessionDetail.session.id);
+    expect(detail.events).toHaveLength(2);
+    expect(detail.events[1]?.kind).toBe("turn_cancelled");
+
+    const hostileEvents = [
+      { ...validEvent, kind: "turn_archived" },
+      { ...validEvent, id: "not-a-uuid" },
+      { ...validEvent, turnId: "01900000-0000-4000-8000-000000000011" },
+      { ...validEvent, sequence: -1 },
+      { ...validEvent, sequence: 1.5 },
+      { ...validEvent, sequence: Number.MAX_SAFE_INTEGER + 1 },
+      { ...validEvent, createdAtUnixMs: 1.5 },
+      { ...validEvent, createdAtUnixMs: -1 },
+      { ...validEvent, createdAtUnixMs: Number.MAX_SAFE_INTEGER + 1 },
+      { ...validEvent, createdAtUnixMs: 8_640_000_000_000_001 },
+      { ...validEvent, payload: "secret" },
+      {
+        id: validEvent.id,
+        sessionId: validEvent.sessionId,
+        turnId: validEvent.turnId,
+        sequence: validEvent.sequence,
+        kind: validEvent.kind,
+      },
+    ];
+
+    for (const event of hostileEvents) {
+      invokeMock.mockResolvedValueOnce({
+        ...validSessionDetail,
+        events: [event],
+      });
+      await expect(getAgentSession(validSessionDetail.session.id)).rejects.toMatchObject({
+        code: "agent_storage_unavailable",
+      });
+    }
   });
 
   it("sends through a typed channel and preserves event order", async () => {

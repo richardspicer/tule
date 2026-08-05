@@ -1,7 +1,7 @@
 import { fireEvent, render, screen, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { AgentWorkspace, COMPOSER_MAX_HEIGHT_PX, COMPOSER_MIN_HEIGHT_PX } from "./AgentWorkspace";
-import type { AgentTurn } from "../platform/agents";
+import type { AgentEvent, AgentTurn } from "../platform/agents";
 
 function stubTranscriptMetrics(
   transcript: HTMLElement,
@@ -34,6 +34,33 @@ const baseTurn: AgentTurn = {
   sources: [],
 };
 
+const baseEvents: AgentEvent[] = [
+  {
+    id: "01900000-0000-7000-8000-000000000020",
+    sessionId: "01900000-0000-7000-8000-000000000010",
+    turnId: null,
+    sequence: 0,
+    kind: "session_created",
+    createdAtUnixMs: 1_700_000_000_000,
+  },
+  {
+    id: "01900000-0000-7000-8000-000000000021",
+    sessionId: "01900000-0000-7000-8000-000000000010",
+    turnId: "t1",
+    sequence: 1,
+    kind: "turn_pending",
+    createdAtUnixMs: 1_700_000_000_001,
+  },
+  {
+    id: "01900000-0000-7000-8000-000000000022",
+    sessionId: "01900000-0000-7000-8000-000000000010",
+    turnId: "t1",
+    sequence: 2,
+    kind: "turn_completed",
+    createdAtUnixMs: 1_700_000_000_002,
+  },
+];
+
 describe("AgentWorkspace", () => {
   it("blocks composer when disconnected with a message-only prompt", () => {
     render(
@@ -47,6 +74,7 @@ describe("AgentWorkspace", () => {
         modelLocked={false}
         onModelChange={() => undefined}
         turns={[]}
+        events={[]}
         draft=""
         pendingAttachment={null}
         connected={false}
@@ -70,6 +98,45 @@ describe("AgentWorkspace", () => {
     expect(screen.getByText("Add a Provider to get started.")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Open Settings" })).not.toBeInTheDocument();
     expect(screen.getByText("Provider")).toBeInTheDocument();
+  });
+
+  it("renders a collapsible Activity list keyed by event id with turn association", () => {
+    render(
+      <AgentWorkspace
+        title="Hello"
+        projectId={null}
+        projects={[]}
+        modelLabel="GPT-5.5"
+        modelOptions={[{ id: "gpt-5.5", displayName: "GPT-5.5" }]}
+        selectedModelId="gpt-5.5"
+        modelLocked={false}
+        onModelChange={() => undefined}
+        turns={[baseTurn]}
+        events={baseEvents}
+        draft=""
+        pendingAttachment={null}
+        connected
+        sending={false}
+        sendBlocked={false}
+        cancelRequested={false}
+        activeTurnId={null}
+        errorMessage={null}
+        onDraftChange={vi.fn()}
+        onSend={vi.fn()}
+        onCancel={vi.fn()}
+        onAttach={vi.fn()}
+        onAttachFolder={vi.fn()}
+        onAttachLink={vi.fn()}
+        onRemoveAttachment={vi.fn()}
+        onProjectChange={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("Activity")).toBeInTheDocument();
+    expect(screen.getByText("Session created")).toBeInTheDocument();
+    expect(screen.getByText("Turn completed")).toBeInTheDocument();
+    expect(screen.getAllByText("Turn 1").length).toBeGreaterThan(0);
+    expect(screen.getByText("Hi")).toBeInTheDocument();
   });
 
   it("exposes attachment controls and transcript metadata accessibly", () => {
@@ -101,6 +168,7 @@ describe("AgentWorkspace", () => {
             ],
           },
         ]}
+        events={[]}
         draft="Ask"
         pendingAttachment={{
           draftHandle: "handle",
@@ -164,6 +232,7 @@ describe("AgentWorkspace", () => {
         modelLocked={false}
         onModelChange={() => undefined}
         turns={[]}
+        events={[]}
         draft="Ask"
         pendingAttachment={null}
         connected
@@ -225,6 +294,7 @@ describe("AgentWorkspace", () => {
         modelLocked={false}
         onModelChange={() => undefined}
         turns={[]}
+        events={[]}
         draft="Ask with context"
         pendingAttachment={null}
         connected
@@ -266,6 +336,7 @@ describe("AgentWorkspace", () => {
         modelLocked={false}
         onModelChange={() => undefined}
         turns={[baseTurn]}
+        events={[]}
         draft="Ask"
         pendingAttachment={null}
         connected
@@ -301,6 +372,7 @@ describe("AgentWorkspace", () => {
         modelLocked={false}
         onModelChange={() => undefined}
         turns={[baseTurn]}
+        events={[]}
         draft="Ask"
         pendingAttachment={{
           draftHandle: "handle",
@@ -344,6 +416,7 @@ describe("AgentWorkspace", () => {
         modelLocked={false}
         onModelChange={() => undefined}
         turns={[]}
+        events={[]}
         draft="Ask"
         pendingAttachment={{
           draftHandle: "handle",
@@ -390,6 +463,7 @@ describe("AgentWorkspace", () => {
         modelLocked={false}
         onModelChange={() => undefined}
         turns={[baseTurn]}
+        events={[]}
         draft=""
         pendingAttachment={null}
         connected
@@ -426,6 +500,7 @@ describe("AgentWorkspace", () => {
         modelLocked={false}
         onModelChange={() => undefined}
         turns={[{ ...baseTurn, state: "streaming", agentText: "Hel" }]}
+        events={[]}
         draft="Next"
         pendingAttachment={null}
         connected
@@ -462,6 +537,7 @@ describe("AgentWorkspace", () => {
         modelLocked={false}
         onModelChange={() => undefined}
         turns={[{ ...baseTurn, state: "streaming", agentText: "Hello" }]}
+        events={[]}
         draft=""
         pendingAttachment={null}
         connected
@@ -501,6 +577,7 @@ describe("AgentWorkspace", () => {
         modelLocked={false}
         onModelChange={() => undefined}
         turns={[]}
+        events={[]}
         draft={"line\n".repeat(20)}
         pendingAttachment={null}
         connected
@@ -540,6 +617,7 @@ describe("AgentWorkspace", () => {
         modelLocked={false}
         onModelChange={() => undefined}
         turns={[{ ...baseTurn, state: "streaming", agentText: "Hello" }]}
+        events={[]}
         draft=""
         pendingAttachment={null}
         connected
@@ -576,6 +654,7 @@ describe("AgentWorkspace", () => {
         modelLocked={false}
         onModelChange={() => undefined}
         turns={[{ ...baseTurn, state: "streaming", agentText: "Hello there" }]}
+        events={[]}
         draft=""
         pendingAttachment={null}
         connected
@@ -617,6 +696,7 @@ describe("AgentWorkspace", () => {
         modelLocked={false}
         onModelChange={() => undefined}
         turns={[{ ...baseTurn, state: "streaming", agentText: "Hello there friend" }]}
+        events={[]}
         draft=""
         pendingAttachment={null}
         connected
@@ -658,6 +738,7 @@ describe("AgentWorkspace", () => {
         modelLocked={false}
         onModelChange={() => undefined}
         turns={[{ ...baseTurn, state: "completed", agentText: "Hello there friend" }]}
+        events={[]}
         draft=""
         pendingAttachment={null}
         connected
@@ -706,6 +787,7 @@ describe("AgentWorkspace", () => {
             sources: [],
           },
         ]}
+        events={[]}
         draft=""
         pendingAttachment={null}
         connected

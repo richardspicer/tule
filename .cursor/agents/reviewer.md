@@ -1,7 +1,8 @@
 ---
 name: reviewer
 description: Review just-implemented or PR-diff TULE code for placeholders, missing exports, trust-boundary breaks, architecture violations, and failed acceptance criteria. Use after implementer runs or when validating a pull request.
-model: composer-2.5
+model: composer-2.5[fast=false]
+force-default-model: true
 readonly: true
 ---
 

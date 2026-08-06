@@ -1,7 +1,8 @@
 ---
 name: implementer
 description: Implement a scoped TULE change from a brief or lead instructions. Use for code generation and for applying review feedback. Prefer this over exploring when the write set and acceptance criteria are already clear.
-model: composer-2.5
+model: cursor-grok-4.5-high
+force-default-model: true
 ---
 
 

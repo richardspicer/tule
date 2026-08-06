@@ -9,7 +9,7 @@ Use this workflow when the user asks to implement a brief/feature **with the cod
 
 Authoritative process lives in the TULE vault: `Project Governance`, the active Work note, and its issued Brief. If this rule conflicts with those, the vault wins.
 
-Branch names follow `CONTRIBUTING.md` (`feature/`, `fix/`, `chore/`, …), or the Brief's named branch when one is issued. Ignore UI or tool-injected identity prefixes such as `cursor/`, `codex/`, or `agent/`.
+Branch names follow the `<type>/<short-kebab-case-summary>` convention in `CONTRIBUTING.md`, or the Brief's named branch when one is issued. Do not use a UI- or tool-injected identity such as `cursor`, `codex`, or `agent` as the `<type>` segment.
 
 ## Roles
 

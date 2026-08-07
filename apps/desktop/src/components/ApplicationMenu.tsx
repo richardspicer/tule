@@ -85,7 +85,6 @@ export function ApplicationMenu({ open, onOpenChange, onCommand }: ApplicationMe
   const [availability, setAvailability] = useState(closedAvailability);
   const [activeIndex, setActiveIndex] = useState(0);
   const activeIndexRef = useRef(activeIndex);
-  activeIndexRef.current = activeIndex;
   const flatItems = flattenItems(availability);
 
   useEffect(() => {
@@ -154,13 +153,17 @@ export function ApplicationMenu({ open, onOpenChange, onCommand }: ApplicationMe
 
       if (event.key === "ArrowDown") {
         event.preventDefault();
-        setActiveIndex((current) => (current + 1) % items.length);
+        const next = (activeIndexRef.current + 1) % items.length;
+        activeIndexRef.current = next;
+        setActiveIndex(next);
         return;
       }
 
       if (event.key === "ArrowUp") {
         event.preventDefault();
-        setActiveIndex((current) => (current - 1 + items.length) % items.length);
+        const next = (activeIndexRef.current - 1 + items.length) % items.length;
+        activeIndexRef.current = next;
+        setActiveIndex(next);
         return;
       }
 
@@ -217,6 +220,7 @@ export function ApplicationMenu({ open, onOpenChange, onCommand }: ApplicationMe
             const target = preserved !== null && document.contains(preserved) ? preserved : null;
             editTargetRef.current = target;
             setAvailability(queryEditCommandAvailability(target));
+            activeIndexRef.current = 0;
             setActiveIndex(0);
             onOpenChange(true);
           }}
@@ -251,7 +255,10 @@ export function ApplicationMenu({ open, onOpenChange, onCommand }: ApplicationMe
                     role="menuitem"
                     disabled={item.disabled}
                     tabIndex={flatIndex === activeIndex ? 0 : -1}
-                    onMouseEnter={() => setActiveIndex(flatIndex)}
+                    onMouseEnter={() => {
+                      activeIndexRef.current = flatIndex;
+                      setActiveIndex(flatIndex);
+                    }}
                     onMouseDown={(event) => {
                       // Keep the preserved editable field focused for truthful Edit actions.
                       event.preventDefault();

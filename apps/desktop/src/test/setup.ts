@@ -46,14 +46,13 @@ function isUnexpectedReactConsoleTraffic(args: unknown[]): boolean {
   );
 }
 
-let consoleErrorSpy: ReturnType<typeof vi.spyOn> | undefined;
-let consoleWarnSpy: ReturnType<typeof vi.spyOn> | undefined;
+let restoreConsoleSpies: (() => void) | undefined;
 
 beforeAll(() => {
   const originalError = console.error.bind(console);
   const originalWarn = console.warn.bind(console);
 
-  consoleErrorSpy = vi.spyOn(console, "error").mockImplementation((...args: unknown[]) => {
+  const consoleErrorSpy = vi.spyOn(console, "error").mockImplementation((...args: unknown[]) => {
     if (isUnexpectedReactConsoleTraffic(args)) {
       throw new Error(
         `Unexpected React console.error in tests:\n${args
@@ -64,7 +63,7 @@ beforeAll(() => {
     originalError(...args);
   });
 
-  consoleWarnSpy = vi.spyOn(console, "warn").mockImplementation((...args: unknown[]) => {
+  const consoleWarnSpy = vi.spyOn(console, "warn").mockImplementation((...args: unknown[]) => {
     if (isUnexpectedReactConsoleTraffic(args)) {
       throw new Error(
         `Unexpected React console.warn in tests:\n${args
@@ -74,11 +73,15 @@ beforeAll(() => {
     }
     originalWarn(...args);
   });
+
+  restoreConsoleSpies = () => {
+    consoleErrorSpy.mockRestore();
+    consoleWarnSpy.mockRestore();
+  };
 });
 
 afterAll(() => {
-  consoleErrorSpy?.mockRestore();
-  consoleWarnSpy?.mockRestore();
+  restoreConsoleSpies?.();
 });
 
 afterEach(() => {

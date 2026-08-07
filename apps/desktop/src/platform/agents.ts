@@ -473,7 +473,7 @@ function isAgentTurnMetricsExport(value: unknown): value is AgentTurnMetricsExpo
     isUuidV7(record.session_id) &&
     typeof record.ordinal === "number" &&
     Number.isSafeInteger(record.ordinal) &&
-    record.ordinal >= 1 &&
+    record.ordinal >= 0 &&
     typeof record.state === "string" &&
     agentTurnStates.includes(record.state as AgentTurnState) &&
     typeof record.provider_profile_id === "string" &&

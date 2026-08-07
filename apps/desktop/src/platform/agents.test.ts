@@ -819,6 +819,15 @@ describe("agents platform", () => {
       effort: "medium",
     });
 
+    // First turn in a session is ordinal 0 (repository next_turn_ordinal).
+    invokeMock.mockResolvedValueOnce({
+      ...validTurnMetricsExport,
+      ordinal: 0,
+    });
+    await expect(exportAgentTurnMetrics(validTurnMetricsExport.turn_id)).resolves.toMatchObject({
+      ordinal: 0,
+    });
+
     for (const hostile of [
       { ...validTurnMetricsExport, turn_id: "not-a-uuid" },
       { ...validTurnMetricsExport, state: "secret" },
@@ -827,6 +836,7 @@ describe("agents platform", () => {
       { ...validTurnMetricsExport, duration_ms: -1 },
       { ...validTurnMetricsExport, usage_input_tokens: -5 },
       { ...validTurnMetricsExport, model_id: "" },
+      { ...validTurnMetricsExport, ordinal: -1 },
       {
         turn_id: validTurnMetricsExport.turn_id,
         session_id: validTurnMetricsExport.session_id,

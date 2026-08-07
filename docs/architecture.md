@@ -169,13 +169,14 @@ not fail turn completion, reopen, export, or UI. Duration is derived as
 `finishedAtUnixMs - startedAtUnixMs` when finished is present. A typed
 `export_agent_turn_metrics` command returns a JSON-serialisable snake_case
 metrics snapshot for one completed turn id from durable storage (turn/session
-identity, ordinal, state, provider profile, model, Effort when present, timing,
-derived duration, and nullable usage). Unknown or non-completed turns fail
-closed. The Agent UI shows duration and tokens when present on completed turns
-and offers Copy metrics, which places that snapshot on the clipboard through
-ordinary webview clipboard write—no filesystem export, no new Tauri capability,
-and no SQL or secret exposure. There is no Metrics navigation surface, chart, or
-aggregate analytics path in this slice.
+identity, zero-based session ordinal, state, provider profile, model, Effort when
+present, timing, derived duration, and nullable usage). Unknown or non-completed
+turns fail closed. Frontend validation accepts ordinal `0` for the first turn.
+The Agent UI shows duration and tokens when present on completed turns and offers
+Copy metrics, which places that snapshot on the clipboard through ordinary
+webview clipboard write—no filesystem export, no new Tauri capability, and no SQL
+or secret exposure. There is no Metrics navigation surface, chart, or aggregate
+analytics path in this slice.
 
 ## Artifact Creation and Immutability
 

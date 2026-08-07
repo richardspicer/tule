@@ -1443,9 +1443,10 @@ pub(crate) fn resolve_effort_for_send(
 /// Assembles the deterministic xAI chat/completions JSON body.
 ///
 /// Preserves the Phase 1 streaming wire contract: `model`, system/user/assistant
-/// `messages` (system instruction included), and `stream: true`. When the
-/// frozen model is Effort-capable, includes mapped `reasoning_effort`; otherwise
-/// omits that field. Does not emit Speed / `service_tier` parameters.
+/// `messages` (system instruction included), `stream: true`, and streamed usage
+/// reporting. When the frozen model is Effort-capable, includes mapped
+/// `reasoning_effort`; otherwise omits that field. Does not emit Speed /
+/// `service_tier` parameters.
 pub(crate) fn assemble_chat_completions_request_json(
     context: &AgentRequestContext,
 ) -> Result<String, AgentContextError> {
@@ -1467,7 +1468,7 @@ pub(crate) fn assemble_chat_completions_request_json(
         format_turn_user_content(&context.current_user_text, context.current_source.as_ref());
     body.push_str(",{\"role\":\"user\",\"content\":");
     append_json_string(&mut body, &current);
-    body.push_str("}],\"stream\":true");
+    body.push_str("}],\"stream\":true,\"stream_options\":{\"include_usage\":true}");
 
     if let Some(capability) = effort_capability_for_model(&context.model_id) {
         let effort = context.effort.unwrap_or(capability.default);
@@ -1630,13 +1631,111 @@ fn extract_account_id(id_token: &str) -> Result<String, PublicError> {
         .ok_or(PublicError::ProviderUnavailable)
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum SseProtocol {
+    #[default]
+    Unknown,
+    ChatCompletions,
+    Responses,
+}
+
+#[derive(Debug, Default)]
+struct SseStreamState {
+    protocol: SseProtocol,
+    completed: bool,
+    chat_completions: ChatCompletionsAccumulator,
+}
+
+impl SseStreamState {
+    fn enter_protocol(&mut self, protocol: SseProtocol) -> Result<(), PublicError> {
+        match self.protocol {
+            SseProtocol::Unknown => {
+                self.protocol = protocol;
+                Ok(())
+            }
+            current if current == protocol => Ok(()),
+            _ => Err(PublicError::ProviderUnavailable),
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct ChatCompletionsAccumulator {
+    response_id: Option<String>,
+    input_tokens: Option<u64>,
+    output_tokens: Option<u64>,
+    saw_finish_reason: bool,
+}
+
+impl ChatCompletionsAccumulator {
+    fn merge_metadata(&mut self, value: &Value) -> Result<(), PublicError> {
+        self.merge_response_id(value.get("id"))?;
+        self.merge_usage(value.get("usage"))
+    }
+
+    fn merge_response_id(&mut self, value: Option<&Value>) -> Result<(), PublicError> {
+        let Some(value) = value else {
+            return Ok(());
+        };
+        if value.is_null() {
+            return Ok(());
+        }
+        let id = value.as_str().ok_or(PublicError::ProviderUnavailable)?;
+        if id.is_empty() {
+            return Ok(());
+        }
+        match &self.response_id {
+            Some(current) if current != id => Err(PublicError::ProviderUnavailable),
+            Some(_) => Ok(()),
+            None => {
+                self.response_id = Some(id.to_owned());
+                Ok(())
+            }
+        }
+    }
+
+    fn merge_usage(&mut self, value: Option<&Value>) -> Result<(), PublicError> {
+        let Some(value) = value else {
+            return Ok(());
+        };
+        if value.is_null() {
+            return Ok(());
+        }
+        let usage = value.as_object().ok_or(PublicError::ProviderUnavailable)?;
+        Self::merge_token_total(&mut self.input_tokens, usage.get("prompt_tokens"))?;
+        Self::merge_token_total(&mut self.output_tokens, usage.get("completion_tokens"))
+    }
+
+    fn merge_token_total(
+        current: &mut Option<u64>,
+        value: Option<&Value>,
+    ) -> Result<(), PublicError> {
+        let Some(value) = value else {
+            return Ok(());
+        };
+        if value.is_null() {
+            return Ok(());
+        }
+        *current = Some(value.as_u64().ok_or(PublicError::ProviderUnavailable)?);
+        Ok(())
+    }
+
+    fn completed_event(&self) -> ProviderEvent {
+        ProviderEvent::Completed {
+            response_id: self.response_id.clone(),
+            input_tokens: self.input_tokens,
+            output_tokens: self.output_tokens,
+        }
+    }
+}
+
 async fn parse_sse_response(
     response: reqwest::Response,
     cancel: CancellationToken,
     on_event: &mut ProviderEventSink,
 ) -> Result<Vec<ProviderEvent>, PublicError> {
     let mut buffer = Vec::new();
-    let mut saw_completed = false;
+    let mut state = SseStreamState::default();
     let mut stream = response.bytes_stream();
     loop {
         let next = tokio::select! {
@@ -1648,26 +1747,29 @@ async fn parse_sse_response(
         };
         let chunk = next.map_err(|_| PublicError::ProviderUnavailable)?;
         for piece in chunk.chunks(4096) {
+            if cancel.is_cancelled() {
+                return Err(PublicError::Cancelled);
+            }
             if buffer.len().saturating_add(piece.len()) > MAX_SSE_BUFFER {
                 return Err(PublicError::OutputLimit);
             }
             buffer.extend_from_slice(piece);
-            emit_complete_sse_events(&mut buffer, &mut saw_completed, on_event)?;
-            if saw_completed {
+            emit_complete_sse_events(&mut buffer, &mut state, &cancel, on_event)?;
+            if state.completed {
                 return Ok(Vec::new());
             }
         }
     }
     if !buffer.is_empty() {
+        if cancel.is_cancelled() {
+            return Err(PublicError::Cancelled);
+        }
         let mut batch = Vec::new();
-        parse_sse_event(&buffer, &mut batch)?;
-        emit_provider_batch(batch, &mut saw_completed, on_event)?;
+        parse_sse_event(&buffer, &mut state, &mut batch)?;
+        emit_provider_batch(batch, &mut state, &cancel, on_event)?;
     }
-    if saw_completed {
-        Ok(Vec::new())
-    } else {
-        Err(PublicError::ProviderUnavailable)
-    }
+    finish_sse_stream(&mut state, &cancel, on_event)?;
+    Ok(Vec::new())
 }
 
 #[cfg(test)]
@@ -1676,66 +1778,89 @@ async fn parse_sse_buffer(
     cancel: CancellationToken,
     on_event: &mut ProviderEventSink,
 ) -> Result<Vec<ProviderEvent>, PublicError> {
+    let fragments = bytes.chunks(4096).collect::<Vec<_>>();
+    parse_sse_fragments(&fragments, cancel, on_event).await
+}
+
+#[cfg(test)]
+async fn parse_sse_fragments(
+    fragments: &[&[u8]],
+    cancel: CancellationToken,
+    on_event: &mut ProviderEventSink,
+) -> Result<Vec<ProviderEvent>, PublicError> {
     if cancel.is_cancelled() {
         return Err(PublicError::Cancelled);
     }
     let mut buffer = Vec::new();
-    let mut saw_completed = false;
-    for chunk in bytes.chunks(4096) {
-        if buffer.len().saturating_add(chunk.len()) > MAX_SSE_BUFFER {
-            return Err(PublicError::OutputLimit);
-        }
-        buffer.extend_from_slice(chunk);
-        emit_complete_sse_events(&mut buffer, &mut saw_completed, on_event)?;
-        if saw_completed {
-            return Ok(Vec::new());
+    let mut state = SseStreamState::default();
+    for fragment in fragments {
+        for piece in fragment.chunks(4096) {
+            if cancel.is_cancelled() {
+                return Err(PublicError::Cancelled);
+            }
+            if buffer.len().saturating_add(piece.len()) > MAX_SSE_BUFFER {
+                return Err(PublicError::OutputLimit);
+            }
+            buffer.extend_from_slice(piece);
+            emit_complete_sse_events(&mut buffer, &mut state, &cancel, on_event)?;
+            if state.completed {
+                return Ok(Vec::new());
+            }
         }
     }
     if !buffer.is_empty() {
+        if cancel.is_cancelled() {
+            return Err(PublicError::Cancelled);
+        }
         let mut batch = Vec::new();
-        parse_sse_event(&buffer, &mut batch)?;
-        emit_provider_batch(batch, &mut saw_completed, on_event)?;
+        parse_sse_event(&buffer, &mut state, &mut batch)?;
+        emit_provider_batch(batch, &mut state, &cancel, on_event)?;
     }
-    if saw_completed {
-        Ok(Vec::new())
-    } else {
-        Err(PublicError::ProviderUnavailable)
-    }
+    finish_sse_stream(&mut state, &cancel, on_event)?;
+    Ok(Vec::new())
 }
 
 fn emit_complete_sse_events(
     buffer: &mut Vec<u8>,
-    saw_completed: &mut bool,
+    state: &mut SseStreamState,
+    cancel: &CancellationToken,
     on_event: &mut ProviderEventSink,
 ) -> Result<(), PublicError> {
-    while !*saw_completed {
+    while !state.completed {
         let Some(boundary) = find_event_boundary(buffer) else {
             break;
         };
+        if cancel.is_cancelled() {
+            return Err(PublicError::Cancelled);
+        }
         let event = buffer.drain(..boundary).collect::<Vec<_>>();
         let delimiter = event_delimiter_len(buffer);
         if delimiter > 0 {
             buffer.drain(..delimiter);
         }
         let mut batch = Vec::new();
-        parse_sse_event(&event, &mut batch)?;
-        emit_provider_batch(batch, saw_completed, on_event)?;
+        parse_sse_event(&event, state, &mut batch)?;
+        emit_provider_batch(batch, state, cancel, on_event)?;
     }
     Ok(())
 }
 
 fn emit_provider_batch(
     batch: Vec<ProviderEvent>,
-    saw_completed: &mut bool,
+    state: &mut SseStreamState,
+    cancel: &CancellationToken,
     on_event: &mut ProviderEventSink,
 ) -> Result<(), PublicError> {
     for item in batch {
+        if cancel.is_cancelled() {
+            return Err(PublicError::Cancelled);
+        }
         match &item {
-            ProviderEvent::Completed { .. } if *saw_completed => {
+            ProviderEvent::Completed { .. } if state.completed => {
                 return Err(PublicError::ProviderUnavailable);
             }
-            ProviderEvent::Completed { .. } => *saw_completed = true,
-            ProviderEvent::Delta(_) if *saw_completed => {
+            ProviderEvent::Completed { .. } => state.completed = true,
+            ProviderEvent::Delta(_) if state.completed => {
                 return Err(PublicError::ProviderUnavailable);
             }
             ProviderEvent::Delta(_) => {}
@@ -1743,6 +1868,28 @@ fn emit_provider_batch(
         on_event(item)?;
     }
     Ok(())
+}
+
+fn finish_sse_stream(
+    state: &mut SseStreamState,
+    cancel: &CancellationToken,
+    on_event: &mut ProviderEventSink,
+) -> Result<(), PublicError> {
+    if state.completed {
+        return Ok(());
+    }
+    if cancel.is_cancelled() {
+        return Err(PublicError::Cancelled);
+    }
+    if state.protocol == SseProtocol::ChatCompletions && state.chat_completions.saw_finish_reason {
+        return emit_provider_batch(
+            vec![state.chat_completions.completed_event()],
+            state,
+            cancel,
+            on_event,
+        );
+    }
+    Err(PublicError::ProviderUnavailable)
 }
 
 fn find_event_boundary(buffer: &[u8]) -> Option<usize> {
@@ -1762,7 +1909,11 @@ fn event_delimiter_len(buffer: &[u8]) -> usize {
     }
 }
 
-fn parse_sse_event(event: &[u8], output: &mut Vec<ProviderEvent>) -> Result<(), PublicError> {
+fn parse_sse_event(
+    event: &[u8],
+    state: &mut SseStreamState,
+    output: &mut Vec<ProviderEvent>,
+) -> Result<(), PublicError> {
     if event.len() > MAX_SSE_BUFFER {
         return Err(PublicError::OutputLimit);
     }
@@ -1777,20 +1928,28 @@ fn parse_sse_event(event: &[u8], output: &mut Vec<ProviderEvent>) -> Result<(), 
         return Ok(());
     }
     if data == "[DONE]" {
-        // chat/completions terminal framing when finish_reason was absent on the last chunk.
-        output.push(ProviderEvent::Completed {
-            response_id: None,
-            input_tokens: None,
-            output_tokens: None,
-        });
+        state.enter_protocol(SseProtocol::ChatCompletions)?;
+        output.push(state.chat_completions.completed_event());
         return Ok(());
     }
     let value: Value = serde_json::from_str(&data).map_err(|_| PublicError::ProviderUnavailable)?;
     if contains_unsupported_provider_output(&value) {
         return Err(PublicError::UnsupportedProviderOutput);
     }
+    let kind = value
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if kind.starts_with("response.") || kind == "error" {
+        state.enter_protocol(SseProtocol::Responses)?;
+    }
     // OpenAI-compatible chat/completions streaming (`choices[].delta.content`).
-    if let Some(choices) = value.get("choices").and_then(Value::as_array) {
+    if let Some(choices) = value.get("choices") {
+        state.enter_protocol(SseProtocol::ChatCompletions)?;
+        state.chat_completions.merge_metadata(&value)?;
+        let choices = choices.as_array().ok_or(PublicError::ProviderUnavailable)?;
+        let already_finished = state.chat_completions.saw_finish_reason;
+        let mut frame_finished = false;
         for choice in choices {
             if choice
                 .get("delta")
@@ -1805,30 +1964,28 @@ fn parse_sse_event(event: &[u8], output: &mut Vec<ProviderEvent>) -> Result<(), 
                 .and_then(Value::as_str)
                 && !content.is_empty()
             {
+                if already_finished || frame_finished {
+                    return Err(PublicError::ProviderUnavailable);
+                }
                 output.push(ProviderEvent::Delta(content.to_owned()));
             }
-            if choice
-                .get("finish_reason")
-                .and_then(Value::as_str)
-                .is_some_and(|reason| !reason.is_empty())
-            {
-                output.push(ProviderEvent::Completed {
-                    response_id: value.get("id").and_then(Value::as_str).map(str::to_owned),
-                    input_tokens: value
-                        .pointer("/usage/prompt_tokens")
-                        .and_then(Value::as_u64),
-                    output_tokens: value
-                        .pointer("/usage/completion_tokens")
-                        .and_then(Value::as_u64),
-                });
+            match choice.get("finish_reason") {
+                None | Some(Value::Null) => {}
+                Some(Value::String(reason)) if reason.is_empty() => {}
+                Some(Value::String(_)) => frame_finished = true,
+                Some(_) => return Err(PublicError::ProviderUnavailable),
             }
+        }
+        if frame_finished {
+            state.chat_completions.saw_finish_reason = true;
         }
         return Ok(());
     }
-    let kind = value
-        .get("type")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
+    if value.get("usage").is_some() {
+        state.enter_protocol(SseProtocol::ChatCompletions)?;
+        state.chat_completions.merge_metadata(&value)?;
+        return Ok(());
+    }
     match kind {
         "response.output_text.delta" => {
             let delta = value
@@ -2168,7 +2325,7 @@ mod tests {
         .unwrap();
         let json = assemble_chat_completions_request_json(&context).unwrap();
         let expected = format!(
-            r#"{{"model":"grok-3","messages":[{{"role":"system","content":"{}\n\nSaved Project instructions:\n---\nExact\ninstructions\n---"}},{{"role":"user","content":"Hello \"world\"\n"}},{{"role":"assistant","content":"Reply\\path"}},{{"role":"user","content":"Next message"}}],"stream":true}}"#,
+            r#"{{"model":"grok-3","messages":[{{"role":"system","content":"{}\n\nSaved Project instructions:\n---\nExact\ninstructions\n---"}},{{"role":"user","content":"Hello \"world\"\n"}},{{"role":"assistant","content":"Reply\\path"}},{{"role":"user","content":"Next message"}}],"stream":true,"stream_options":{{"include_usage":true}}}}"#,
             tule_core::FIXED_INSTRUCTION
                 .replace('\\', "\\\\")
                 .replace('"', "\\\"")
@@ -2178,8 +2335,39 @@ mod tests {
         assert!(!json.contains("\"store\""));
         assert!(!json.contains("\"input\""));
         assert!(json.contains("\"stream\":true"));
+        assert!(json.contains("\"stream_options\":{\"include_usage\":true}"));
         assert!(!json.contains("reasoning_effort"));
         assert!(!json.contains("service_tier"));
+    }
+
+    #[test]
+    fn chat_completions_request_limit_counts_stream_usage_envelope() {
+        let base = AgentRequestContext {
+            model_id: "model".to_owned(),
+            instructions: String::new(),
+            completed_history: Vec::new(),
+            current_user_text: String::new(),
+            current_source: None,
+            effort: None,
+        };
+        let base_len = assemble_chat_completions_request_json(&base).unwrap().len();
+        let available = MAX_CONTEXT_UTF8.checked_sub(base_len).unwrap();
+
+        let mut exact = base.clone();
+        exact.current_user_text = "x".repeat(available);
+        assert_eq!(
+            assemble_chat_completions_request_json(&exact)
+                .unwrap()
+                .len(),
+            MAX_CONTEXT_UTF8
+        );
+
+        exact.current_user_text.push('x');
+        assert!(matches!(
+            assemble_chat_completions_request_json(&exact),
+            Err(AgentContextError::ContextLimit { byte_count })
+                if byte_count == MAX_CONTEXT_UTF8 + 1
+        ));
     }
 
     #[test]
@@ -2193,6 +2381,7 @@ mod tests {
         assert!(json.contains("\"model\":\"other-model\""));
         assert!(json.contains("\"messages\""));
         assert!(json.contains("\"role\":\"system\""));
+        assert!(json.contains("\"stream_options\":{\"include_usage\":true}"));
         assert!(!json.contains("reasoning_effort"));
     }
 
@@ -2211,6 +2400,7 @@ mod tests {
         assert!(json.contains("\"model\":\"grok-4.5\""));
         assert!(json.contains("\"reasoning_effort\":\"medium\""));
         assert!(json.contains("\"stream\":true"));
+        assert!(json.contains("\"stream_options\":{\"include_usage\":true}"));
         assert!(!json.contains("service_tier"));
 
         let default_context =
@@ -2233,6 +2423,7 @@ mod tests {
         .unwrap();
         let json = assemble_chat_completions_request_json(&context).unwrap();
         assert!(!json.contains("reasoning_effort"));
+        assert!(json.contains("\"stream_options\":{\"include_usage\":true}"));
         assert_eq!(
             resolve_effort_for_send("grok-3", Some("high")),
             Err(PublicError::InvalidInput)
@@ -2260,19 +2451,22 @@ mod tests {
             r#"data: {"type":"response.function_call"}"#,
             r#"data: {"type":"response.output_item.added","item":{"type":"function_call"}}"#,
         ] {
+            let mut state = SseStreamState::default();
             let mut output = Vec::new();
             assert_eq!(
-                parse_sse_event(event.as_bytes(), &mut output),
+                parse_sse_event(event.as_bytes(), &mut state, &mut output),
                 Err(PublicError::UnsupportedProviderOutput)
             );
         }
     }
 
     #[test]
-    fn chat_completions_maps_delta_finish_reason_and_done() {
+    fn chat_completions_waits_for_done_and_keeps_empty_choices_usage() {
+        let mut state = SseStreamState::default();
         let mut output = Vec::new();
         parse_sse_event(
-            br#"data: {"id":"chatcmpl-1","choices":[{"delta":{"content":"hello"},"finish_reason":null}]}"#,
+            br#"data: {"id":"chatcmpl-1","choices":[{"delta":{"content":"hello"},"finish_reason":null}],"usage":null}"#,
+            &mut state,
             &mut output,
         )
         .unwrap();
@@ -2283,47 +2477,35 @@ mod tests {
 
         output.clear();
         parse_sse_event(
-            br#"data: {"id":"chatcmpl-1","choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":1}}"#,
+            br#"data: {"id":"chatcmpl-1","choices":[{"delta":{},"finish_reason":"stop"}],"usage":null}"#,
+            &mut state,
             &mut output,
         )
         .unwrap();
+        assert!(output.is_empty());
+        assert!(state.chat_completions.saw_finish_reason);
+
+        parse_sse_event(
+            br#"data: {"id":"chatcmpl-1","choices":[],"usage":{"prompt_tokens":11,"completion_tokens":2,"total_tokens":13}}"#,
+            &mut state,
+            &mut output,
+        )
+        .unwrap();
+        assert!(output.is_empty());
+
+        parse_sse_event(b"data: [DONE]", &mut state, &mut output).unwrap();
         assert!(matches!(
             output.as_slice(),
             [ProviderEvent::Completed {
                 response_id: Some(id),
-                input_tokens: Some(3),
-                output_tokens: Some(1),
+                input_tokens: Some(11),
+                output_tokens: Some(2),
             }] if id == "chatcmpl-1"
-        ));
-
-        output.clear();
-        parse_sse_event(b"data: [DONE]", &mut output).unwrap();
-        assert!(matches!(
-            output.as_slice(),
-            [ProviderEvent::Completed {
-                response_id: None,
-                input_tokens: None,
-                output_tokens: None,
-            }]
-        ));
-    }
-
-    #[test]
-    fn terminal_can_arrive_before_delta() {
-        let mut output = Vec::new();
-        parse_sse_event(
-            br#"data: {"id":"chatcmpl-1","choices":[{"delta":{},"finish_reason":"stop"}]}"#,
-            &mut output,
-        )
-        .unwrap();
-        assert!(matches!(
-            output.as_slice(),
-            [ProviderEvent::Completed { .. }]
         ));
     }
 
     #[tokio::test]
-    async fn chat_completions_sse_stops_after_completion() {
+    async fn chat_completions_documented_usage_shape_completes_once() {
         let events = Arc::new(Mutex::new(Vec::new()));
         let captured = Arc::clone(&events);
         let mut sink: ProviderEventSink = Box::new(move |event| {
@@ -2331,7 +2513,7 @@ mod tests {
             Ok(())
         });
         parse_sse_buffer(
-            b"data: {\"id\":\"chatcmpl-1\",\"choices\":[{\"delta\":{\"content\":\"hello\"},\"finish_reason\":null}]}\n\ndata: {\"id\":\"chatcmpl-1\",\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
+            b"data: {\"id\":\"chatcmpl-1\",\"choices\":[{\"delta\":{\"content\":\"hello\"},\"finish_reason\":null}],\"usage\":null}\n\ndata: {\"id\":\"chatcmpl-1\",\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":null}\n\ndata: {\"id\":\"chatcmpl-1\",\"choices\":[],\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":2,\"total_tokens\":13}}\n\ndata: [DONE]\n\n",
             CancellationToken::new(),
             &mut sink,
         )
@@ -2339,10 +2521,95 @@ mod tests {
         .unwrap();
         assert!(matches!(
             events.lock().unwrap().as_slice(),
-            [ProviderEvent::Delta(text), ProviderEvent::Completed { response_id: Some(id), .. }]
-                if text == "hello" && id == "chatcmpl-1"
+            [
+                ProviderEvent::Delta(text),
+                ProviderEvent::Completed {
+                    response_id: Some(id),
+                    input_tokens: Some(11),
+                    output_tokens: Some(2),
+                }
+            ] if text == "hello" && id == "chatcmpl-1"
+        ));
+    }
+
+    #[tokio::test]
+    async fn chat_completions_latest_usage_wins_at_clean_eof() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let captured = Arc::clone(&events);
+        let mut sink: ProviderEventSink = Box::new(move |event| {
+            captured.lock().unwrap().push(event);
+            Ok(())
+        });
+        parse_sse_buffer(
+            b"data: {\"id\":\"chatcmpl-1\",\"choices\":[{\"delta\":{\"content\":\"a\"},\"finish_reason\":null}],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":null}}\n\ndata: {\"id\":\"chatcmpl-1\",\"choices\":[{\"delta\":{\"content\":\"b\"},\"finish_reason\":null}],\"usage\":{\"prompt_tokens\":null,\"completion_tokens\":1}}\n\ndata: {\"id\":\"chatcmpl-1\",\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":null}}\n\n",
+            CancellationToken::new(),
+            &mut sink,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            events.lock().unwrap().as_slice(),
+            [
+                ProviderEvent::Delta(first),
+                ProviderEvent::Delta(second),
+                ProviderEvent::Completed {
+                    input_tokens: Some(7),
+                    output_tokens: Some(1),
+                    ..
+                }
+            ] if first == "a" && second == "b"
+        ));
+    }
+
+    #[tokio::test]
+    async fn chat_completions_null_usage_does_not_erase_prior_totals() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let captured = Arc::clone(&events);
+        let mut sink: ProviderEventSink = Box::new(move |event| {
+            captured.lock().unwrap().push(event);
+            Ok(())
+        });
+        parse_sse_buffer(
+            b"data: {\"id\":\"chatcmpl-1\",\"choices\":[{\"delta\":{},\"finish_reason\":null}],\"usage\":{\"prompt_tokens\":9,\"completion_tokens\":2}}\n\ndata: {\"id\":\"chatcmpl-1\",\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":null}\n\ndata: {\"choices\":[],\"usage\":{\"prompt_tokens\":null,\"completion_tokens\":null}}\n\ndata: [DONE]\n\n",
+            CancellationToken::new(),
+            &mut sink,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            events.lock().unwrap().as_slice(),
+            [ProviderEvent::Completed {
+                input_tokens: Some(9),
+                output_tokens: Some(2),
+                ..
+            }]
         ));
 
+        let partial = Arc::new(Mutex::new(Vec::new()));
+        let partial_captured = Arc::clone(&partial);
+        let mut partial_sink: ProviderEventSink = Box::new(move |event| {
+            partial_captured.lock().unwrap().push(event);
+            Ok(())
+        });
+        parse_sse_buffer(
+            b"data: {\"id\":\"chatcmpl-2\",\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: {\"choices\":[],\"usage\":{\"prompt_tokens\":11}}\n\ndata: [DONE]\n\n",
+            CancellationToken::new(),
+            &mut partial_sink,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            partial.lock().unwrap().as_slice(),
+            [ProviderEvent::Completed {
+                input_tokens: Some(11),
+                output_tokens: None,
+                ..
+            }]
+        ));
+    }
+
+    #[tokio::test]
+    async fn chat_completions_done_only_and_incomplete_streams_keep_prior_behavior() {
         let mut discard: ProviderEventSink = Box::new(|_| Ok(()));
         let incomplete = parse_sse_buffer(
             b"data: {\"id\":\"chatcmpl-1\",\"choices\":[{\"delta\":{\"content\":\"partial\"},\"finish_reason\":null}]}\n\n",
@@ -2368,6 +2635,157 @@ mod tests {
         assert!(matches!(
             done_only.lock().unwrap().as_slice(),
             [ProviderEvent::Completed { .. }]
+        ));
+    }
+
+    #[test]
+    fn chat_completions_rejects_malformed_metadata_and_late_content() {
+        for invalid in [
+            "[]",
+            "{\"prompt_tokens\":\"3\"}",
+            "{\"prompt_tokens\":-1}",
+            "{\"prompt_tokens\":1.5}",
+            "{\"prompt_tokens\":true}",
+            "{\"prompt_tokens\":18446744073709551616}",
+        ] {
+            let event = format!("data: {{\"choices\":[],\"usage\":{invalid}}}");
+            let mut state = SseStreamState::default();
+            let mut output = Vec::new();
+            assert_eq!(
+                parse_sse_event(event.as_bytes(), &mut state, &mut output),
+                Err(PublicError::ProviderUnavailable)
+            );
+        }
+
+        let mut state = SseStreamState::default();
+        let mut output = Vec::new();
+        parse_sse_event(
+            br#"data: {"id":"chatcmpl-1","choices":[{"delta":{},"finish_reason":"stop"}]}"#,
+            &mut state,
+            &mut output,
+        )
+        .unwrap();
+        assert_eq!(
+            parse_sse_event(
+                br#"data: {"id":"chatcmpl-1","choices":[{"delta":{"content":"late"},"finish_reason":null}]}"#,
+                &mut state,
+                &mut output,
+            ),
+            Err(PublicError::ProviderUnavailable)
+        );
+
+        let mut same_frame_finish = SseStreamState::default();
+        assert_eq!(
+            parse_sse_event(
+                br#"data: {"id":"chatcmpl-1","choices":[{"delta":{},"finish_reason":"stop"},{"delta":{"content":"late"},"finish_reason":null}]}"#,
+                &mut same_frame_finish,
+                &mut Vec::new(),
+            ),
+            Err(PublicError::ProviderUnavailable)
+        );
+
+        let mut malformed_finish = SseStreamState::default();
+        assert_eq!(
+            parse_sse_event(
+                br#"data: {"choices":[{"delta":{},"finish_reason":1}]}"#,
+                &mut malformed_finish,
+                &mut Vec::new(),
+            ),
+            Err(PublicError::ProviderUnavailable)
+        );
+    }
+
+    #[test]
+    fn chat_completions_rejects_conflicting_ids_and_mixed_protocols() {
+        let mut state = SseStreamState::default();
+        parse_sse_event(
+            br#"data: {"id":"chatcmpl-1","choices":[{"delta":{},"finish_reason":null}]}"#,
+            &mut state,
+            &mut Vec::new(),
+        )
+        .unwrap();
+        assert_eq!(
+            parse_sse_event(
+                br#"data: {"id":"chatcmpl-2","choices":[],"usage":{"prompt_tokens":1}}"#,
+                &mut state,
+                &mut Vec::new(),
+            ),
+            Err(PublicError::ProviderUnavailable)
+        );
+
+        let mut mixed = SseStreamState::default();
+        parse_sse_event(
+            br#"data: {"type":"response.output_text.delta","delta":"hello"}"#,
+            &mut mixed,
+            &mut Vec::new(),
+        )
+        .unwrap();
+        assert_eq!(
+            parse_sse_event(
+                br#"data: {"id":"chatcmpl-1","choices":[]}"#,
+                &mut mixed,
+                &mut Vec::new(),
+            ),
+            Err(PublicError::ProviderUnavailable)
+        );
+    }
+
+    #[tokio::test]
+    async fn chat_completions_cancellation_before_terminal_emits_no_completion() {
+        let cancel = CancellationToken::new();
+        let sink_cancel = cancel.clone();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let captured = Arc::clone(&events);
+        let mut sink: ProviderEventSink = Box::new(move |event| {
+            captured.lock().unwrap().push(event);
+            sink_cancel.cancel();
+            Ok(())
+        });
+        let result = parse_sse_buffer(
+            b"data: {\"id\":\"chatcmpl-1\",\"choices\":[{\"delta\":{\"content\":\"hello\"},\"finish_reason\":null}]}\n\ndata: {\"id\":\"chatcmpl-1\",\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: {\"choices\":[],\"usage\":{\"prompt_tokens\":4,\"completion_tokens\":1}}\n\ndata: [DONE]\n\n",
+            cancel,
+            &mut sink,
+        )
+        .await;
+        assert_eq!(result, Err(PublicError::Cancelled));
+        assert!(matches!(
+            events.lock().unwrap().as_slice(),
+            [ProviderEvent::Delta(text)] if text == "hello"
+        ));
+    }
+
+    #[tokio::test]
+    async fn chat_completions_fragmented_utf8_and_delimiters_match_contiguous_stream() {
+        let body = "data: {\"id\":\"chatcmpl-1\",\"choices\":[{\"delta\":{\"content\":\"héllo\"},\"finish_reason\":null}]}\r\n\r\ndata: {\"id\":\"chatcmpl-1\",\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: {\"choices\":[],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":1}}\n\ndata: [DONE]\n\n";
+        let bytes = body.as_bytes();
+        let multibyte = body.find('é').unwrap();
+        let done = body.find("[DONE]").unwrap();
+        let fragments = [
+            &bytes[..2],
+            &bytes[2..multibyte + 1],
+            &bytes[multibyte + 1..done + 2],
+            &bytes[done + 2..bytes.len() - 1],
+            &bytes[bytes.len() - 1..],
+        ];
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let captured = Arc::clone(&events);
+        let mut sink: ProviderEventSink = Box::new(move |event| {
+            captured.lock().unwrap().push(event);
+            Ok(())
+        });
+        parse_sse_fragments(&fragments, CancellationToken::new(), &mut sink)
+            .await
+            .unwrap();
+        assert!(matches!(
+            events.lock().unwrap().as_slice(),
+            [
+                ProviderEvent::Delta(text),
+                ProviderEvent::Completed {
+                    input_tokens: Some(5),
+                    output_tokens: Some(1),
+                    ..
+                }
+            ] if text == "héllo"
         ));
     }
 

@@ -53,7 +53,8 @@ subscription OAuth adapter (RFC 8628 device-code against `auth.x.ai`, catalog an
 streamed chat/completions against `api.x.ai`). That adapter owns built-in profile
 and upgrade-default model identifiers, a revisioned exact-id request-control
 capability table, serialises the chat/completions wire body from core's neutral
-context (including mapped Effort when capable), and performs network send.
+context (including mapped Effort when capable and the request for streamed usage),
+and performs network send.
 Credentials stay in the OS credential store behind an opaque handle. The frontend
 receives only typed connection status, allowlisted device pairing metadata
 (verification URI and user code during connect), allowlisted model-catalog
@@ -85,6 +86,17 @@ separate from catalog and selected-default commands and events. On upgrade,
 retired ChatGPT compatibility credential handles are cleared so the old adapter
 cannot remain the active send path; historical sessions that recorded
 `openai-chatgpt-compat` provenance remain readable.
+
+Chat/completions sends `stream_options.include_usage: true`. The adapter retains
+top-level cumulative prompt and completion token totals from any stream chunk,
+including a final usage-bearing chunk whose `choices` array is empty; later
+non-null totals replace earlier snapshots and are never summed. A non-empty
+`finish_reason` marks semantic finish while the adapter continues through the
+usage-bearing terminal framing. It emits one completed provider event at
+`[DONE]`, or at compatible clean EOF after finish, carrying the last reported
+totals into durable turn state. A completed stream that genuinely omits a count
+leaves that field null; TULE does not estimate tokens or retain raw provider
+frames.
 
 A profile selected-model default persists independently of connection lifecycle
 and of fixed profile display metadata. A new unsent Agent session may accept that

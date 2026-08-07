@@ -1959,6 +1959,72 @@ mod tests {
     }
 
     #[test]
+    fn non_null_usage_survives_sqlite_reopen_export_with_one_completion_event() {
+        let directory = tempfile::tempdir().unwrap();
+        let database_path = directory.path().join("tule.sqlite3");
+        let store = SqliteStore::open(&database_path).unwrap();
+        let prepared = tule_core::prepare_agent_send(
+            &store,
+            None,
+            "Hello",
+            None,
+            "",
+            crate::provider::PROVIDER_PROFILE_ID,
+            "gpt-5.5",
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+        let turn_id = prepared.turn.id();
+        let session_id = prepared.session.id();
+        tule_core::apply_agent_delta(&store, turn_id, "Hi").unwrap();
+        tule_core::complete_agent_turn(
+            &store,
+            turn_id,
+            Some("resp-usage".into()),
+            Some(12),
+            Some(34),
+        )
+        .unwrap();
+        drop(store);
+
+        let reopened = SqliteStore::open(database_path).unwrap();
+        let turn = reopened.find_turn(&turn_id).unwrap().unwrap();
+        let response = turn_response_for_store(&reopened, &turn).unwrap();
+        assert_eq!(response.usage_input_tokens, Some(12));
+        assert_eq!(response.usage_output_tokens, Some(34));
+
+        let snapshot = export_agent_turn_metrics_inner(&reopened, &turn_id.to_string()).unwrap();
+        assert_eq!(snapshot.usage_input_tokens, Some(12));
+        assert_eq!(snapshot.usage_output_tokens, Some(34));
+
+        let events = reopened.list_events(&session_id).unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.kind() == AgentEventKind::TurnCompleted)
+                .count(),
+            1
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| {
+                    matches!(
+                        event.kind(),
+                        AgentEventKind::TurnCompleted
+                            | AgentEventKind::TurnCancelled
+                            | AgentEventKind::TurnFailed
+                            | AgentEventKind::TurnInterrupted
+                    )
+                })
+                .count(),
+            1
+        );
+    }
+
+    #[test]
     fn export_agent_turn_metrics_returns_durable_snapshot_and_rejects_unknown_turns() {
         let (directory, store) = test_store();
         let prepared = tule_core::prepare_agent_send(

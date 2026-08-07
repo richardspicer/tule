@@ -524,6 +524,7 @@ mod tests {
         {
             let fake = Arc::new(FakeCredentialStore::default());
             let adapter = Arc::new(XaiSubscriptionAdapter::new(fake));
+            adapter.set_test_transport(Arc::new(SuccessDeviceConnect));
             let dir = tempfile::Builder::new()
                 .prefix("tule-connect-cmd-cancel-")
                 .tempdir()
@@ -611,6 +612,7 @@ mod tests {
         {
             events.lock().unwrap().clear();
             let adapter = XaiSubscriptionAdapter::new(Arc::new(FakeCredentialStore::default()));
+            adapter.set_test_transport(Arc::new(SuccessDeviceConnect));
             let dir = tempfile::Builder::new()
                 .prefix("tule-connect-cmd-fail-")
                 .tempdir()

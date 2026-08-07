@@ -153,8 +153,10 @@ is out of scope. Kind is allowlisted exactly as `conclusion`, `recommendation`,
 and fails closed on mismatch. Frozen provenance on the version copies
 `source_session_id`, `source_turn_id`, `provider_profile_id`, `model_id`,
 `prompt_version`, optional `project_id`, and `provider_request_id` from the
-source turn at save time. Foreign keys prevent dangling provenance on create;
-session deletion behavior is not added.
+source turn at save time. Foreign keys enforce referenced session, turn,
+provider-profile, and optional project rows on create; `provider_request_id` is
+an opaque value copied from the turn and is not foreign-keyed (same as on
+`agent_turns`). Session deletion behavior is not added.
 
 List filter for the open Agent session is Artifacts with any version whose
 `source_session_id` equals that session, union Artifacts whose `project_id`

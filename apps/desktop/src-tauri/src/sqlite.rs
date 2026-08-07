@@ -1,6 +1,7 @@
 //! Shared serialized SQLite persistence for Projects and Agent conversations.
 
 mod agents;
+mod artifacts;
 mod provider_models;
 
 use std::{
@@ -46,6 +47,7 @@ const MIGRATION_SET: &[M<'static>] = &[
     M::up(include_str!(
         "../migrations/0011_agent_source_canonical_url.sql"
     )),
+    M::up(include_str!("../migrations/0012_artifacts.sql")),
 ];
 const MIGRATIONS: Migrations<'static> = Migrations::from_slice(MIGRATION_SET);
 
@@ -359,6 +361,7 @@ pub(crate) enum SqliteStoreError {
     MalformedProject(StoredProjectError),
     MalformedAgent(tule_core::AgentReconstructionError),
     MalformedSource(tule_core::SourceReconstructionError),
+    MalformedArtifact(tule_core::ArtifactReconstructionError),
     LockPoisoned,
     Clock,
     Numeric,
@@ -387,6 +390,12 @@ impl fmt::Display for SqliteStoreError {
                     "stored source record could not be reconstructed: {error}"
                 )
             }
+            Self::MalformedArtifact(error) => {
+                write!(
+                    formatter,
+                    "stored artifact record could not be reconstructed: {error}"
+                )
+            }
             Self::LockPoisoned => formatter.write_str("SQLite storage lock is poisoned"),
             Self::Clock => formatter.write_str("system clock cannot initialize provider profile"),
             Self::Numeric => formatter.write_str("stored numeric value is out of range"),
@@ -402,6 +411,7 @@ impl Error for SqliteStoreError {
             Self::MalformedProject(error) => Some(error),
             Self::MalformedAgent(error) => Some(error),
             Self::MalformedSource(error) => Some(error),
+            Self::MalformedArtifact(error) => Some(error),
             Self::LockPoisoned | Self::Clock | Self::Numeric => None,
         }
     }
@@ -451,7 +461,7 @@ mod tests {
             .unwrap()
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 11);
+        assert_eq!(version, 12);
         drop(repository);
 
         let reopened = open_repository(&path);
@@ -461,7 +471,7 @@ mod tests {
             .unwrap()
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 11);
+        assert_eq!(version, 12);
     }
 
     #[test]
@@ -493,7 +503,7 @@ mod tests {
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
 
-        assert_eq!(version, 11);
+        assert_eq!(version, 12);
         assert_eq!(projects.len(), 1);
         assert_eq!(projects[0].id().to_string(), id);
         assert_eq!(projects[0].name().as_str(), "Existing project");
@@ -530,7 +540,7 @@ mod tests {
             .unwrap()
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 11);
+        assert_eq!(version, 12);
     }
 
     #[test]

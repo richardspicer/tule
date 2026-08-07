@@ -12,8 +12,9 @@ use std::{fs, sync::Arc};
 
 use agents::{
     AgentState, attach_agent_text_link_source, cancel_agent_turn, clear_agent_text_source_draft,
-    get_agent_session, list_agent_sessions, pick_agent_text_folder_source, pick_agent_text_source,
-    send_agent_message, set_agent_session_project, set_agent_source_draft_scope,
+    create_artifact_from_turn, get_agent_session, get_artifact, list_agent_sessions,
+    list_artifacts, pick_agent_text_folder_source, pick_agent_text_source, send_agent_message,
+    set_agent_session_project, set_agent_source_draft_scope,
 };
 use credentials::native_store;
 use preferences::{DesktopPreferenceState, get_appearance_preference, set_appearance_preference};
@@ -379,6 +380,9 @@ pub fn run() {
             update_project_instructions,
             list_agent_sessions,
             get_agent_session,
+            create_artifact_from_turn,
+            list_artifacts,
+            get_artifact,
             pick_agent_text_source,
             pick_agent_text_folder_source,
             attach_agent_text_link_source,

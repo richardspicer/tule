@@ -18,6 +18,8 @@ import {
   type AgentEventKind,
   type AgentSourceMetadata,
   type AgentTurn,
+  type ArtifactDetail,
+  type ArtifactSummary,
   type PendingSourceAttachment,
 } from "../platform/agents";
 import {
@@ -56,6 +58,9 @@ interface AgentWorkspaceProps {
   modelLocked: boolean;
   turns: readonly AgentTurn[];
   events: readonly AgentEvent[];
+  artifacts?: readonly ArtifactSummary[];
+  selectedArtifactDetail?: ArtifactDetail | null;
+  savingArtifactTurnId?: string | null;
   draft: string;
   pendingAttachment: PendingSourceAttachment | null;
   connected: boolean;
@@ -73,6 +78,23 @@ interface AgentWorkspaceProps {
   onRemoveAttachment: () => void;
   onProjectChange: (projectId: string | null) => void;
   onModelChange: (modelId: string) => void;
+  onSaveArtifact?: (turnId: string) => void;
+  onOpenArtifact?: (artifactId: string) => void;
+  onCloseArtifact?: () => void;
+}
+
+const artifactKindLabels: Record<ArtifactSummary["kind"], string> = {
+  conclusion: "Conclusion",
+  recommendation: "Recommendation",
+  decision_record: "Decision record",
+  requirements: "Requirements",
+  implementation_plan: "Implementation plan",
+  research_brief: "Research brief",
+  critique: "Critique",
+};
+
+function formatArtifactKind(kind: ArtifactSummary["kind"]): string {
+  return artifactKindLabels[kind];
 }
 
 function turnStateLabel(state: string): string | null {
@@ -165,6 +187,9 @@ export function AgentWorkspace({
   modelLocked,
   turns,
   events,
+  artifacts = [],
+  selectedArtifactDetail = null,
+  savingArtifactTurnId = null,
   draft,
   pendingAttachment,
   connected,
@@ -182,6 +207,9 @@ export function AgentWorkspace({
   onRemoveAttachment,
   onProjectChange,
   onModelChange,
+  onSaveArtifact,
+  onOpenArtifact,
+  onCloseArtifact,
 }: AgentWorkspaceProps) {
   const titleId = useId();
   const modelSelectId = useId();
@@ -396,6 +424,75 @@ export function AgentWorkspace({
         </details>
       )}
 
+      {onOpenArtifact === undefined &&
+      artifacts.length === 0 &&
+      selectedArtifactDetail === null ? null : (
+        <details className="artifacts-panel" open={selectedArtifactDetail !== null || undefined}>
+          <summary>Artifacts</summary>
+          {artifacts.length === 0 ? (
+            <p className="artifacts-empty">No saved artifacts for this session yet.</p>
+          ) : (
+            <ul className="artifacts-list">
+              {artifacts.map((artifact) => (
+                <li key={artifact.id} className="artifacts-row">
+                  <button
+                    type="button"
+                    className="artifacts-open"
+                    onClick={() => onOpenArtifact?.(artifact.id)}
+                  >
+                    <span className="artifacts-title">{artifact.title}</span>
+                    <span className="artifacts-kind">{formatArtifactKind(artifact.kind)}</span>
+                    <span className="artifacts-version">v{artifact.latestVersionOrdinal}</span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+          {selectedArtifactDetail === null ? null : (
+            <div className="artifact-detail" role="region" aria-label="Artifact detail">
+              <div className="artifact-detail-header">
+                <h2>{selectedArtifactDetail.artifact.title}</h2>
+                <button type="button" className="artifact-detail-close" onClick={onCloseArtifact}>
+                  Close
+                </button>
+              </div>
+              <p className="artifact-detail-meta">
+                {formatArtifactKind(selectedArtifactDetail.artifact.kind)}
+                <span aria-hidden="true"> · </span>
+                Version {selectedArtifactDetail.versions[0]?.versionOrdinal ?? 1}
+              </p>
+              <pre className="artifact-detail-content">
+                {selectedArtifactDetail.versions[0]?.content ?? ""}
+              </pre>
+              {selectedArtifactDetail.versions[0] === undefined ? null : (
+                <dl className="artifact-provenance">
+                  <div>
+                    <dt>Content hash</dt>
+                    <dd>{selectedArtifactDetail.versions[0].contentSha256}</dd>
+                  </div>
+                  <div>
+                    <dt>Model</dt>
+                    <dd>{selectedArtifactDetail.versions[0].provenance.modelId}</dd>
+                  </div>
+                  <div>
+                    <dt>Session</dt>
+                    <dd>{selectedArtifactDetail.versions[0].provenance.sourceSessionId}</dd>
+                  </div>
+                  <div>
+                    <dt>Turn</dt>
+                    <dd>{selectedArtifactDetail.versions[0].provenance.sourceTurnId}</dd>
+                  </div>
+                  <div>
+                    <dt>Prompt version</dt>
+                    <dd>{selectedArtifactDetail.versions[0].provenance.promptVersion}</dd>
+                  </div>
+                </dl>
+              )}
+            </div>
+          )}
+        </details>
+      )}
+
       <div className="transcript-shell">
         <div
           ref={transcriptRef}
@@ -438,6 +535,20 @@ export function AgentWorkspace({
                           {getSafeAgentErrorMessageForCode(turn.errorCode)}
                         </p>
                       )}
+                      {onSaveArtifact !== undefined &&
+                      turn.state === "completed" &&
+                      turn.agentText.length > 0 ? (
+                        <p className="turn-artifact-actions">
+                          <button
+                            type="button"
+                            className="save-artifact"
+                            disabled={savingArtifactTurnId === turn.id || sending}
+                            onClick={() => onSaveArtifact(turn.id)}
+                          >
+                            {savingArtifactTurnId === turn.id ? "Saving…" : "Save as artifact"}
+                          </button>
+                        </p>
+                      ) : null}
                     </div>
                   </article>
                 );

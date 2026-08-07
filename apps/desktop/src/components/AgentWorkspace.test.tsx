@@ -139,6 +139,114 @@ describe("AgentWorkspace", () => {
     expect(screen.getByText("Hi")).toBeInTheDocument();
   });
 
+  it("offers save on completed turns and a collapsible Artifacts panel with detail", () => {
+    const onSaveArtifact = vi.fn();
+    const onOpenArtifact = vi.fn();
+    const onCloseArtifact = vi.fn();
+    render(
+      <AgentWorkspace
+        title="Hello"
+        projectId={null}
+        projects={[]}
+        modelLabel="GPT-5.5"
+        modelOptions={[{ id: "gpt-5.5", displayName: "GPT-5.5" }]}
+        selectedModelId="gpt-5.5"
+        modelLocked={false}
+        onModelChange={() => undefined}
+        turns={[
+          baseTurn,
+          {
+            ...baseTurn,
+            id: "t2",
+            ordinal: 2,
+            agentText: "",
+            state: "failed",
+            errorCode: "provider_unavailable",
+          },
+          {
+            ...baseTurn,
+            id: "t3",
+            ordinal: 3,
+            agentText: "Still streaming",
+            state: "streaming",
+          },
+        ]}
+        events={[]}
+        artifacts={[
+          {
+            id: "01900000-0000-7000-8000-000000000030",
+            title: "Saved conclusion",
+            kind: "conclusion",
+            projectId: null,
+            createdAtUnixMs: 1_700_000_000_000,
+            latestVersionId: "01900000-0000-7000-8000-000000000031",
+            latestVersionOrdinal: 1,
+          },
+        ]}
+        selectedArtifactDetail={{
+          artifact: {
+            id: "01900000-0000-7000-8000-000000000030",
+            title: "Saved conclusion",
+            kind: "conclusion",
+            projectId: null,
+            createdAtUnixMs: 1_700_000_000_000,
+          },
+          versions: [
+            {
+              id: "01900000-0000-7000-8000-000000000031",
+              artifactId: "01900000-0000-7000-8000-000000000030",
+              versionOrdinal: 1,
+              content: "Hello",
+              contentSha256: "a".repeat(64),
+              provenance: {
+                sourceSessionId: "01900000-0000-7000-8000-000000000010",
+                sourceTurnId: "01900000-0000-7000-8000-000000000011",
+                providerProfileId: "xai-subscription-oauth",
+                modelId: "grok-3",
+                promptVersion: "tule-direct-agent-v2",
+                projectId: null,
+                providerRequestId: "01900000-0000-7000-8000-000000000012",
+              },
+              createdAtUnixMs: 1_700_000_000_000,
+            },
+          ],
+        }}
+        draft=""
+        pendingAttachment={null}
+        connected
+        sending={false}
+        sendBlocked={false}
+        cancelRequested={false}
+        activeTurnId={null}
+        errorMessage={null}
+        onDraftChange={vi.fn()}
+        onSend={vi.fn()}
+        onCancel={vi.fn()}
+        onAttach={vi.fn()}
+        onAttachFolder={vi.fn()}
+        onAttachLink={vi.fn()}
+        onRemoveAttachment={vi.fn()}
+        onProjectChange={vi.fn()}
+        onSaveArtifact={onSaveArtifact}
+        onOpenArtifact={onOpenArtifact}
+        onCloseArtifact={onCloseArtifact}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: "Save as artifact" })).toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: "Save as artifact" })).toHaveLength(1);
+    fireEvent.click(screen.getByRole("button", { name: "Save as artifact" }));
+    expect(onSaveArtifact).toHaveBeenCalledWith("t1");
+
+    expect(screen.getByText("Artifacts")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /Saved conclusion/ }));
+    expect(onOpenArtifact).toHaveBeenCalledWith("01900000-0000-7000-8000-000000000030");
+    expect(screen.getByRole("region", { name: "Artifact detail" })).toHaveTextContent("Hello");
+    expect(screen.getByText("grok-3")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+    expect(onCloseArtifact).toHaveBeenCalled();
+  });
+
   it("exposes attachment controls and transcript metadata accessibly", () => {
     const onAttach = vi.fn();
     const onRemoveAttachment = vi.fn();

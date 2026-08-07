@@ -137,10 +137,8 @@ function turnMetricsSummary(turn: AgentTurn): string | null {
     parts.push(`Duration ${formatTurnDurationMs(durationMs)}`);
   }
   if (turn.usageInputTokens !== null || turn.usageOutputTokens !== null) {
-    const input =
-      turn.usageInputTokens === null ? "—" : turn.usageInputTokens.toLocaleString();
-    const output =
-      turn.usageOutputTokens === null ? "—" : turn.usageOutputTokens.toLocaleString();
+    const input = turn.usageInputTokens === null ? "—" : turn.usageInputTokens.toLocaleString();
+    const output = turn.usageOutputTokens === null ? "—" : turn.usageOutputTokens.toLocaleString();
     parts.push(`Tokens ${input} in / ${output} out`);
   }
   return parts.length === 0 ? null : parts.join(" · ");

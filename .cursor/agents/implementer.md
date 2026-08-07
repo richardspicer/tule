@@ -2,6 +2,7 @@
 name: implementer
 description: Implement a scoped TULE change from a brief or lead instructions. Use for code generation and for applying review feedback. Prefer this over exploring when the write set and acceptance criteria are already clear.
 model: cursor-grok-4.5-high
+# Prevent Task-level model overrides from replacing this agent's pinned model.
 force-default-model: true
 ---
 

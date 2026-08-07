@@ -4,6 +4,7 @@ import {
   cancelAgentTurn,
   clearAgentTextSourceDraft,
   createArtifactFromTurn,
+  exportAgentTurnMetrics,
   getAgentErrorCode,
   getAgentSession,
   getArtifact,
@@ -59,6 +60,28 @@ const validEvent = {
   sequence: 2,
   kind: "turn_cancelled" as const,
   createdAtUnixMs: 1_700_000_000_000,
+};
+
+const validTurnMetrics = {
+  startedAtUnixMs: 1_700_000_000_000,
+  finishedAtUnixMs: 1_700_000_001_000,
+  usageInputTokens: null as number | null,
+  usageOutputTokens: null as number | null,
+};
+
+const validTurnMetricsExport = {
+  turn_id: "01900000-0000-7000-8000-000000000011",
+  session_id: validSessionDetail.session.id,
+  ordinal: 1,
+  state: "completed" as const,
+  provider_profile_id: "xai-subscription-oauth",
+  model_id: "grok-4.5",
+  effort: null as "low" | "medium" | "high" | null,
+  started_at_unix_ms: 1_700_000_000_000,
+  finished_at_unix_ms: 1_700_000_001_250,
+  duration_ms: 1250,
+  usage_input_tokens: 12 as number | null,
+  usage_output_tokens: 34 as number | null,
 };
 
 const validFolderSource = {
@@ -136,13 +159,73 @@ describe("agents platform", () => {
     ];
 
     for (const turn of [
-      { state: "secret-internal-state", errorCode: null, effort: null, sources: [] },
-      { state: "failed", errorCode: "raw-provider-error", effort: null, sources: [] },
-      { state: "completed", errorCode: null, effort: "xhigh", sources: [] },
+      {
+        state: "secret-internal-state",
+        errorCode: null,
+        effort: null,
+        ...validTurnMetrics,
+        sources: [],
+      },
+      {
+        state: "failed",
+        errorCode: "raw-provider-error",
+        effort: null,
+        ...validTurnMetrics,
+        sources: [],
+      },
+      {
+        state: "completed",
+        errorCode: null,
+        effort: "xhigh",
+        ...validTurnMetrics,
+        sources: [],
+      },
+      {
+        state: "completed",
+        errorCode: null,
+        effort: null,
+        ...validTurnMetrics,
+        startedAtUnixMs: 1.5,
+        sources: [],
+      },
+      {
+        state: "completed",
+        errorCode: null,
+        effort: null,
+        ...validTurnMetrics,
+        finishedAtUnixMs: -1,
+        sources: [],
+      },
+      {
+        state: "completed",
+        errorCode: null,
+        effort: null,
+        ...validTurnMetrics,
+        usageInputTokens: -1,
+        sources: [],
+      },
+      {
+        state: "completed",
+        errorCode: null,
+        effort: null,
+        ...validTurnMetrics,
+        usageOutputTokens: 1.5,
+        sources: [],
+      },
+      {
+        state: "completed",
+        errorCode: null,
+        effort: null,
+        ...validTurnMetrics,
+        // missing usageOutputTokens
+        usageOutputTokens: undefined,
+        sources: [],
+      },
       ...hostileSources.map((sources) => ({
         state: "completed" as const,
         errorCode: null,
         effort: null,
+        ...validTurnMetrics,
         sources: [sources],
       })),
     ]) {
@@ -177,6 +260,9 @@ describe("agents platform", () => {
           state: "completed",
           errorCode: null,
           effort: null,
+          ...validTurnMetrics,
+          usageInputTokens: 10,
+          usageOutputTokens: null,
           sources: [validSource, validLinkSource],
         },
       ],
@@ -184,6 +270,9 @@ describe("agents platform", () => {
 
     const detail = await getAgentSession(validSessionDetail.session.id);
     expect(detail.turns[0]?.sources).toEqual([validSource, validLinkSource]);
+    expect(detail.turns[0]?.startedAtUnixMs).toBe(validTurnMetrics.startedAtUnixMs);
+    expect(detail.turns[0]?.usageInputTokens).toBe(10);
+    expect(detail.turns[0]?.usageOutputTokens).toBeNull();
   });
 
   it("accepts allowlisted session events and rejects unknown kinds or malformed objects", async () => {
@@ -258,6 +347,7 @@ describe("agents platform", () => {
             state: "completed",
             errorCode: null,
             effort: null,
+            ...validTurnMetrics,
             sources: [validSource],
           },
         });
@@ -706,5 +796,48 @@ describe("agents platform", () => {
     ).rejects.toMatchObject({
       code: "agent_storage_unavailable",
     });
+  });
+
+  it("validates turn metrics export snapshots and fails closed on hostile shapes", async () => {
+    invokeMock.mockResolvedValueOnce(validTurnMetricsExport);
+    await expect(exportAgentTurnMetrics(validTurnMetricsExport.turn_id)).resolves.toEqual(
+      validTurnMetricsExport,
+    );
+    expect(invokeMock).toHaveBeenCalledWith("export_agent_turn_metrics", {
+      turnId: validTurnMetricsExport.turn_id,
+    });
+
+    invokeMock.mockResolvedValueOnce({
+      ...validTurnMetricsExport,
+      usage_input_tokens: null,
+      usage_output_tokens: null,
+      effort: "medium",
+    });
+    await expect(exportAgentTurnMetrics(validTurnMetricsExport.turn_id)).resolves.toMatchObject({
+      usage_input_tokens: null,
+      usage_output_tokens: null,
+      effort: "medium",
+    });
+
+    for (const hostile of [
+      { ...validTurnMetricsExport, turn_id: "not-a-uuid" },
+      { ...validTurnMetricsExport, state: "secret" },
+      { ...validTurnMetricsExport, effort: "xhigh" },
+      { ...validTurnMetricsExport, started_at_unix_ms: 1.5 },
+      { ...validTurnMetricsExport, duration_ms: -1 },
+      { ...validTurnMetricsExport, usage_input_tokens: -5 },
+      { ...validTurnMetricsExport, model_id: "" },
+      {
+        turn_id: validTurnMetricsExport.turn_id,
+        session_id: validTurnMetricsExport.session_id,
+        ordinal: validTurnMetricsExport.ordinal,
+        state: validTurnMetricsExport.state,
+      },
+    ]) {
+      invokeMock.mockResolvedValueOnce(hostile);
+      await expect(exportAgentTurnMetrics(validTurnMetricsExport.turn_id)).rejects.toMatchObject({
+        code: "agent_storage_unavailable",
+      });
+    }
   });
 });

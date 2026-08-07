@@ -604,11 +604,21 @@ textarea:focus-visible {
   word-break: break-all;
 }
 
-.turn-artifact-actions {
-  margin: 8px 0 0;
+.turn-metrics {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 12px;
 }
 
-.save-artifact {
+.turn-artifact-actions {
+  margin: 8px 0 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.save-artifact,
+.copy-metrics {
   border: 1px solid var(--divider);
   background: transparent;
   color: var(--foreground);
@@ -619,7 +629,8 @@ textarea:focus-visible {
   cursor: pointer;
 }
 
-.save-artifact:disabled {
+.save-artifact:disabled,
+.copy-metrics:disabled {
   opacity: 0.6;
   cursor: default;
 }

@@ -159,6 +159,24 @@ and turn association when `turnId` is present. Hostile-response validation on
 the platform layer rejects unknown event kinds and malformed event objects with
 the same fail-closed posture as sessions and turns.
 
+Turn DTOs also expose persisted per-turn timing and nullable provider-reported
+token usage already stored on durable turn rows: required `startedAtUnixMs`,
+nullable `finishedAtUnixMs` until the turn finishes, and nullable
+`usageInputTokens` / `usageOutputTokens`. Values come from SQLite turn state;
+the host does not invent timing, cached-token, time-to-first-output, or monetary
+cost fields. Missing provider token reporting leaves token fields null and must
+not fail turn completion, reopen, export, or UI. Duration is derived as
+`finishedAtUnixMs - startedAtUnixMs` when finished is present. A typed
+`export_agent_turn_metrics` command returns a JSON-serialisable snake_case
+metrics snapshot for one completed turn id from durable storage (turn/session
+identity, ordinal, state, provider profile, model, Effort when present, timing,
+derived duration, and nullable usage). Unknown or non-completed turns fail
+closed. The Agent UI shows duration and tokens when present on completed turns
+and offers Copy metrics, which places that snapshot on the clipboard through
+ordinary webview clipboard write—no filesystem export, no new Tauri capability,
+and no SQL or secret exposure. There is no Metrics navigation surface, chart, or
+aggregate analytics path in this slice.
+
 ## Artifact Creation and Immutability
 
 Artifacts extend the Agent boundary with durable product records created from

@@ -71,6 +71,7 @@ interface AgentWorkspaceProps {
   artifacts?: readonly ArtifactSummary[];
   selectedArtifactDetail?: ArtifactDetail | null;
   savingArtifactTurnId?: string | null;
+  copyingMetricsTurnId?: string | null;
   draft: string;
   pendingAttachment: PendingSourceAttachment | null;
   connected: boolean;
@@ -90,6 +91,7 @@ interface AgentWorkspaceProps {
   onModelChange: (modelId: string) => void;
   onEffortChange: (effort: AgentEffort) => void;
   onSaveArtifact?: (turnId: string) => void;
+  onCopyMetrics?: (turnId: string) => void;
   onOpenArtifact?: (artifactId: string) => void;
   onCloseArtifact?: () => void;
 }
@@ -122,6 +124,25 @@ function turnStateLabel(state: string): string | null {
     default:
       return null;
   }
+}
+
+function formatTurnDurationMs(durationMs: number): string {
+  return `${durationMs} ms`;
+}
+
+function turnMetricsSummary(turn: AgentTurn): string | null {
+  const parts: string[] = [];
+  if (turn.finishedAtUnixMs !== null) {
+    parts.push(`Duration ${formatTurnDurationMs(turn.finishedAtUnixMs - turn.startedAtUnixMs)}`);
+  }
+  if (turn.usageInputTokens !== null || turn.usageOutputTokens !== null) {
+    const input =
+      turn.usageInputTokens === null ? "—" : turn.usageInputTokens.toLocaleString("en-US");
+    const output =
+      turn.usageOutputTokens === null ? "—" : turn.usageOutputTokens.toLocaleString("en-US");
+    parts.push(`Tokens ${input} in / ${output} out`);
+  }
+  return parts.length === 0 ? null : parts.join(" · ");
 }
 
 function formatPersistedAttachmentSummary(source: AgentSourceMetadata): string {
@@ -204,6 +225,7 @@ export function AgentWorkspace({
   artifacts = [],
   selectedArtifactDetail = null,
   savingArtifactTurnId = null,
+  copyingMetricsTurnId = null,
   draft,
   pendingAttachment,
   connected,
@@ -223,6 +245,7 @@ export function AgentWorkspace({
   onModelChange,
   onEffortChange,
   onSaveArtifact,
+  onCopyMetrics,
   onOpenArtifact,
   onCloseArtifact,
 }: AgentWorkspaceProps) {
@@ -528,6 +551,11 @@ export function AgentWorkspace({
               turns.map((turn) => {
                 const stateLabel = turnStateLabel(turn.state);
                 const attachment = turn.sources[0] ?? null;
+                const metricsSummary = turn.state === "completed" ? turnMetricsSummary(turn) : null;
+                const showCompletedActions =
+                  turn.state === "completed" &&
+                  (onCopyMetrics !== undefined ||
+                    (onSaveArtifact !== undefined && turn.agentText.length > 0));
                 return (
                   <article key={turn.id} className="turn">
                     <div className="turn-block user">
@@ -551,18 +579,31 @@ export function AgentWorkspace({
                           {getSafeAgentErrorMessageForCode(turn.errorCode)}
                         </p>
                       )}
-                      {onSaveArtifact !== undefined &&
-                      turn.state === "completed" &&
-                      turn.agentText.length > 0 ? (
+                      {metricsSummary === null ? null : (
+                        <p className="turn-metrics">{metricsSummary}</p>
+                      )}
+                      {showCompletedActions ? (
                         <p className="turn-artifact-actions">
-                          <button
-                            type="button"
-                            className="save-artifact"
-                            disabled={savingArtifactTurnId === turn.id || sending}
-                            onClick={() => onSaveArtifact(turn.id)}
-                          >
-                            {savingArtifactTurnId === turn.id ? "Saving…" : "Save as artifact"}
-                          </button>
+                          {onCopyMetrics !== undefined ? (
+                            <button
+                              type="button"
+                              className="copy-metrics"
+                              disabled={copyingMetricsTurnId === turn.id || sending}
+                              onClick={() => onCopyMetrics(turn.id)}
+                            >
+                              {copyingMetricsTurnId === turn.id ? "Copying…" : "Copy metrics"}
+                            </button>
+                          ) : null}
+                          {onSaveArtifact !== undefined && turn.agentText.length > 0 ? (
+                            <button
+                              type="button"
+                              className="save-artifact"
+                              disabled={savingArtifactTurnId === turn.id || sending}
+                              onClick={() => onSaveArtifact(turn.id)}
+                            >
+                              {savingArtifactTurnId === turn.id ? "Saving…" : "Save as artifact"}
+                            </button>
+                          ) : null}
                         </p>
                       ) : null}
                     </div>

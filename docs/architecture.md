@@ -105,6 +105,10 @@ targets; loopback, link-local, and private/reserved destinations fail closed).
 Each hop resolves DNS once, rejects any blocked address in the result set, and
 connects through a short-lived client pinned to those validated addresses while
 still using the hostname for TLS SNI and certificate verification.
+Responses also fail closed unless `Content-Type` is present and identifies
+`text/*` or an allowlisted textual application type (JSON, XML, or JavaScript);
+missing, binary, and unknown types are rejected before a Source, turn, event, or
+provider request is created.
 Member count, aggregate byte count, canonical URL metadata, and deterministic
 framed content round-trip through SQLite. Provider context includes the current
 Source and Sources from completed prior turns in owning-turn order under prompt

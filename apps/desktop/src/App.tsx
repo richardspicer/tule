@@ -10,6 +10,7 @@ import {
   cancelAgentTurn,
   clearAgentTextSourceDraft,
   createArtifactFromTurn,
+  exportAgentTurnMetrics,
   getAgentErrorCode,
   getAgentSession,
   getArtifact,
@@ -117,6 +118,7 @@ function App() {
   const [artifacts, setArtifacts] = useState<ArtifactSummary[]>([]);
   const [selectedArtifactDetail, setSelectedArtifactDetail] = useState<ArtifactDetail | null>(null);
   const [savingArtifactTurnId, setSavingArtifactTurnId] = useState<string | null>(null);
+  const [copyingMetricsTurnId, setCopyingMetricsTurnId] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
   const [pendingAttachment, setPendingAttachment] = useState<PendingSourceAttachment | null>(null);
   const [sending, setSending] = useState(false);
@@ -690,12 +692,16 @@ function App() {
     nextOptimisticTurnId += 1;
     const optimisticTurn: AgentTurn = {
       id: `local-${nextOptimisticTurnId}`,
-      ordinal: turns.length + 1,
+      ordinal: turns.length,
       userText,
       agentText: "",
       state: "pending",
       errorCode: null,
       effort: effortAvailable ? composerEffort : null,
+      startedAtUnixMs: Date.now(),
+      finishedAtUnixMs: null,
+      usageInputTokens: null,
+      usageOutputTokens: null,
       sources:
         attachment === null
           ? []
@@ -1012,6 +1018,22 @@ function App() {
     }
   }
 
+  async function handleCopyMetrics(turnId: string) {
+    if (copyingMetricsTurnId !== null || activeSessionId === null) {
+      return;
+    }
+    setCopyingMetricsTurnId(turnId);
+    setAgentError(null);
+    try {
+      const snapshot = await exportAgentTurnMetrics(turnId);
+      await navigator.clipboard.writeText(`${JSON.stringify(snapshot, null, 2)}\n`);
+    } catch (error: unknown) {
+      setAgentError(getSafeAgentErrorMessage(error));
+    } finally {
+      setCopyingMetricsTurnId(null);
+    }
+  }
+
   async function handleOpenArtifact(artifactId: string) {
     setAgentError(null);
     try {
@@ -1197,6 +1219,7 @@ function App() {
               artifacts={artifacts}
               selectedArtifactDetail={selectedArtifactDetail}
               savingArtifactTurnId={savingArtifactTurnId}
+              copyingMetricsTurnId={copyingMetricsTurnId}
               draft={draft}
               pendingAttachment={pendingAttachment}
               connected={connected}
@@ -1224,6 +1247,9 @@ function App() {
               onEffortChange={setSelectedEffort}
               onSaveArtifact={
                 activeSessionId === null ? undefined : (turnId) => void handleSaveArtifact(turnId)
+              }
+              onCopyMetrics={
+                activeSessionId === null ? undefined : (turnId) => void handleCopyMetrics(turnId)
               }
               onOpenArtifact={
                 activeSessionId === null

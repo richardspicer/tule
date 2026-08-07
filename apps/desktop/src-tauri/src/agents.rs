@@ -13,8 +13,9 @@ use tauri::{AppHandle, Emitter, State, Webview, ipc::Channel};
 use tauri_plugin_dialog::{DialogExt, FilePath};
 use tokio_util::sync::CancellationToken;
 use tule_core::{
-    AgentEvent, AgentRepository, AgentSession, AgentSessionId, AgentTurn, Artifact, ArtifactDetail,
-    ArtifactSummary, ArtifactVersion, ProjectId, ProjectRepository, Source, TurnSource,
+    AgentEvent, AgentRepository, AgentSession, AgentSessionId, AgentTurn, AgentTurnId,
+    AgentTurnState, Artifact, ArtifactDetail, ArtifactSummary, ArtifactVersion, ProjectId,
+    ProjectRepository, Source, TurnSource,
 };
 
 use crate::{
@@ -233,7 +234,33 @@ pub(crate) struct TurnResponse {
     error_code: Option<String>,
     /// Product Effort used for the turn when available; null when omitted.
     effort: Option<String>,
+    /// Durable turn start time from persisted state.
+    started_at_unix_ms: i64,
+    /// Durable finish time when the turn is terminal; null while in flight.
+    finished_at_unix_ms: Option<i64>,
+    /// Provider-reported input tokens when present; null when unreported.
+    usage_input_tokens: Option<u64>,
+    /// Provider-reported output tokens when present; null when unreported.
+    usage_output_tokens: Option<u64>,
     sources: Vec<SourceMetadataResponse>,
+}
+
+/// Structured per-turn metrics snapshot for clipboard / typed IPC export.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) struct TurnMetricsExportResponse {
+    turn_id: String,
+    session_id: String,
+    ordinal: u64,
+    state: String,
+    provider_profile_id: String,
+    model_id: String,
+    effort: Option<String>,
+    started_at_unix_ms: i64,
+    finished_at_unix_ms: Option<i64>,
+    duration_ms: Option<i64>,
+    usage_input_tokens: Option<u64>,
+    usage_output_tokens: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -260,10 +287,34 @@ fn turn_response(value: &AgentTurn, sources: &[TurnSource]) -> TurnResponse {
         state: value.state().as_str().into(),
         error_code: value.error_code().map(str::to_owned),
         effort: value.effort().map(|effort| effort.as_str().to_owned()),
+        started_at_unix_ms: value.started_at_unix_ms(),
+        finished_at_unix_ms: value.finished_at_unix_ms(),
+        usage_input_tokens: value.usage_input_tokens(),
+        usage_output_tokens: value.usage_output_tokens(),
         sources: turn_sources
             .into_iter()
             .map(|item| SourceMetadataResponse::from(item.source()))
             .collect(),
+    }
+}
+
+fn turn_metrics_export(value: &AgentTurn) -> TurnMetricsExportResponse {
+    let finished_at_unix_ms = value.finished_at_unix_ms();
+    let duration_ms =
+        finished_at_unix_ms.map(|finished| finished.saturating_sub(value.started_at_unix_ms()));
+    TurnMetricsExportResponse {
+        turn_id: value.id().to_string(),
+        session_id: value.session_id().to_string(),
+        ordinal: value.ordinal(),
+        state: value.state().as_str().into(),
+        provider_profile_id: value.provider_profile_id().into(),
+        model_id: value.model_id().into(),
+        effort: value.effort().map(|effort| effort.as_str().to_owned()),
+        started_at_unix_ms: value.started_at_unix_ms(),
+        finished_at_unix_ms,
+        duration_ms,
+        usage_input_tokens: value.usage_input_tokens(),
+        usage_output_tokens: value.usage_output_tokens(),
     }
 }
 
@@ -1267,6 +1318,35 @@ pub(crate) async fn get_artifact(
     .map_err(|_| AgentIpcError::AgentStorageUnavailable)?
 }
 
+/// Loads a completed turn's durable metrics snapshot for clipboard / typed export.
+pub(crate) fn export_agent_turn_metrics_inner(
+    store: &SqliteStore,
+    turn_id: &str,
+) -> Result<TurnMetricsExportResponse, AgentIpcError> {
+    let id = AgentTurnId::parse(turn_id).map_err(|_| AgentIpcError::InvalidInput)?;
+    let turn = store
+        .find_turn(&id)
+        .map_err(|_| AgentIpcError::AgentStorageUnavailable)?
+        .ok_or(AgentIpcError::InvalidInput)?;
+    if turn.state() != AgentTurnState::Completed {
+        return Err(AgentIpcError::InvalidInput);
+    }
+    Ok(turn_metrics_export(&turn))
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub(crate) async fn export_agent_turn_metrics(
+    turn_id: String,
+    state: State<'_, AgentState>,
+) -> Result<TurnMetricsExportResponse, AgentIpcError> {
+    let store = Arc::clone(&state.store);
+    tauri::async_runtime::spawn_blocking(move || {
+        export_agent_turn_metrics_inner(store.as_ref(), &turn_id)
+    })
+    .await
+    .map_err(|_| AgentIpcError::AgentStorageUnavailable)?
+}
+
 #[tauri::command(rename_all = "camelCase")]
 pub(crate) async fn cancel_agent_turn(
     turn_id: String,
@@ -1803,6 +1883,147 @@ mod tests {
             map_get_artifact(tule_core::GetArtifactError::NotFound),
             AgentIpcError::InvalidInput
         ));
+    }
+
+    #[test]
+    fn turn_response_exposes_timing_and_nullable_usage_from_durable_state() {
+        let (directory, store) = test_store();
+        let prepared = tule_core::prepare_agent_send(
+            store.as_ref(),
+            None,
+            "Hello",
+            None,
+            "",
+            crate::provider::PROVIDER_PROFILE_ID,
+            "gpt-5.5",
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+        let pending = turn_response_for_store(store.as_ref(), &prepared.turn).unwrap();
+        assert_eq!(
+            pending.started_at_unix_ms,
+            prepared.turn.started_at_unix_ms()
+        );
+        assert_eq!(pending.finished_at_unix_ms, None);
+        assert_eq!(pending.usage_input_tokens, None);
+        assert_eq!(pending.usage_output_tokens, None);
+
+        tule_core::apply_agent_delta(store.as_ref(), prepared.turn.id(), "Hi").unwrap();
+        let completed = tule_core::complete_agent_turn(
+            store.as_ref(),
+            prepared.turn.id(),
+            Some("resp-1".into()),
+            Some(12),
+            Some(34),
+        )
+        .unwrap();
+        let response = turn_response_for_store(store.as_ref(), &completed).unwrap();
+        assert_eq!(response.started_at_unix_ms, completed.started_at_unix_ms());
+        assert_eq!(
+            response.finished_at_unix_ms,
+            completed.finished_at_unix_ms()
+        );
+        assert_eq!(response.usage_input_tokens, Some(12));
+        assert_eq!(response.usage_output_tokens, Some(34));
+
+        let without_usage = tule_core::prepare_agent_send(
+            store.as_ref(),
+            Some(prepared.session.id()),
+            "Again",
+            None,
+            "",
+            crate::provider::PROVIDER_PROFILE_ID,
+            "gpt-5.5",
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+        tule_core::apply_agent_delta(store.as_ref(), without_usage.turn.id(), "Ok").unwrap();
+        let completed_null_tokens = tule_core::complete_agent_turn(
+            store.as_ref(),
+            without_usage.turn.id(),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let null_usage = turn_response_for_store(store.as_ref(), &completed_null_tokens).unwrap();
+        assert_eq!(null_usage.usage_input_tokens, None);
+        assert_eq!(null_usage.usage_output_tokens, None);
+        assert!(null_usage.finished_at_unix_ms.is_some());
+        drop(store);
+        drop(directory);
+    }
+
+    #[test]
+    fn export_agent_turn_metrics_returns_durable_snapshot_and_rejects_unknown_turns() {
+        let (directory, store) = test_store();
+        let prepared = tule_core::prepare_agent_send(
+            store.as_ref(),
+            None,
+            "Hello",
+            None,
+            "",
+            crate::provider::PROVIDER_PROFILE_ID,
+            "gpt-5.5",
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+        assert!(matches!(
+            export_agent_turn_metrics_inner(store.as_ref(), &prepared.turn.id().to_string()),
+            Err(AgentIpcError::InvalidInput)
+        ));
+
+        tule_core::apply_agent_delta(store.as_ref(), prepared.turn.id(), "Hi").unwrap();
+        let completed = tule_core::complete_agent_turn(
+            store.as_ref(),
+            prepared.turn.id(),
+            Some("resp-1".into()),
+            Some(100),
+            None,
+        )
+        .unwrap();
+        let snapshot =
+            export_agent_turn_metrics_inner(store.as_ref(), &completed.id().to_string()).unwrap();
+        assert_eq!(snapshot.turn_id, completed.id().to_string());
+        assert_eq!(snapshot.session_id, completed.session_id().to_string());
+        assert_eq!(snapshot.ordinal, completed.ordinal());
+        assert_eq!(snapshot.state, "completed");
+        assert_eq!(
+            snapshot.provider_profile_id,
+            completed.provider_profile_id()
+        );
+        assert_eq!(snapshot.model_id, completed.model_id());
+        assert_eq!(snapshot.effort, None);
+        assert_eq!(snapshot.started_at_unix_ms, completed.started_at_unix_ms());
+        assert_eq!(
+            snapshot.finished_at_unix_ms,
+            completed.finished_at_unix_ms()
+        );
+        assert_eq!(
+            snapshot.duration_ms,
+            completed
+                .finished_at_unix_ms()
+                .map(|finished| finished.saturating_sub(completed.started_at_unix_ms()))
+        );
+        assert_eq!(snapshot.usage_input_tokens, Some(100));
+        assert_eq!(snapshot.usage_output_tokens, None);
+
+        assert!(matches!(
+            export_agent_turn_metrics_inner(store.as_ref(), "01900000-0000-7000-8000-000000000099"),
+            Err(AgentIpcError::InvalidInput)
+        ));
+        assert!(matches!(
+            export_agent_turn_metrics_inner(store.as_ref(), "not-a-turn-id"),
+            Err(AgentIpcError::InvalidInput)
+        ));
+        drop(store);
+        drop(directory);
     }
 
     #[tokio::test]

@@ -32,6 +32,10 @@ const baseTurn: AgentTurn = {
   state: "completed",
   errorCode: null,
   effort: null,
+  startedAtUnixMs: 1_700_000_000_000,
+  finishedAtUnixMs: 1_700_000_001_250,
+  usageInputTokens: null,
+  usageOutputTokens: null,
   sources: [],
 };
 
@@ -175,6 +179,7 @@ describe("AgentWorkspace", () => {
             agentText: "",
             state: "failed",
             errorCode: "provider_unavailable",
+            finishedAtUnixMs: 1_700_000_001_000,
           },
           {
             ...baseTurn,
@@ -182,6 +187,7 @@ describe("AgentWorkspace", () => {
             ordinal: 3,
             agentText: "Still streaming",
             state: "streaming",
+            finishedAtUnixMs: null,
           },
         ]}
         events={[]}
@@ -258,6 +264,124 @@ describe("AgentWorkspace", () => {
     expect(screen.getByText("grok-3")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Close" }));
     expect(onCloseArtifact).toHaveBeenCalled();
+  });
+
+  it("shows completed-turn metrics when present and copies via Copy metrics", () => {
+    const onCopyMetrics = vi.fn();
+    render(
+      <AgentWorkspace
+        title="Hello"
+        projectId={null}
+        projects={[]}
+        modelLabel="GPT-5.5"
+        modelOptions={[{ id: "gpt-5.5", displayName: "GPT-5.5" }]}
+        selectedModelId="gpt-5.5"
+        modelLocked={false}
+        effortAvailable={false}
+        effortValues={[]}
+        selectedEffort={null}
+        onEffortChange={() => undefined}
+        onModelChange={() => undefined}
+        turns={[
+          {
+            ...baseTurn,
+            usageInputTokens: 12,
+            usageOutputTokens: 34,
+          },
+          {
+            ...baseTurn,
+            id: "t2",
+            ordinal: 2,
+            usageInputTokens: null,
+            usageOutputTokens: null,
+          },
+          {
+            ...baseTurn,
+            id: "t3",
+            ordinal: 3,
+            state: "streaming",
+            finishedAtUnixMs: null,
+            usageInputTokens: 99,
+            usageOutputTokens: 1,
+          },
+        ]}
+        events={[]}
+        draft=""
+        pendingAttachment={null}
+        connected
+        sending={false}
+        sendBlocked={false}
+        cancelRequested={false}
+        activeTurnId={null}
+        errorMessage={null}
+        onDraftChange={vi.fn()}
+        onSend={vi.fn()}
+        onCancel={vi.fn()}
+        onAttach={vi.fn()}
+        onAttachFolder={vi.fn()}
+        onAttachLink={vi.fn()}
+        onRemoveAttachment={vi.fn()}
+        onProjectChange={vi.fn()}
+        onCopyMetrics={onCopyMetrics}
+      />,
+    );
+
+    expect(screen.getByText("Duration 1250 ms · Tokens 12 in / 34 out")).toBeInTheDocument();
+    expect(screen.getByText("Duration 1250 ms")).toBeInTheDocument();
+    expect(screen.queryByText(/Tokens 99 in/)).not.toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: "Copy metrics" })).toHaveLength(2);
+    const [firstCopyButton] = screen.getAllByRole("button", { name: "Copy metrics" });
+    expect(firstCopyButton).toBeTruthy();
+    fireEvent.click(firstCopyButton);
+    expect(onCopyMetrics).toHaveBeenCalledWith("t1");
+  });
+
+  it("clamps inverted completed-turn timestamps to a non-negative duration", () => {
+    render(
+      <AgentWorkspace
+        title="Hello"
+        projectId={null}
+        projects={[]}
+        modelLabel="GPT-5.5"
+        modelOptions={[{ id: "gpt-5.5", displayName: "GPT-5.5" }]}
+        selectedModelId="gpt-5.5"
+        modelLocked={false}
+        effortAvailable={false}
+        effortValues={[]}
+        selectedEffort={null}
+        onEffortChange={() => undefined}
+        onModelChange={() => undefined}
+        turns={[
+          {
+            ...baseTurn,
+            startedAtUnixMs: 1_700_000_001_250,
+            finishedAtUnixMs: 1_700_000_000_000,
+            usageInputTokens: null,
+            usageOutputTokens: null,
+          },
+        ]}
+        events={[]}
+        draft=""
+        pendingAttachment={null}
+        connected
+        sending={false}
+        sendBlocked={false}
+        cancelRequested={false}
+        activeTurnId={null}
+        errorMessage={null}
+        onDraftChange={vi.fn()}
+        onSend={vi.fn()}
+        onCancel={vi.fn()}
+        onAttach={vi.fn()}
+        onAttachFolder={vi.fn()}
+        onAttachLink={vi.fn()}
+        onRemoveAttachment={vi.fn()}
+        onProjectChange={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("Duration 0 ms")).toBeInTheDocument();
+    expect(screen.queryByText(/Duration -/)).not.toBeInTheDocument();
   });
 
   it("exposes attachment controls and transcript metadata accessibly", () => {
@@ -966,6 +1090,10 @@ describe("AgentWorkspace", () => {
             state: "failed",
             errorCode: "provider_unavailable",
             effort: null,
+            startedAtUnixMs: 1_700_000_000_000,
+            finishedAtUnixMs: 1_700_000_001_000,
+            usageInputTokens: null,
+            usageOutputTokens: null,
             sources: [],
           },
         ]}

@@ -49,7 +49,27 @@ export interface AgentTurn {
   state: AgentTurnState;
   errorCode: AgentErrorCode | null;
   effort: AgentEffort | null;
+  startedAtUnixMs: number;
+  finishedAtUnixMs: number | null;
+  usageInputTokens: number | null;
+  usageOutputTokens: number | null;
   sources: AgentSourceMetadata[];
+}
+
+/** Durable per-turn metrics snapshot returned by typed export IPC. */
+export interface AgentTurnMetricsExport {
+  turn_id: string;
+  session_id: string;
+  ordinal: number;
+  state: AgentTurnState;
+  provider_profile_id: string;
+  model_id: string;
+  effort: AgentEffort | null;
+  started_at_unix_ms: number;
+  finished_at_unix_ms: number | null;
+  duration_ms: number | null;
+  usage_input_tokens: number | null;
+  usage_output_tokens: number | null;
 }
 
 export interface ModelRequestControls {
@@ -223,6 +243,20 @@ const EVENT_METADATA_KEYS = [
   "sequence",
   "sessionId",
   "turnId",
+] as const;
+const TURN_METRICS_EXPORT_KEYS = [
+  "duration_ms",
+  "effort",
+  "finished_at_unix_ms",
+  "model_id",
+  "ordinal",
+  "provider_profile_id",
+  "session_id",
+  "started_at_unix_ms",
+  "state",
+  "turn_id",
+  "usage_input_tokens",
+  "usage_output_tokens",
 ] as const;
 /** ECMAScript Date time-value maximum (ms since Unix epoch). */
 const MAX_DATE_UNIX_MS = 8_640_000_000_000_000;
@@ -398,6 +432,14 @@ function isAgentEffort(value: unknown): value is AgentEffort {
   return typeof value === "string" && agentEfforts.includes(value as AgentEffort);
 }
 
+function isTokenCount(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
+function isNullableTokenCount(value: unknown): value is number | null {
+  return value === null || isTokenCount(value);
+}
+
 function isAgentTurn(value: unknown): value is AgentTurn {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     return false;
@@ -419,10 +461,57 @@ function isAgentTurn(value: unknown): value is AgentTurn {
     (value.errorCode === null || isAgentErrorCode(value.errorCode)) &&
     "effort" in value &&
     (value.effort === null || isAgentEffort(value.effort)) &&
+    "startedAtUnixMs" in value &&
+    isEventTimestamp(value.startedAtUnixMs) &&
+    "finishedAtUnixMs" in value &&
+    (value.finishedAtUnixMs === null || isEventTimestamp(value.finishedAtUnixMs)) &&
+    "usageInputTokens" in value &&
+    isNullableTokenCount(value.usageInputTokens) &&
+    "usageOutputTokens" in value &&
+    isNullableTokenCount(value.usageOutputTokens) &&
     "sources" in value &&
     Array.isArray(value.sources) &&
     value.sources.every(isSourceMetadata)
   );
+}
+
+function isAgentTurnMetricsExport(value: unknown): value is AgentTurnMetricsExport {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return false;
+  }
+  const record = value as Record<string, unknown>;
+  return (
+    hasExactKeys(record, TURN_METRICS_EXPORT_KEYS) &&
+    typeof record.turn_id === "string" &&
+    isUuidV7(record.turn_id) &&
+    typeof record.session_id === "string" &&
+    isUuidV7(record.session_id) &&
+    typeof record.ordinal === "number" &&
+    Number.isSafeInteger(record.ordinal) &&
+    record.ordinal >= 0 &&
+    typeof record.state === "string" &&
+    agentTurnStates.includes(record.state as AgentTurnState) &&
+    typeof record.provider_profile_id === "string" &&
+    record.provider_profile_id.length > 0 &&
+    typeof record.model_id === "string" &&
+    record.model_id.length > 0 &&
+    (record.effort === null || isAgentEffort(record.effort)) &&
+    isEventTimestamp(record.started_at_unix_ms) &&
+    (record.finished_at_unix_ms === null || isEventTimestamp(record.finished_at_unix_ms)) &&
+    (record.duration_ms === null ||
+      (typeof record.duration_ms === "number" &&
+        Number.isSafeInteger(record.duration_ms) &&
+        record.duration_ms >= 0)) &&
+    isNullableTokenCount(record.usage_input_tokens) &&
+    isNullableTokenCount(record.usage_output_tokens)
+  );
+}
+
+function validateTurnMetricsExport(value: unknown): AgentTurnMetricsExport {
+  if (!isAgentTurnMetricsExport(value)) {
+    throw new AgentError("agent_storage_unavailable");
+  }
+  return value;
 }
 
 function isModelRequestControls(value: unknown): value is ModelRequestControls {
@@ -894,6 +983,12 @@ export async function listArtifacts(
 
 export async function getArtifact(artifactId: string): Promise<ArtifactDetail> {
   return validateArtifactDetail(await invokeAgentCommand("get_artifact", { artifactId }));
+}
+
+export async function exportAgentTurnMetrics(turnId: string): Promise<AgentTurnMetricsExport> {
+  return validateTurnMetricsExport(
+    await invokeAgentCommand("export_agent_turn_metrics", { turnId }),
+  );
 }
 
 export async function getModelRequestControls(modelId: string): Promise<ModelRequestControls> {

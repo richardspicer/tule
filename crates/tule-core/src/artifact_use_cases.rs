@@ -645,8 +645,17 @@ mod tests {
     }
 
     fn completed_turn(store: &MemoryStore, agent_text: &str) -> AgentTurn {
-        let prepared =
-            prepare_agent_send(store, None, "user asks", None, "", "grok-3", None).unwrap();
+        let prepared = prepare_agent_send(
+            store,
+            None,
+            "user asks",
+            None,
+            "",
+            "xai-subscription-oauth",
+            "grok-3",
+            None,
+        )
+        .unwrap();
         apply_agent_delta(store, prepared.turn.id(), agent_text).unwrap();
         complete_agent_turn(store, prepared.turn.id(), None, None, None).unwrap()
     }
@@ -680,8 +689,17 @@ mod tests {
     #[test]
     fn create_rejects_non_completed_and_empty_text_without_writing() {
         let store = MemoryStore::default();
-        let prepared =
-            prepare_agent_send(&store, None, "user asks", None, "", "grok-3", None).unwrap();
+        let prepared = prepare_agent_send(
+            &store,
+            None,
+            "user asks",
+            None,
+            "",
+            "xai-subscription-oauth",
+            "grok-3",
+            None,
+        )
+        .unwrap();
         assert!(matches!(
             create_artifact_from_turn(
                 &store,

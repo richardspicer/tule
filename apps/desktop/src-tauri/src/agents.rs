@@ -499,6 +499,9 @@ fn map_prepare(error: tule_core::PrepareAgentSendError) -> AgentIpcError {
         tule_core::PrepareAgentSendError::SessionBusy => AgentIpcError::SessionBusy,
         tule_core::PrepareAgentSendError::SessionNotFound => AgentIpcError::InvalidInput,
         tule_core::PrepareAgentSendError::ProjectAssociationMismatch => AgentIpcError::InvalidInput,
+        tule_core::PrepareAgentSendError::ProviderProfileUnavailable(_) => {
+            AgentIpcError::InvalidInput
+        }
         tule_core::PrepareAgentSendError::ModelUnavailable(_) => AgentIpcError::ModelUnavailable,
         tule_core::PrepareAgentSendError::Time(_)
         | tule_core::PrepareAgentSendError::Repository(_) => AgentIpcError::AgentStorageUnavailable,
@@ -926,10 +929,32 @@ pub(crate) async fn send_agent_message(
         &user_text,
         project_id,
         &project_instructions,
+        crate::provider::PROVIDER_PROFILE_ID,
         &frozen_model_id,
         pending_source.as_ref(),
     )
     .map_err(map_prepare)?;
+    let request_json = match crate::xai_subscription::assemble_chat_completions_request_json(
+        &prepared.request_context,
+    ) {
+        Ok(json) => json,
+        Err(tule_core::AgentContextError::ContextLimit { .. }) => {
+            let _ = fail_with_public_error(
+                store.as_ref(),
+                prepared.turn.id(),
+                PublicError::ContextLimit,
+            );
+            return Err(AgentIpcError::from(PublicError::ContextLimit));
+        }
+        Err(tule_core::AgentContextError::InvalidInput(_)) => {
+            let _ = fail_with_public_error(
+                store.as_ref(),
+                prepared.turn.id(),
+                PublicError::InvalidInput,
+            );
+            return Err(AgentIpcError::InvalidInput);
+        }
+    };
     if let Some(handle) = source_draft_handle.as_ref() {
         state.source_drafts.clear_handle(handle);
     }
@@ -1012,7 +1037,7 @@ pub(crate) async fn send_agent_message(
         .stream(
             crate::provider::ProviderRequest {
                 session_id: prepared.session.id().to_string(),
-                request_json: prepared.request_json,
+                request_json,
             },
             token.clone(),
             Box::new(move |event| {
@@ -1281,9 +1306,17 @@ mod tests {
     #[test]
     fn accumulated_output_limit_reuses_the_existing_terminal_turn() {
         let (directory, store) = test_store();
-        let prepared =
-            tule_core::prepare_agent_send(store.as_ref(), None, "Hello", None, "", "gpt-5.5", None)
-                .unwrap();
+        let prepared = tule_core::prepare_agent_send(
+            store.as_ref(),
+            None,
+            "Hello",
+            None,
+            "",
+            crate::provider::PROVIDER_PROFILE_ID,
+            "gpt-5.5",
+            None,
+        )
+        .unwrap();
         tule_core::apply_agent_delta(
             store.as_ref(),
             prepared.turn.id(),
@@ -1329,6 +1362,7 @@ mod tests {
                 "Try again",
                 None,
                 "",
+                crate::provider::PROVIDER_PROFILE_ID,
                 "gpt-5.5",
                 None,
             )
@@ -1341,9 +1375,17 @@ mod tests {
     #[test]
     fn pre_stream_failure_terminalizes_pending_turn_once() {
         let (directory, store) = test_store();
-        let prepared =
-            tule_core::prepare_agent_send(store.as_ref(), None, "Hello", None, "", "gpt-5.5", None)
-                .unwrap();
+        let prepared = tule_core::prepare_agent_send(
+            store.as_ref(),
+            None,
+            "Hello",
+            None,
+            "",
+            crate::provider::PROVIDER_PROFILE_ID,
+            "gpt-5.5",
+            None,
+        )
+        .unwrap();
 
         let terminal = fail_with_public_error(
             store.as_ref(),
@@ -1376,6 +1418,7 @@ mod tests {
             "Hello",
             None,
             "",
+            crate::provider::PROVIDER_PROFILE_ID,
             "gpt-5.5",
             None,
         )
@@ -1447,6 +1490,7 @@ mod tests {
             "First turn",
             None,
             "",
+            crate::provider::PROVIDER_PROFILE_ID,
             "gpt-5.5",
             Some(&source),
         )
@@ -1548,9 +1592,17 @@ mod tests {
     #[test]
     fn session_detail_events_are_ordered_and_include_cancelled_terminal_kind() {
         let (directory, store) = test_store();
-        let prepared =
-            tule_core::prepare_agent_send(store.as_ref(), None, "Hello", None, "", "gpt-5.5", None)
-                .unwrap();
+        let prepared = tule_core::prepare_agent_send(
+            store.as_ref(),
+            None,
+            "Hello",
+            None,
+            "",
+            crate::provider::PROVIDER_PROFILE_ID,
+            "gpt-5.5",
+            None,
+        )
+        .unwrap();
         tule_core::cancel_agent_turn(store.as_ref(), prepared.turn.id()).unwrap();
 
         let events = store.list_events(&prepared.session.id()).unwrap();
@@ -1574,9 +1626,17 @@ mod tests {
     #[test]
     fn session_detail_events_include_interrupted_terminal_kind_after_recovery() {
         let (directory, store) = test_store();
-        let prepared =
-            tule_core::prepare_agent_send(store.as_ref(), None, "Hello", None, "", "gpt-5.5", None)
-                .unwrap();
+        let prepared = tule_core::prepare_agent_send(
+            store.as_ref(),
+            None,
+            "Hello",
+            None,
+            "",
+            crate::provider::PROVIDER_PROFILE_ID,
+            "gpt-5.5",
+            None,
+        )
+        .unwrap();
         let interrupted = tule_core::interrupt_inflight_turns(store.as_ref()).unwrap();
 
         assert_eq!(interrupted.len(), 1);
@@ -1594,9 +1654,17 @@ mod tests {
     #[test]
     fn artifact_dto_mapping_exposes_allowlisted_fields_only() {
         let (directory, store) = test_store();
-        let prepared =
-            tule_core::prepare_agent_send(store.as_ref(), None, "Hello", None, "", "gpt-5.5", None)
-                .unwrap();
+        let prepared = tule_core::prepare_agent_send(
+            store.as_ref(),
+            None,
+            "Hello",
+            None,
+            "",
+            crate::provider::PROVIDER_PROFILE_ID,
+            "gpt-5.5",
+            None,
+        )
+        .unwrap();
         tule_core::apply_agent_delta(store.as_ref(), prepared.turn.id(), "Saved body").unwrap();
         let turn =
             tule_core::complete_agent_turn(store.as_ref(), prepared.turn.id(), None, None, None)
@@ -1670,9 +1738,17 @@ mod tests {
     #[tokio::test]
     async fn cancellation_wins_while_pre_stream_refresh_is_pending() {
         let (directory, store) = test_store();
-        let prepared =
-            tule_core::prepare_agent_send(store.as_ref(), None, "Hello", None, "", "gpt-5.5", None)
-                .unwrap();
+        let prepared = tule_core::prepare_agent_send(
+            store.as_ref(),
+            None,
+            "Hello",
+            None,
+            "",
+            crate::provider::PROVIDER_PROFILE_ID,
+            "gpt-5.5",
+            None,
+        )
+        .unwrap();
         let token = CancellationToken::new();
         let cancel = token.clone();
         let outcome = tokio::time::timeout(

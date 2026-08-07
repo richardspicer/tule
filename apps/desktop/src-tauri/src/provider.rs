@@ -5,14 +5,20 @@ use std::{future::Future, pin::Pin};
 use serde::Serialize;
 use tokio_util::sync::CancellationToken;
 use tule_core::{
-    PROVIDER_PROFILE_ID, SelectedDefaultResolution, catalog_freshness, model_id_in_catalog,
-    resolve_selected_default, validate_model_id,
+    SelectedDefaultResolution, catalog_freshness, model_id_in_catalog, resolve_selected_default,
+    validate_model_id,
 };
 
 use crate::sqlite::SqliteStore;
 
 pub(crate) const PROVIDER_MODEL_CATALOG_CHANGED_EVENT: &str = "provider-model-catalog-changed";
 pub(crate) const PROVIDER_MODEL_SELECTION_CHANGED_EVENT: &str = "provider-model-selection-changed";
+
+/// Built-in xAI subscription OAuth provider-profile identifier.
+pub(crate) const PROVIDER_PROFILE_ID: &str = "xai-subscription-oauth";
+
+/// Upgrade-compatible default model identifier when still present in the catalog.
+pub(crate) const MODEL_ID: &str = "grok-3";
 
 /// Stored selected-default marker that forces an explicit new choice without
 /// falling back to the built-in catalog default.
@@ -212,7 +218,8 @@ pub(crate) fn build_selection_response(
             requires_selection: !entries.is_empty(),
         });
     }
-    let resolution = resolve_selected_default(selection.selected_model_id.as_deref(), &entries);
+    let resolution =
+        resolve_selected_default(selection.selected_model_id.as_deref(), &entries, MODEL_ID);
     match resolution {
         SelectedDefaultResolution::Available(model_id) => Ok(ProviderModelSelectionResponse {
             provider_id: PROVIDER_PROFILE_ID.to_owned(),

@@ -728,8 +728,10 @@ mod tests {
     use rusqlite::ErrorCode;
     use tule_core::{
         AgentEvent, AgentEventKind, AgentRepository, AgentSession, AgentTurn, AgentTurnState,
-        PROVIDER_PROFILE_ID, ProviderRequestId, Source, complete_agent_turn, prepare_agent_send,
+        ProviderRequestId, Source, complete_agent_turn, prepare_agent_send,
     };
+
+    use crate::provider::PROVIDER_PROFILE_ID;
 
     use super::*;
 
@@ -746,7 +748,8 @@ mod tests {
             "grok-3"
         );
 
-        let session = AgentSession::new("Unicode session", None, "gpt-5.5").unwrap();
+        let session =
+            AgentSession::new("Unicode session", None, PROVIDER_PROFILE_ID, "gpt-5.5").unwrap();
         let mut turn = AgentTurn::new_pending(
             session.id(),
             0,
@@ -754,6 +757,7 @@ mod tests {
             None,
             "keep\r\nexact",
             ProviderRequestId::generate(),
+            PROVIDER_PROFILE_ID,
             "gpt-5.5",
         )
         .unwrap();
@@ -840,9 +844,17 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let store = SqliteStore::open(directory.path().join("association.sqlite3")).unwrap();
         let project = tule_core::create_project(&store, "Project context").unwrap();
-        let prepared =
-            tule_core::prepare_agent_send(&store, None, "Hello", None, "", "gpt-5.5", None)
-                .unwrap();
+        let prepared = tule_core::prepare_agent_send(
+            &store,
+            None,
+            "Hello",
+            None,
+            "",
+            PROVIDER_PROFILE_ID,
+            "gpt-5.5",
+            None,
+        )
+        .unwrap();
         tule_core::complete_agent_turn(&store, prepared.turn.id(), None, None, None).unwrap();
 
         let mut changed = store.find_session(&prepared.session.id()).unwrap().unwrap();
@@ -880,9 +892,17 @@ mod tests {
     fn stale_terminal_write_cannot_change_terminal_kind() {
         let directory = tempfile::tempdir().unwrap();
         let store = SqliteStore::open(directory.path().join("terminal-cas.sqlite3")).unwrap();
-        let prepared =
-            tule_core::prepare_agent_send(&store, None, "Hello", None, "", "gpt-5.5", None)
-                .unwrap();
+        let prepared = tule_core::prepare_agent_send(
+            &store,
+            None,
+            "Hello",
+            None,
+            "",
+            PROVIDER_PROFILE_ID,
+            "gpt-5.5",
+            None,
+        )
+        .unwrap();
         let mut stale = prepared.turn.clone();
         let completed =
             tule_core::complete_agent_turn(&store, prepared.turn.id(), None, None, None).unwrap();
@@ -928,8 +948,13 @@ mod tests {
         let mut turn_ids = Vec::new();
 
         for index in 0..2 {
-            let mut session =
-                AgentSession::new(format!("Session {index}"), None, "gpt-5.5").unwrap();
+            let mut session = AgentSession::new(
+                format!("Session {index}"),
+                None,
+                PROVIDER_PROFILE_ID,
+                "gpt-5.5",
+            )
+            .unwrap();
             let mut turn = AgentTurn::new_pending(
                 session.id(),
                 0,
@@ -937,6 +962,7 @@ mod tests {
                 None,
                 "",
                 ProviderRequestId::generate(),
+                PROVIDER_PROFILE_ID,
                 "gpt-5.5",
             )
             .unwrap();
@@ -990,6 +1016,7 @@ mod tests {
             "Use folder",
             None,
             "",
+            PROVIDER_PROFILE_ID,
             "gpt-5.5",
             Some(&source),
         )
@@ -1013,9 +1040,17 @@ mod tests {
         let url = "https://example.com/readme.txt";
         let source =
             Source::new_remote_text_url("example.com/readme.txt", "hello link", url).unwrap();
-        let prepared =
-            prepare_agent_send(&store, None, "Use link", None, "", "gpt-5.5", Some(&source))
-                .unwrap();
+        let prepared = prepare_agent_send(
+            &store,
+            None,
+            "Use link",
+            None,
+            "",
+            PROVIDER_PROFILE_ID,
+            "gpt-5.5",
+            Some(&source),
+        )
+        .unwrap();
         let listed = store.list_turn_sources(&prepared.session.id()).unwrap();
         assert_eq!(listed[0].source().origin_kind(), "remote_text_url");
         assert_eq!(listed[0].source().canonical_url(), Some(url));
@@ -1041,6 +1076,7 @@ mod tests {
             "Use attachment",
             None,
             "",
+            PROVIDER_PROFILE_ID,
             "gpt-5.5",
             Some(&source),
         )
@@ -1088,6 +1124,7 @@ mod tests {
             "Use attachment",
             None,
             "",
+            PROVIDER_PROFILE_ID,
             "gpt-5.5",
             Some(&source),
         )
@@ -1131,8 +1168,17 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let store = SqliteStore::open(directory.path().join("source-unique.sqlite3")).unwrap();
         let source = Source::new_local_text("once.txt", "body").unwrap();
-        let first =
-            prepare_agent_send(&store, None, "First", None, "", "gpt-5.5", Some(&source)).unwrap();
+        let first = prepare_agent_send(
+            &store,
+            None,
+            "First",
+            None,
+            "",
+            PROVIDER_PROFILE_ID,
+            "gpt-5.5",
+            Some(&source),
+        )
+        .unwrap();
         complete_agent_turn(&store, first.turn.id(), None, None, None).unwrap();
         let second = prepare_agent_send(
             &store,
@@ -1140,6 +1186,7 @@ mod tests {
             "Second",
             None,
             "",
+            PROVIDER_PROFILE_ID,
             "gpt-5.5",
             None,
         )
@@ -1173,7 +1220,7 @@ mod tests {
     fn source_insert_rolls_back_with_turn_on_event_failure() {
         let directory = tempfile::tempdir().unwrap();
         let store = SqliteStore::open(directory.path().join("source-atomic.sqlite3")).unwrap();
-        let session = AgentSession::new("Atomic", None, "gpt-5.5").unwrap();
+        let session = AgentSession::new("Atomic", None, PROVIDER_PROFILE_ID, "gpt-5.5").unwrap();
         let turn = AgentTurn::new_pending(
             session.id(),
             0,
@@ -1181,6 +1228,7 @@ mod tests {
             None,
             "",
             ProviderRequestId::generate(),
+            PROVIDER_PROFILE_ID,
             "gpt-5.5",
         )
         .unwrap();

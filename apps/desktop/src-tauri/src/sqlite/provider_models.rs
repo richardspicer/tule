@@ -3,7 +3,9 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use rusqlite::{OptionalExtension, Transaction, params};
-use tule_core::{ModelCatalogEntry, PROVIDER_PROFILE_ID};
+use tule_core::ModelCatalogEntry;
+
+use crate::provider::PROVIDER_PROFILE_ID;
 
 use super::{SqliteStore, SqliteStoreError};
 

@@ -305,8 +305,17 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("artifacts.sqlite3");
         let store = SqliteStore::open(&path).unwrap();
-        let prepared =
-            prepare_agent_send(&store, None, "Save this", None, "", "grok-3", None).unwrap();
+        let prepared = prepare_agent_send(
+            &store,
+            None,
+            "Save this",
+            None,
+            "",
+            crate::provider::PROVIDER_PROFILE_ID,
+            "grok-3",
+            None,
+        )
+        .unwrap();
         apply_agent_delta(&store, prepared.turn.id(), "Frozen agent result").unwrap();
         let turn = complete_agent_turn(&store, prepared.turn.id(), None, None, None).unwrap();
 
@@ -356,7 +365,17 @@ mod tests {
     fn create_is_atomic_when_version_insert_would_fail() {
         let directory = tempfile::tempdir().unwrap();
         let store = SqliteStore::open(directory.path().join("atomic.sqlite3")).unwrap();
-        let prepared = prepare_agent_send(&store, None, "user", None, "", "grok-3", None).unwrap();
+        let prepared = prepare_agent_send(
+            &store,
+            None,
+            "user",
+            None,
+            "",
+            crate::provider::PROVIDER_PROFILE_ID,
+            "grok-3",
+            None,
+        )
+        .unwrap();
         apply_agent_delta(&store, prepared.turn.id(), "body").unwrap();
         let turn = complete_agent_turn(&store, prepared.turn.id(), None, None, None).unwrap();
         let (artifact, version) =
@@ -386,7 +405,17 @@ mod tests {
     fn reject_paths_do_not_write_rows() {
         let directory = tempfile::tempdir().unwrap();
         let store = SqliteStore::open(directory.path().join("reject.sqlite3")).unwrap();
-        let prepared = prepare_agent_send(&store, None, "user", None, "", "grok-3", None).unwrap();
+        let prepared = prepare_agent_send(
+            &store,
+            None,
+            "user",
+            None,
+            "",
+            crate::provider::PROVIDER_PROFILE_ID,
+            "grok-3",
+            None,
+        )
+        .unwrap();
         assert!(
             create_artifact_from_turn(&store, &store, &prepared.turn.id().to_string(), None, None)
                 .is_err()
@@ -414,16 +443,34 @@ mod tests {
         let store = SqliteStore::open(directory.path().join("list.sqlite3")).unwrap();
         let project = tule_core::create_project(&store, "Artifact project").unwrap();
 
-        let session_a =
-            prepare_agent_send(&store, None, "A", Some(project.id()), "", "grok-3", None).unwrap();
+        let session_a = prepare_agent_send(
+            &store,
+            None,
+            "A",
+            Some(project.id()),
+            "",
+            crate::provider::PROVIDER_PROFILE_ID,
+            "grok-3",
+            None,
+        )
+        .unwrap();
         apply_agent_delta(&store, session_a.turn.id(), "from session A").unwrap();
         let turn_a = complete_agent_turn(&store, session_a.turn.id(), None, None, None).unwrap();
         let (artifact_a, _) =
             create_artifact_from_turn(&store, &store, &turn_a.id().to_string(), None, None)
                 .unwrap();
 
-        let session_b =
-            prepare_agent_send(&store, None, "B", Some(project.id()), "", "grok-3", None).unwrap();
+        let session_b = prepare_agent_send(
+            &store,
+            None,
+            "B",
+            Some(project.id()),
+            "",
+            crate::provider::PROVIDER_PROFILE_ID,
+            "grok-3",
+            None,
+        )
+        .unwrap();
         apply_agent_delta(&store, session_b.turn.id(), "from session B").unwrap();
         let turn_b = complete_agent_turn(&store, session_b.turn.id(), None, None, None).unwrap();
         let (artifact_b, _) =

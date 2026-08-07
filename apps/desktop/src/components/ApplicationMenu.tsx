@@ -84,6 +84,7 @@ export function ApplicationMenu({ open, onOpenChange, onCommand }: ApplicationMe
   const menuOpenRef = useRef(open);
   const [availability, setAvailability] = useState(closedAvailability);
   const [activeIndex, setActiveIndex] = useState(0);
+  const activeIndexRef = useRef(activeIndex);
   const flatItems = flattenItems(availability);
 
   useEffect(() => {
@@ -94,6 +95,10 @@ export function ApplicationMenu({ open, onOpenChange, onCommand }: ApplicationMe
   useEffect(() => {
     menuOpenRef.current = open;
   }, [open]);
+
+  useEffect(() => {
+    activeIndexRef.current = activeIndex;
+  }, [activeIndex]);
 
   useEffect(() => {
     function trackEditableFocus(event: FocusEvent) {
@@ -164,13 +169,10 @@ export function ApplicationMenu({ open, onOpenChange, onCommand }: ApplicationMe
 
       if (event.key === "Enter") {
         event.preventDefault();
-        setActiveIndex((current) => {
-          const item = items[current];
-          if (item !== undefined && !item.disabled) {
-            dispatchMenuCommand(item.id);
-          }
-          return current;
-        });
+        const item = items[activeIndexRef.current];
+        if (item !== undefined && !item.disabled) {
+          dispatchMenuCommand(item.id);
+        }
       }
     }
 

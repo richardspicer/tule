@@ -52,4 +52,19 @@ describe("ApplicationMenu", () => {
     expect(draft).toHaveFocus();
     expect(onCommand).not.toHaveBeenCalledWith("edit-undo");
   });
+
+  it("dispatches a keyboard-activated non-edit command exactly once", async () => {
+    const user = userEvent.setup();
+    const onCommand = vi.fn();
+
+    render(<MenuHarness onCommand={onCommand} />);
+
+    await user.click(screen.getByRole("button", { name: "Application menu" }));
+    fireEvent.mouseEnter(screen.getByRole("menuitem", { name: /Open Settings/ }));
+    fireEvent.keyDown(window, { key: "Enter" });
+
+    expect(onCommand).toHaveBeenCalledTimes(1);
+    expect(onCommand).toHaveBeenCalledWith("open-settings");
+    expect(screen.queryByRole("menu", { name: "Application" })).not.toBeInTheDocument();
+  });
 });

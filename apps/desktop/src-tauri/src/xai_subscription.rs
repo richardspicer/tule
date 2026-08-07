@@ -23,9 +23,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::time::sleep;
 use tule_core::{
-    AgentContextError, AgentRepository, AgentRequestContext, CATALOG_TTL_MS, CatalogCandidate,
-    MAX_CONTEXT_UTF8, ProviderProfile, catalog_freshness, format_turn_user_content,
-    select_usable_catalog_entries,
+    AgentContextError, AgentEffort, AgentRepository, AgentRequestContext, CATALOG_TTL_MS,
+    CatalogCandidate, MAX_CONTEXT_UTF8, ProviderProfile, catalog_freshness,
+    format_turn_user_content, select_usable_catalog_entries,
 };
 use zeroize::Zeroize;
 
@@ -1384,10 +1384,68 @@ async fn emit_mock_inference(
     }
 }
 
+/// Revisioned exact-id Effort capability for chat/completions `reasoning_effort`.
+///
+/// Fail closed for unknown model ids. Defaults encode documented provider
+/// defaults for allowlisted models (`high` for `grok-4.5`; same default applied
+/// to `grok-4.3` until a model-specific documented default differs).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct EffortCapability {
+    pub(crate) default: AgentEffort,
+}
+
+/// Returns Effort capability when the exact model id is in the adapter allowlist.
+#[must_use]
+pub(crate) fn effort_capability_for_model(model_id: &str) -> Option<EffortCapability> {
+    match model_id {
+        "grok-4.3" | "grok-4.5" => Some(EffortCapability {
+            default: AgentEffort::High,
+        }),
+        _ => None,
+    }
+}
+
+/// Maps product Effort to the chat/completions `reasoning_effort` wire value.
+#[must_use]
+pub(crate) fn map_effort_to_reasoning_effort(effort: AgentEffort) -> &'static str {
+    match effort {
+        AgentEffort::Low => "low",
+        AgentEffort::Medium => "medium",
+        AgentEffort::High => "high",
+    }
+}
+
+/// Resolves Effort for a send using the adapter capability table.
+///
+/// Returns `(effort_available, resolved_effort)`. Client-supplied values are
+/// rejected when Effort is unavailable for the model.
+pub(crate) fn resolve_effort_for_send(
+    model_id: &str,
+    client_effort: Option<&str>,
+) -> Result<(bool, Option<AgentEffort>), PublicError> {
+    match effort_capability_for_model(model_id) {
+        None => {
+            if client_effort.is_some() {
+                return Err(PublicError::InvalidInput);
+            }
+            Ok((false, None))
+        }
+        Some(capability) => {
+            let effort = match client_effort {
+                None => capability.default,
+                Some(value) => AgentEffort::parse(value).map_err(|_| PublicError::InvalidInput)?,
+            };
+            Ok((true, Some(effort)))
+        }
+    }
+}
+
 /// Assembles the deterministic xAI chat/completions JSON body.
 ///
 /// Preserves the Phase 1 streaming wire contract: `model`, system/user/assistant
-/// `messages` (system instruction included), and `stream: true`.
+/// `messages` (system instruction included), and `stream: true`. When the
+/// frozen model is Effort-capable, includes mapped `reasoning_effort`; otherwise
+/// omits that field. Does not emit Speed / `service_tier` parameters.
 pub(crate) fn assemble_chat_completions_request_json(
     context: &AgentRequestContext,
 ) -> Result<String, AgentContextError> {
@@ -1409,7 +1467,14 @@ pub(crate) fn assemble_chat_completions_request_json(
         format_turn_user_content(&context.current_user_text, context.current_source.as_ref());
     body.push_str(",{\"role\":\"user\",\"content\":");
     append_json_string(&mut body, &current);
-    body.push_str("}],\"stream\":true}");
+    body.push_str("}],\"stream\":true");
+
+    if let Some(capability) = effort_capability_for_model(&context.model_id) {
+        let effort = context.effort.unwrap_or(capability.default);
+        body.push_str(",\"reasoning_effort\":");
+        append_json_string(&mut body, map_effort_to_reasoning_effort(effort));
+    }
+    body.push('}');
 
     if body.len() > MAX_CONTEXT_UTF8 {
         return Err(AgentContextError::ContextLimit {
@@ -2098,6 +2163,7 @@ mod tests {
             Some("Exact\ninstructions"),
             MODEL,
             None,
+            None,
         )
         .unwrap();
         let json = assemble_chat_completions_request_json(&context).unwrap();
@@ -2112,12 +2178,14 @@ mod tests {
         assert!(!json.contains("\"store\""));
         assert!(!json.contains("\"input\""));
         assert!(json.contains("\"stream\":true"));
+        assert!(!json.contains("reasoning_effort"));
+        assert!(!json.contains("service_tier"));
     }
 
     #[test]
     fn chat_completions_includes_system_instruction_without_project_block() {
         let context =
-            tule_core::build_agent_request_context(&[], "Hello", None, "other-model", None)
+            tule_core::build_agent_request_context(&[], "Hello", None, "other-model", None, None)
                 .unwrap();
         let json = assemble_chat_completions_request_json(&context).unwrap();
         assert!(!json.contains("Saved Project instructions"));
@@ -2125,6 +2193,64 @@ mod tests {
         assert!(json.contains("\"model\":\"other-model\""));
         assert!(json.contains("\"messages\""));
         assert!(json.contains("\"role\":\"system\""));
+        assert!(!json.contains("reasoning_effort"));
+    }
+
+    #[test]
+    fn effort_capable_model_maps_reasoning_effort_on_wire() {
+        let context = tule_core::build_agent_request_context(
+            &[],
+            "Hello",
+            None,
+            "grok-4.5",
+            None,
+            Some(AgentEffort::Medium),
+        )
+        .unwrap();
+        let json = assemble_chat_completions_request_json(&context).unwrap();
+        assert!(json.contains("\"model\":\"grok-4.5\""));
+        assert!(json.contains("\"reasoning_effort\":\"medium\""));
+        assert!(json.contains("\"stream\":true"));
+        assert!(!json.contains("service_tier"));
+
+        let default_context =
+            tule_core::build_agent_request_context(&[], "Hello", None, "grok-4.3", None, None)
+                .unwrap();
+        let default_json = assemble_chat_completions_request_json(&default_context).unwrap();
+        assert!(default_json.contains("\"reasoning_effort\":\"high\""));
+    }
+
+    #[test]
+    fn non_capable_model_omits_reasoning_effort_even_if_context_has_effort() {
+        let context = tule_core::build_agent_request_context(
+            &[],
+            "Hello",
+            None,
+            "grok-3",
+            None,
+            Some(AgentEffort::High),
+        )
+        .unwrap();
+        let json = assemble_chat_completions_request_json(&context).unwrap();
+        assert!(!json.contains("reasoning_effort"));
+        assert_eq!(
+            resolve_effort_for_send("grok-3", Some("high")),
+            Err(PublicError::InvalidInput)
+        );
+        assert_eq!(resolve_effort_for_send("grok-3", None), Ok((false, None)));
+        assert_eq!(
+            resolve_effort_for_send("grok-4.5", None),
+            Ok((true, Some(AgentEffort::High)))
+        );
+        assert_eq!(
+            resolve_effort_for_send("grok-4.5", Some("low")),
+            Ok((true, Some(AgentEffort::Low)))
+        );
+        assert_eq!(
+            resolve_effort_for_send("grok-4.5", Some("xhigh")),
+            Err(PublicError::InvalidInput)
+        );
+        assert!(effort_capability_for_model("unknown-model").is_none());
     }
 
     #[test]

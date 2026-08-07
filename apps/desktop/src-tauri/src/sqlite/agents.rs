@@ -455,10 +455,11 @@ fn insert_turn(
         .transpose()
         .map_err(|_| SqliteStoreError::Numeric)?;
     connection.execute(
-        "INSERT INTO agent_turns (id, session_id, ordinal, user_text, agent_text, state, error_code, provider_profile_id, model_id, provider_request_id, provider_response_id, usage_input_tokens, usage_output_tokens, project_id, project_instructions, prompt_version, started_at_unix_ms, finished_at_unix_ms)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+        "INSERT INTO agent_turns (id, session_id, ordinal, user_text, agent_text, state, error_code, provider_profile_id, model_id, effort, provider_request_id, provider_response_id, usage_input_tokens, usage_output_tokens, project_id, project_instructions, prompt_version, started_at_unix_ms, finished_at_unix_ms)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
         params![turn.id().to_string(), turn.session_id().to_string(), ordinal, turn.user_text(), turn.agent_text(),
             turn.state().as_str(), turn.error_code(), turn.provider_profile_id(), turn.model_id(),
+            turn.effort().map(|effort| effort.as_str()),
             turn.provider_request_id().to_string(), turn.provider_response_id(), input, output,
             turn.project_id().map(|id| id.to_string()), turn.project_instructions(), turn.prompt_version(),
             turn.started_at_unix_ms(), turn.finished_at_unix_ms()],
@@ -624,6 +625,7 @@ type TurnRow = (
     Option<String>,
     String,
     String,
+    Option<String>,
     String,
     Option<String>,
     Option<i64>,
@@ -636,7 +638,7 @@ type TurnRow = (
 );
 fn turn_select(suffix: &str) -> String {
     format!(
-        "SELECT id, session_id, ordinal, user_text, agent_text, state, error_code, provider_profile_id, model_id, provider_request_id, provider_response_id, usage_input_tokens, usage_output_tokens, project_id, project_instructions, prompt_version, started_at_unix_ms, finished_at_unix_ms FROM agent_turns{suffix}"
+        "SELECT id, session_id, ordinal, user_text, agent_text, state, error_code, provider_profile_id, model_id, effort, provider_request_id, provider_response_id, usage_input_tokens, usage_output_tokens, project_id, project_instructions, prompt_version, started_at_unix_ms, finished_at_unix_ms FROM agent_turns{suffix}"
     )
 }
 fn turn_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TurnRow> {
@@ -659,6 +661,7 @@ fn turn_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TurnRow> {
         row.get(15)?,
         row.get(16)?,
         row.get(17)?,
+        row.get(18)?,
     ))
 }
 fn reconstruct_turn(row: TurnRow) -> Result<AgentTurn, SqliteStoreError> {
@@ -672,21 +675,22 @@ fn reconstruct_turn(row: TurnRow) -> Result<AgentTurn, SqliteStoreError> {
         row.6,
         row.7,
         row.8,
-        &row.9,
-        row.10,
-        row.11
-            .map(u64::try_from)
-            .transpose()
-            .map_err(|_| SqliteStoreError::Numeric)?,
+        row.9.as_deref(),
+        &row.10,
+        row.11,
         row.12
             .map(u64::try_from)
             .transpose()
             .map_err(|_| SqliteStoreError::Numeric)?,
-        row.13.as_deref(),
-        row.14,
+        row.13
+            .map(u64::try_from)
+            .transpose()
+            .map_err(|_| SqliteStoreError::Numeric)?,
+        row.14.as_deref(),
         row.15,
         row.16,
         row.17,
+        row.18,
     )
     .map_err(SqliteStoreError::MalformedAgent)
 }
@@ -727,8 +731,8 @@ fn reconstruct_event(row: EventRow) -> Result<AgentEvent, SqliteStoreError> {
 mod tests {
     use rusqlite::ErrorCode;
     use tule_core::{
-        AgentEvent, AgentEventKind, AgentRepository, AgentSession, AgentTurn, AgentTurnState,
-        ProviderRequestId, Source, complete_agent_turn, prepare_agent_send,
+        AgentEffort, AgentEvent, AgentEventKind, AgentRepository, AgentSession, AgentTurn,
+        AgentTurnState, ProviderRequestId, Source, complete_agent_turn, prepare_agent_send,
     };
 
     use crate::provider::PROVIDER_PROFILE_ID;
@@ -759,6 +763,7 @@ mod tests {
             ProviderRequestId::generate(),
             PROVIDER_PROFILE_ID,
             "gpt-5.5",
+            None,
         )
         .unwrap();
         let created =
@@ -853,6 +858,8 @@ mod tests {
             PROVIDER_PROFILE_ID,
             "gpt-5.5",
             None,
+            None,
+            false,
         )
         .unwrap();
         tule_core::complete_agent_turn(&store, prepared.turn.id(), None, None, None).unwrap();
@@ -901,6 +908,8 @@ mod tests {
             PROVIDER_PROFILE_ID,
             "gpt-5.5",
             None,
+            None,
+            false,
         )
         .unwrap();
         let mut stale = prepared.turn.clone();
@@ -964,6 +973,7 @@ mod tests {
                 ProviderRequestId::generate(),
                 PROVIDER_PROFILE_ID,
                 "gpt-5.5",
+                None,
             )
             .unwrap();
             let created =
@@ -1019,6 +1029,8 @@ mod tests {
             PROVIDER_PROFILE_ID,
             "gpt-5.5",
             Some(&source),
+            None,
+            false,
         )
         .unwrap();
         let listed = store.list_turn_sources(&prepared.session.id()).unwrap();
@@ -1049,6 +1061,8 @@ mod tests {
             PROVIDER_PROFILE_ID,
             "gpt-5.5",
             Some(&source),
+            None,
+            false,
         )
         .unwrap();
         let listed = store.list_turn_sources(&prepared.session.id()).unwrap();
@@ -1079,6 +1093,8 @@ mod tests {
             PROVIDER_PROFILE_ID,
             "gpt-5.5",
             Some(&source),
+            None,
+            false,
         )
         .unwrap();
         let listed = store.list_turn_sources(&prepared.session.id()).unwrap();
@@ -1127,6 +1143,8 @@ mod tests {
             PROVIDER_PROFILE_ID,
             "gpt-5.5",
             Some(&source),
+            None,
+            false,
         )
         .unwrap();
         store
@@ -1177,6 +1195,8 @@ mod tests {
             PROVIDER_PROFILE_ID,
             "gpt-5.5",
             Some(&source),
+            None,
+            false,
         )
         .unwrap();
         complete_agent_turn(&store, first.turn.id(), None, None, None).unwrap();
@@ -1189,6 +1209,8 @@ mod tests {
             PROVIDER_PROFILE_ID,
             "gpt-5.5",
             None,
+            None,
+            false,
         )
         .unwrap();
         let error = store
@@ -1230,6 +1252,7 @@ mod tests {
             ProviderRequestId::generate(),
             PROVIDER_PROFILE_ID,
             "gpt-5.5",
+            None,
         )
         .unwrap();
         let created =
@@ -1257,5 +1280,91 @@ mod tests {
             .unwrap();
         assert_eq!(source_count, 0);
         assert_eq!(turn_count, 0);
+    }
+
+    #[test]
+    fn effort_provenance_round_trips_on_turns() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = SqliteStore::open(directory.path().join("effort.sqlite3")).unwrap();
+        let session =
+            AgentSession::new("Effort session", None, PROVIDER_PROFILE_ID, "grok-4.5").unwrap();
+        let turn = AgentTurn::new_pending(
+            session.id(),
+            0,
+            "Hello",
+            None,
+            "",
+            ProviderRequestId::generate(),
+            PROVIDER_PROFILE_ID,
+            "grok-4.5",
+            Some(AgentEffort::Medium),
+        )
+        .unwrap();
+        let created =
+            AgentEvent::new(session.id(), None, 0, AgentEventKind::SessionCreated).unwrap();
+        let pending = AgentEvent::new(
+            session.id(),
+            Some(turn.id()),
+            1,
+            AgentEventKind::TurnPending,
+        )
+        .unwrap();
+        store
+            .create_session_with_first_turn(&session, &turn, &created, &pending, None)
+            .unwrap();
+        let loaded = store.find_turn(&turn.id()).unwrap().unwrap();
+        assert_eq!(loaded.effort(), Some(AgentEffort::Medium));
+        assert_eq!(loaded.model_id(), "grok-4.5");
+        {
+            let connection = store.connection().unwrap();
+            let effort: Option<String> = connection
+                .query_row(
+                    "SELECT effort FROM agent_turns WHERE id = ?1",
+                    [turn.id().to_string()],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(effort.as_deref(), Some("medium"));
+        }
+
+        let no_effort_session =
+            AgentSession::new("Plain", None, PROVIDER_PROFILE_ID, "grok-3").unwrap();
+        let no_effort = AgentTurn::new_pending(
+            no_effort_session.id(),
+            0,
+            "Hi",
+            None,
+            "",
+            ProviderRequestId::generate(),
+            PROVIDER_PROFILE_ID,
+            "grok-3",
+            None,
+        )
+        .unwrap();
+        let created2 = AgentEvent::new(
+            no_effort_session.id(),
+            None,
+            0,
+            AgentEventKind::SessionCreated,
+        )
+        .unwrap();
+        let pending2 = AgentEvent::new(
+            no_effort_session.id(),
+            Some(no_effort.id()),
+            1,
+            AgentEventKind::TurnPending,
+        )
+        .unwrap();
+        store
+            .create_session_with_first_turn(
+                &no_effort_session,
+                &no_effort,
+                &created2,
+                &pending2,
+                None,
+            )
+            .unwrap();
+        let loaded_plain = store.find_turn(&no_effort.id()).unwrap().unwrap();
+        assert_eq!(loaded_plain.effort(), None);
     }
 }

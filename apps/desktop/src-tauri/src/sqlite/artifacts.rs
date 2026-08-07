@@ -314,6 +314,8 @@ mod tests {
             crate::provider::PROVIDER_PROFILE_ID,
             "grok-3",
             None,
+            None,
+            false,
         )
         .unwrap();
         apply_agent_delta(&store, prepared.turn.id(), "Frozen agent result").unwrap();
@@ -374,6 +376,8 @@ mod tests {
             crate::provider::PROVIDER_PROFILE_ID,
             "grok-3",
             None,
+            None,
+            false,
         )
         .unwrap();
         apply_agent_delta(&store, prepared.turn.id(), "body").unwrap();
@@ -414,6 +418,8 @@ mod tests {
             crate::provider::PROVIDER_PROFILE_ID,
             "grok-3",
             None,
+            None,
+            false,
         )
         .unwrap();
         assert!(
@@ -452,6 +458,8 @@ mod tests {
             crate::provider::PROVIDER_PROFILE_ID,
             "grok-3",
             None,
+            None,
+            false,
         )
         .unwrap();
         apply_agent_delta(&store, session_a.turn.id(), "from session A").unwrap();
@@ -469,6 +477,8 @@ mod tests {
             crate::provider::PROVIDER_PROFILE_ID,
             "grok-3",
             None,
+            None,
+            false,
         )
         .unwrap();
         apply_agent_delta(&store, session_b.turn.id(), "from session B").unwrap();

@@ -37,6 +37,10 @@ export interface AgentSourceMetadata {
   canonicalUrl: string | null;
 }
 
+export type AgentEffort = "low" | "medium" | "high";
+
+const agentEfforts: readonly AgentEffort[] = ["low", "medium", "high"];
+
 export interface AgentTurn {
   id: string;
   ordinal: number;
@@ -44,7 +48,16 @@ export interface AgentTurn {
   agentText: string;
   state: AgentTurnState;
   errorCode: AgentErrorCode | null;
+  effort: AgentEffort | null;
   sources: AgentSourceMetadata[];
+}
+
+export interface ModelRequestControls {
+  modelId: string;
+  effortAvailable: boolean;
+  effortValues: AgentEffort[];
+  effortDefault: AgentEffort | null;
+  speedAvailable: boolean;
 }
 
 export type AgentEventKind =
@@ -381,6 +394,10 @@ function isAgentEvent(value: unknown): value is AgentEvent {
   );
 }
 
+function isAgentEffort(value: unknown): value is AgentEffort {
+  return typeof value === "string" && agentEfforts.includes(value as AgentEffort);
+}
+
 function isAgentTurn(value: unknown): value is AgentTurn {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     return false;
@@ -400,9 +417,33 @@ function isAgentTurn(value: unknown): value is AgentTurn {
     agentTurnStates.includes(value.state as AgentTurnState) &&
     "errorCode" in value &&
     (value.errorCode === null || isAgentErrorCode(value.errorCode)) &&
+    "effort" in value &&
+    (value.effort === null || isAgentEffort(value.effort)) &&
     "sources" in value &&
     Array.isArray(value.sources) &&
     value.sources.every(isSourceMetadata)
+  );
+}
+
+function isModelRequestControls(value: unknown): value is ModelRequestControls {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return false;
+  }
+  const record = value as Record<string, unknown>;
+  return (
+    typeof record.modelId === "string" &&
+    record.modelId.length > 0 &&
+    typeof record.effortAvailable === "boolean" &&
+    Array.isArray(record.effortValues) &&
+    record.effortValues.every(isAgentEffort) &&
+    (record.effortDefault === null || isAgentEffort(record.effortDefault)) &&
+    typeof record.speedAvailable === "boolean" &&
+    record.speedAvailable === false &&
+    (record.effortAvailable
+      ? record.effortValues.length === 3 &&
+        record.effortDefault !== null &&
+        record.effortValues.includes(record.effortDefault)
+      : record.effortValues.length === 0 && record.effortDefault === null)
   );
 }
 
@@ -855,11 +896,20 @@ export async function getArtifact(artifactId: string): Promise<ArtifactDetail> {
   return validateArtifactDetail(await invokeAgentCommand("get_artifact", { artifactId }));
 }
 
+export async function getModelRequestControls(modelId: string): Promise<ModelRequestControls> {
+  const value = await invokeAgentCommand("get_model_request_controls", { modelId });
+  if (!isModelRequestControls(value)) {
+    throw new AgentError("agent_storage_unavailable");
+  }
+  return value;
+}
+
 export async function sendAgentMessage(options: {
   sessionId: string | null;
   userText: string;
   projectId: string | null;
   modelId: string | null;
+  effort: AgentEffort | null;
   sourceDraftHandle: string | null;
   onEvent: (event: AgentStreamEvent) => void;
 }): Promise<void> {
@@ -877,6 +927,7 @@ export async function sendAgentMessage(options: {
       userText: options.userText,
       projectId: options.projectId,
       modelId: options.modelId,
+      effort: options.effort,
       sourceDraftHandle: options.sourceDraftHandle,
       channel,
     });

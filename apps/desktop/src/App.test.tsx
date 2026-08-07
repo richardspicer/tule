@@ -40,6 +40,7 @@ const {
   pickAgentTextFolderSourceMock,
   attachAgentTextLinkSourceMock,
   sendAgentMessageMock,
+  getModelRequestControlsMock,
   setAgentSessionProjectMock,
   setAgentSourceDraftScopeMock,
   syncConnectionStatusMock,
@@ -56,6 +57,7 @@ const {
   getPersistedProviderModelCatalogMock: vi.fn(),
   getProviderModelCatalogMock: vi.fn(),
   getProviderModelSelectionMock: vi.fn(),
+  getModelRequestControlsMock: vi.fn(),
   listAgentSessionsMock: vi.fn(),
   listArtifactsMock: vi.fn(),
   createArtifactFromTurnMock: vi.fn(),
@@ -131,6 +133,7 @@ vi.mock("./platform/agents", async (importOriginal) => {
     createArtifactFromTurn: createArtifactFromTurnMock,
     getArtifact: getArtifactMock,
     getAgentSession: getAgentSessionMock,
+    getModelRequestControls: getModelRequestControlsMock,
     sendAgentMessage: sendAgentMessageMock,
     cancelAgentTurn: cancelAgentTurnMock,
     setAgentSessionProject: setAgentSessionProjectMock,
@@ -173,6 +176,7 @@ describe("App", () => {
     pickAgentTextFolderSourceMock.mockReset();
     attachAgentTextLinkSourceMock.mockReset();
     sendAgentMessageMock.mockReset();
+    getModelRequestControlsMock.mockReset();
     setAgentSessionProjectMock.mockReset();
     setAgentSourceDraftScopeMock.mockReset();
     syncConnectionStatusMock.mockReset();
@@ -231,6 +235,15 @@ describe("App", () => {
       selectedModelId: "grok-3",
       requiresSelection: false,
     });
+    getModelRequestControlsMock.mockImplementation((modelId: string) =>
+      Promise.resolve({
+        modelId,
+        effortAvailable: false,
+        effortValues: [],
+        effortDefault: null,
+        speedAvailable: false,
+      }),
+    );
     loadThemePreferenceMock.mockResolvedValue("system");
     listenAppearanceChangedMock.mockResolvedValue(vi.fn());
     listenConnectionStatusChangedMock.mockResolvedValue(vi.fn());
@@ -483,6 +496,7 @@ describe("App", () => {
           agentText: "Persisted answer",
           state: "completed",
           errorCode: null,
+          effort: null,
           sources: [],
         },
       ],
@@ -517,6 +531,7 @@ describe("App", () => {
           agentText: "Persisted answer",
           state: "completed",
           errorCode: null,
+          effort: null,
           sources: [],
         },
       ],
@@ -558,6 +573,7 @@ describe("App", () => {
             agentText: "Used it",
             state: "completed",
             errorCode: null,
+            effort: null,
             sources: [
               {
                 id: "55555555-5555-7555-8555-555555555555",
@@ -618,6 +634,7 @@ describe("App", () => {
               agentText: "Hi",
               state: "completed",
               errorCode: null,
+              effort: null,
               sources: [],
             },
           });
@@ -642,6 +659,7 @@ describe("App", () => {
               agentText: "Got it",
               state: "completed",
               errorCode: null,
+              effort: null,
               sources: [
                 {
                   id: "55555555-5555-7555-8555-555555555555",
@@ -722,6 +740,7 @@ describe("App", () => {
           agentText: "Stale answer",
           state: "completed",
           errorCode: null,
+          effort: null,
           sources: [],
         },
       ],
@@ -778,6 +797,7 @@ describe("App", () => {
           agentText: "Latest answer",
           state: "completed",
           errorCode: null,
+          effort: null,
           sources: [],
         },
       ],
@@ -795,6 +815,7 @@ describe("App", () => {
           agentText: "Older answer",
           state: "completed",
           errorCode: null,
+          effort: null,
           sources: [],
         },
       ],
@@ -1096,6 +1117,7 @@ describe("App", () => {
             agentText: "",
             state: "failed",
             errorCode: "authentication_required",
+            effort: null,
             sources: [],
           },
         });
@@ -1156,6 +1178,7 @@ describe("App", () => {
           agentText: "",
           state: "cancelled",
           errorCode: "cancelled",
+          effort: null,
           sources: [],
         },
       });

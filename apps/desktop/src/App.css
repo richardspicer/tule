@@ -749,6 +749,19 @@ textarea:focus-visible {
   margin-top: 8px;
 }
 
+.composer-effort {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-right: auto;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.composer-effort select {
+  max-width: 7.5rem;
+}
+
 .composer-icon {
   color: var(--text);
 }

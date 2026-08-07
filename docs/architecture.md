@@ -41,22 +41,26 @@ behavior or React components.
 The first Agent slice lives in `tule-core` as provider-neutral session, turn,
 event, lifecycle, conversation-context, and model-selection use cases. Core
 prepares neutral request context (composed instructions, completed history,
-current user text, optional Source framing, and frozen model identifier) and
-persists stable provider-profile and model identifier strings on sessions and
-turns. It does not build chat/completions or Responses request-body JSON, and it
-does not own built-in provider-profile or default-model constants. The desktop
-host persists non-secret session state in the shared SQLite store, streams
-ordered channel events to the interface, and owns one xAI subscription OAuth
-adapter (RFC 8628 device-code against `auth.x.ai`, catalog and streamed
-chat/completions against `api.x.ai`). That adapter owns built-in profile and
-upgrade-default model identifiers, serialises the chat/completions wire body
-from core's neutral context, and performs network send. Credentials stay in the
-OS credential store behind an opaque handle. The frontend receives only typed
-connection status, allowlisted device pairing metadata (verification URI and
-user code during connect), allowlisted model-catalog metadata, selected-default
-state, and transcript data; it never receives authorization URLs beyond the
-allowlisted verification URI, codes, tokens, account identifiers, raw catalog
-payloads, provider instructions, tool definitions, or raw provider frames.
+current user text, optional Source framing, frozen model identifier, and optional
+product Effort) and persists stable provider-profile and model identifier strings
+on sessions and turns, plus nullable Effort provenance on each turn when that
+control was available. It does not build chat/completions or Responses
+request-body JSON, does not name provider wire keys such as `reasoning_effort` or
+`service_tier`, and it does not own built-in provider-profile or default-model
+constants. The desktop host persists non-secret session state in the shared
+SQLite store, streams ordered channel events to the interface, and owns one xAI
+subscription OAuth adapter (RFC 8628 device-code against `auth.x.ai`, catalog and
+streamed chat/completions against `api.x.ai`). That adapter owns built-in profile
+and upgrade-default model identifiers, a revisioned exact-id request-control
+capability table, serialises the chat/completions wire body from core's neutral
+context (including mapped Effort when capable), and performs network send.
+Credentials stay in the OS credential store behind an opaque handle. The frontend
+receives only typed connection status, allowlisted device pairing metadata
+(verification URI and user code during connect), allowlisted model-catalog
+metadata, selected-default state, allowlisted request-control capability facts,
+and transcript data; it never receives authorization URLs beyond the allowlisted
+verification URI, codes, tokens, account identifiers, raw catalog payloads,
+provider instructions, tool definitions, or raw provider frames.
 
 After a successful connection, the native adapter fetches an account-aware model
 catalog from `GET https://api.x.ai/v1/models` using the existing credentials,
@@ -91,7 +95,24 @@ session to change models. Existing `grok-3` upgrade default and historical ChatG
 preserved separately. Allowlisted
 model rejection surfaces as `model_unavailable`, refreshes or stales the catalog,
 clears a rejected default, and requires a new-session choice without silent
-fallback or retry under another model. Tools, connectors, filesystem access,
+fallback or retry under another model.
+
+Request controls follow a truthful-mapping rule: a product control (Effort or
+Speed) is operable only when the active adapter can map the user's selection into
+a documented request parameter for the session's frozen model and will actually
+send that parameter. Unsupported controls are unavailable in the UI and rejected
+if a client supplies a value anyway; they are never simulated. For the Phase 1
+xAI chat/completions adapter, product Effort Low / Medium / High maps to wire
+`reasoning_effort` `"low"` / `"medium"` / `"high"` only for exact model ids in
+the adapter capability table (initially `grok-4.3` and `grok-4.5`, with documented
+default `high`). Unknown or non-capable models, including `grok-3`, omit
+`reasoning_effort`, keep Effort unavailable, and reject client-supplied Effort.
+Speed has no truthful mapping on this path and remains unavailable (no
+`service_tier` or invent-equivalent mapping). Effort may change per turn when
+available; model freeze is unchanged. Ordinary send stays on streaming
+chat/completions.
+
+Tools, connectors, filesystem access,
 autonomous retries, and active-session model switching are out of scope for this
 slice.
 

@@ -31,6 +31,7 @@ const baseTurn: AgentTurn = {
   agentText: "Hello",
   state: "completed",
   errorCode: null,
+  effort: null,
   sources: [],
 };
 
@@ -72,6 +73,10 @@ describe("AgentWorkspace", () => {
         modelOptions={[{ id: "gpt-5.5", displayName: "GPT-5.5" }]}
         selectedModelId="gpt-5.5"
         modelLocked={false}
+        effortAvailable={false}
+        effortValues={[]}
+        selectedEffort={null}
+        onEffortChange={() => undefined}
         onModelChange={() => undefined}
         turns={[]}
         events={[]}
@@ -110,6 +115,10 @@ describe("AgentWorkspace", () => {
         modelOptions={[{ id: "gpt-5.5", displayName: "GPT-5.5" }]}
         selectedModelId="gpt-5.5"
         modelLocked={false}
+        effortAvailable={false}
+        effortValues={[]}
+        selectedEffort={null}
+        onEffortChange={() => undefined}
         onModelChange={() => undefined}
         turns={[baseTurn]}
         events={baseEvents}
@@ -152,6 +161,10 @@ describe("AgentWorkspace", () => {
         modelOptions={[{ id: "gpt-5.5", displayName: "GPT-5.5" }]}
         selectedModelId="gpt-5.5"
         modelLocked={false}
+        effortAvailable={false}
+        effortValues={[]}
+        selectedEffort={null}
+        onEffortChange={() => undefined}
         onModelChange={() => undefined}
         turns={[
           baseTurn,
@@ -259,6 +272,10 @@ describe("AgentWorkspace", () => {
         modelOptions={[{ id: "gpt-5.5", displayName: "GPT-5.5" }]}
         selectedModelId="gpt-5.5"
         modelLocked={false}
+        effortAvailable={false}
+        effortValues={[]}
+        selectedEffort={null}
+        onEffortChange={() => undefined}
         onModelChange={() => undefined}
         turns={[
           {
@@ -338,6 +355,10 @@ describe("AgentWorkspace", () => {
         modelOptions={[{ id: "gpt-5.5", displayName: "GPT-5.5" }]}
         selectedModelId="gpt-5.5"
         modelLocked={false}
+        effortAvailable={false}
+        effortValues={[]}
+        selectedEffort={null}
+        onEffortChange={() => undefined}
         onModelChange={() => undefined}
         turns={[]}
         events={[]}
@@ -400,6 +421,10 @@ describe("AgentWorkspace", () => {
         modelOptions={[{ id: "gpt-5.5", displayName: "GPT-5.5" }]}
         selectedModelId="gpt-5.5"
         modelLocked={false}
+        effortAvailable={false}
+        effortValues={[]}
+        selectedEffort={null}
+        onEffortChange={() => undefined}
         onModelChange={() => undefined}
         turns={[]}
         events={[]}
@@ -442,6 +467,10 @@ describe("AgentWorkspace", () => {
         modelOptions={[{ id: "gpt-5.5", displayName: "GPT-5.5" }]}
         selectedModelId="gpt-5.5"
         modelLocked={false}
+        effortAvailable={false}
+        effortValues={[]}
+        selectedEffort={null}
+        onEffortChange={() => undefined}
         onModelChange={() => undefined}
         turns={[baseTurn]}
         events={[]}
@@ -478,6 +507,10 @@ describe("AgentWorkspace", () => {
         modelOptions={[{ id: "gpt-5.5", displayName: "GPT-5.5" }]}
         selectedModelId="gpt-5.5"
         modelLocked={false}
+        effortAvailable={false}
+        effortValues={[]}
+        selectedEffort={null}
+        onEffortChange={() => undefined}
         onModelChange={() => undefined}
         turns={[baseTurn]}
         events={[]}
@@ -522,6 +555,10 @@ describe("AgentWorkspace", () => {
         modelOptions={[{ id: "gpt-5.5", displayName: "GPT-5.5" }]}
         selectedModelId="gpt-5.5"
         modelLocked={false}
+        effortAvailable={false}
+        effortValues={[]}
+        selectedEffort={null}
+        onEffortChange={() => undefined}
         onModelChange={() => undefined}
         turns={[]}
         events={[]}
@@ -569,6 +606,10 @@ describe("AgentWorkspace", () => {
         modelOptions={[{ id: "gpt-5.5", displayName: "GPT-5.5" }]}
         selectedModelId="gpt-5.5"
         modelLocked={false}
+        effortAvailable={false}
+        effortValues={[]}
+        selectedEffort={null}
+        onEffortChange={() => undefined}
         onModelChange={() => undefined}
         turns={[baseTurn]}
         events={[]}
@@ -606,6 +647,10 @@ describe("AgentWorkspace", () => {
         modelOptions={[{ id: "gpt-5.5", displayName: "GPT-5.5" }]}
         selectedModelId="gpt-5.5"
         modelLocked={false}
+        effortAvailable={false}
+        effortValues={[]}
+        selectedEffort={null}
+        onEffortChange={() => undefined}
         onModelChange={() => undefined}
         turns={[{ ...baseTurn, state: "streaming", agentText: "Hel" }]}
         events={[]}
@@ -643,6 +688,10 @@ describe("AgentWorkspace", () => {
         modelOptions={[{ id: "gpt-5.5", displayName: "GPT-5.5" }]}
         selectedModelId="gpt-5.5"
         modelLocked={false}
+        effortAvailable={false}
+        effortValues={[]}
+        selectedEffort={null}
+        onEffortChange={() => undefined}
         onModelChange={() => undefined}
         turns={[{ ...baseTurn, state: "streaming", agentText: "Hello" }]}
         events={[]}
@@ -683,6 +732,10 @@ describe("AgentWorkspace", () => {
         modelOptions={[{ id: "gpt-5.5", displayName: "GPT-5.5" }]}
         selectedModelId="gpt-5.5"
         modelLocked={false}
+        effortAvailable={false}
+        effortValues={[]}
+        selectedEffort={null}
+        onEffortChange={() => undefined}
         onModelChange={() => undefined}
         turns={[]}
         events={[]}
@@ -723,6 +776,10 @@ describe("AgentWorkspace", () => {
         modelOptions={[{ id: "gpt-5.5", displayName: "GPT-5.5" }]}
         selectedModelId="gpt-5.5"
         modelLocked={false}
+        effortAvailable={false}
+        effortValues={[]}
+        selectedEffort={null}
+        onEffortChange={() => undefined}
         onModelChange={() => undefined}
         turns={[{ ...baseTurn, state: "streaming", agentText: "Hello" }]}
         events={[]}
@@ -760,6 +817,10 @@ describe("AgentWorkspace", () => {
         modelOptions={[{ id: "gpt-5.5", displayName: "GPT-5.5" }]}
         selectedModelId="gpt-5.5"
         modelLocked={false}
+        effortAvailable={false}
+        effortValues={[]}
+        selectedEffort={null}
+        onEffortChange={() => undefined}
         onModelChange={() => undefined}
         turns={[{ ...baseTurn, state: "streaming", agentText: "Hello there" }]}
         events={[]}
@@ -802,6 +863,10 @@ describe("AgentWorkspace", () => {
         modelOptions={[{ id: "gpt-5.5", displayName: "GPT-5.5" }]}
         selectedModelId="gpt-5.5"
         modelLocked={false}
+        effortAvailable={false}
+        effortValues={[]}
+        selectedEffort={null}
+        onEffortChange={() => undefined}
         onModelChange={() => undefined}
         turns={[{ ...baseTurn, state: "streaming", agentText: "Hello there friend" }]}
         events={[]}
@@ -844,6 +909,10 @@ describe("AgentWorkspace", () => {
         modelOptions={[{ id: "gpt-5.5", displayName: "GPT-5.5" }]}
         selectedModelId="gpt-5.5"
         modelLocked={false}
+        effortAvailable={false}
+        effortValues={[]}
+        selectedEffort={null}
+        onEffortChange={() => undefined}
         onModelChange={() => undefined}
         turns={[{ ...baseTurn, state: "completed", agentText: "Hello there friend" }]}
         events={[]}
@@ -883,6 +952,10 @@ describe("AgentWorkspace", () => {
         modelOptions={[{ id: "gpt-5.5", displayName: "GPT-5.5" }]}
         selectedModelId="gpt-5.5"
         modelLocked={false}
+        effortAvailable={false}
+        effortValues={[]}
+        selectedEffort={null}
+        onEffortChange={() => undefined}
         onModelChange={() => undefined}
         turns={[
           {
@@ -892,6 +965,7 @@ describe("AgentWorkspace", () => {
             agentText: "",
             state: "failed",
             errorCode: "provider_unavailable",
+            effort: null,
             sources: [],
           },
         ]}

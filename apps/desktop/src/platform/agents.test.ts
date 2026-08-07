@@ -13,6 +13,7 @@ import {
   pickAgentTextSource,
   pickAgentTextFolderSource,
   attachAgentTextLinkSource,
+  getModelRequestControls,
   sendAgentMessage,
   setAgentSourceDraftScope,
 } from "./agents";
@@ -135,11 +136,13 @@ describe("agents platform", () => {
     ];
 
     for (const turn of [
-      { state: "secret-internal-state", errorCode: null, sources: [] },
-      { state: "failed", errorCode: "raw-provider-error", sources: [] },
+      { state: "secret-internal-state", errorCode: null, effort: null, sources: [] },
+      { state: "failed", errorCode: "raw-provider-error", effort: null, sources: [] },
+      { state: "completed", errorCode: null, effort: "xhigh", sources: [] },
       ...hostileSources.map((sources) => ({
         state: "completed" as const,
         errorCode: null,
+        effort: null,
         sources: [sources],
       })),
     ]) {
@@ -173,6 +176,7 @@ describe("agents platform", () => {
           agentText: "Hi",
           state: "completed",
           errorCode: null,
+          effort: null,
           sources: [validSource, validLinkSource],
         },
       ],
@@ -253,6 +257,7 @@ describe("agents platform", () => {
             agentText: "Hi",
             state: "completed",
             errorCode: null,
+            effort: null,
             sources: [validSource],
           },
         });
@@ -265,6 +270,7 @@ describe("agents platform", () => {
       userText: "Hello",
       projectId: null,
       modelId: "gpt-5.5",
+      effort: null,
       sourceDraftHandle: "abcd",
       onEvent: (event) => events.push(event.kind),
     });
@@ -277,9 +283,66 @@ describe("agents platform", () => {
         userText: "Hello",
         projectId: null,
         modelId: "gpt-5.5",
+        effort: null,
         sourceDraftHandle: "abcd",
       }),
     );
+  });
+
+  it("validates model request controls and fails closed on speed or unknown effort", async () => {
+    invokeMock.mockResolvedValueOnce({
+      modelId: "grok-4.5",
+      effortAvailable: true,
+      effortValues: ["low", "medium", "high"],
+      effortDefault: "high",
+      speedAvailable: false,
+    });
+    await expect(getModelRequestControls("grok-4.5")).resolves.toMatchObject({
+      effortAvailable: true,
+      effortDefault: "high",
+      speedAvailable: false,
+    });
+
+    invokeMock.mockResolvedValueOnce({
+      modelId: "grok-3",
+      effortAvailable: false,
+      effortValues: [],
+      effortDefault: null,
+      speedAvailable: false,
+    });
+    await expect(getModelRequestControls("grok-3")).resolves.toMatchObject({
+      effortAvailable: false,
+      effortValues: [],
+    });
+
+    for (const hostile of [
+      {
+        modelId: "grok-4.5",
+        effortAvailable: true,
+        effortValues: ["low", "medium", "high"],
+        effortDefault: "high",
+        speedAvailable: true,
+      },
+      {
+        modelId: "grok-4.5",
+        effortAvailable: true,
+        effortValues: ["low", "medium", "high", "xhigh"],
+        effortDefault: "high",
+        speedAvailable: false,
+      },
+      {
+        modelId: "grok-3",
+        effortAvailable: false,
+        effortValues: ["low"],
+        effortDefault: null,
+        speedAvailable: false,
+      },
+    ]) {
+      invokeMock.mockResolvedValueOnce(hostile);
+      await expect(getModelRequestControls("grok-4.5")).rejects.toMatchObject({
+        code: "agent_storage_unavailable",
+      });
+    }
   });
 
   it("validates pick and clear commands without exposing paths", async () => {

@@ -131,6 +131,43 @@ and turn association when `turnId` is present. Hostile-response validation on
 the platform layer rejects unknown event kinds and malformed event objects with
 the same fail-closed posture as sessions and turns.
 
+## Artifact Creation and Immutability
+
+Artifacts extend the Agent boundary with durable product records created from
+completed turns. Domain types, kind allowlisting, content hashing, provenance
+freezing, reconstruction, and create/list/get use cases live in `tule-core`. The
+desktop host owns the append-only `artifacts` / `artifact_versions` SQLite
+schema, repository adapter, and typed commands `create_artifact_from_turn`,
+`list_artifacts`, and `get_artifact`.
+
+Create loads exact `agent_text` and turn provenance from durable storage by
+`turn_id`. Client-supplied body or provenance is never trusted as source of
+truth. Only turns in state `completed` with non-empty `agent_text` may create an
+Artifact; other states and empty text are rejected without writing rows. Success
+persists one Artifact and immutable version ordinal 1 atomically. Version
+content is never updated or deleted in this slice; creating additional versions
+is out of scope. Kind is allowlisted exactly as `conclusion`, `recommendation`,
+`decision_record`, `requirements`, `implementation_plan`, `research_brief`, and
+`critique`, defaulting to `conclusion`. Content SHA-256 uses the same
+`hash_source_bytes` convention as Sources; reconstruction recomputes the digest
+and fails closed on mismatch. Frozen provenance on the version copies
+`source_session_id`, `source_turn_id`, `provider_profile_id`, `model_id`,
+`prompt_version`, optional `project_id`, and `provider_request_id` from the
+source turn at save time. Foreign keys enforce referenced session, turn,
+provider-profile, and optional project rows on create; `provider_request_id` is
+an opaque value copied from the turn and is not foreign-keyed (same as on
+`agent_turns`). Session deletion behavior is not added.
+
+List filter for the open Agent session is Artifacts with any version whose
+`source_session_id` equals that session, union Artifacts whose `project_id`
+equals the open session's project when present. Get returns the Artifact and
+every version with full content and provenance. React receives only allowlisted
+DTOs; the Agent workspace offers save on completed turns and a collapsible
+Artifacts panel (not a top-level nav item) that can load and display a saved
+version after reopen. Frontend validation fails closed on unknown kinds and
+malformed artifact shapes. No new Tauri capabilities, webview CSP changes,
+credentials, provider wire changes, or filesystem export are introduced.
+
 ## Project Persistence
 
 The project model and its application operations live in `tule-core`. The core

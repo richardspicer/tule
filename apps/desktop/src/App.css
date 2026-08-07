@@ -474,6 +474,156 @@ textarea:focus-visible {
   font-size: 11px;
 }
 
+.artifacts-panel {
+  border-bottom: 1px solid var(--divider);
+  background: var(--panel);
+  padding: 8px 16px;
+}
+
+.artifacts-panel > summary {
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--foreground);
+  user-select: none;
+}
+
+.artifacts-empty {
+  margin: 8px 0 0;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.artifacts-list {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.artifacts-row {
+  margin: 0;
+}
+
+.artifacts-open {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: baseline;
+  width: 100%;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  padding: 4px 0;
+  cursor: pointer;
+  font: inherit;
+}
+
+.artifacts-open:hover .artifacts-title {
+  text-decoration: underline;
+}
+
+.artifacts-title {
+  color: var(--foreground);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.artifacts-kind,
+.artifacts-version {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.artifact-detail {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--divider);
+}
+
+.artifact-detail-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: baseline;
+}
+
+.artifact-detail-header h2 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.artifact-detail-close {
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  padding: 0;
+}
+
+.artifact-detail-meta {
+  margin: 4px 0 8px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.artifact-detail-content {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.artifact-provenance {
+  margin: 10px 0 0;
+  display: grid;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.artifact-provenance div {
+  display: grid;
+  gap: 2px;
+}
+
+.artifact-provenance dt {
+  font-weight: 600;
+  color: var(--foreground);
+}
+
+.artifact-provenance dd {
+  margin: 0;
+  word-break: break-all;
+}
+
+.turn-artifact-actions {
+  margin: 8px 0 0;
+}
+
+.save-artifact {
+  border: 1px solid var(--divider);
+  background: transparent;
+  color: var(--foreground);
+  border-radius: 4px;
+  padding: 4px 8px;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.save-artifact:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
 .settings-field-label {
   display: block;
   margin: 12px 0 4px;

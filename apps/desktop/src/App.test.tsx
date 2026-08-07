@@ -24,6 +24,9 @@ const {
   getProviderModelCatalogMock,
   getProviderModelSelectionMock,
   listAgentSessionsMock,
+  listArtifactsMock,
+  createArtifactFromTurnMock,
+  getArtifactMock,
   listProjectsMock,
   listenAppearanceChangedMock,
   listenConnectionStatusChangedMock,
@@ -54,6 +57,9 @@ const {
   getProviderModelCatalogMock: vi.fn(),
   getProviderModelSelectionMock: vi.fn(),
   listAgentSessionsMock: vi.fn(),
+  listArtifactsMock: vi.fn(),
+  createArtifactFromTurnMock: vi.fn(),
+  getArtifactMock: vi.fn(),
   listProjectsMock: vi.fn(),
   listenAppearanceChangedMock: vi.fn(),
   listenConnectionStatusChangedMock: vi.fn(),
@@ -121,6 +127,9 @@ vi.mock("./platform/agents", async (importOriginal) => {
   return {
     ...actual,
     listAgentSessions: listAgentSessionsMock,
+    listArtifacts: listArtifactsMock,
+    createArtifactFromTurn: createArtifactFromTurnMock,
+    getArtifact: getArtifactMock,
     getAgentSession: getAgentSessionMock,
     sendAgentMessage: sendAgentMessageMock,
     cancelAgentTurn: cancelAgentTurnMock,
@@ -174,6 +183,10 @@ describe("App", () => {
     setAgentSourceDraftScopeMock.mockResolvedValue(undefined);
     updateProjectInstructionsMock.mockReset();
     listAgentSessionsMock.mockReset();
+    listArtifactsMock.mockReset();
+    createArtifactFromTurnMock.mockReset();
+    getArtifactMock.mockReset();
+    listArtifactsMock.mockResolvedValue([]);
     getConnectionStatusMock.mockReset();
     getPersistedProviderModelCatalogMock.mockReset();
     getProviderModelCatalogMock.mockReset();

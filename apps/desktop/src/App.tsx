@@ -9,10 +9,13 @@ import type { ProjectListState } from "./components/ProjectList";
 import {
   cancelAgentTurn,
   clearAgentTextSourceDraft,
+  createArtifactFromTurn,
   getAgentErrorCode,
   getAgentSession,
+  getArtifact,
   getSafeAgentErrorMessage,
   listAgentSessions,
+  listArtifacts,
   pickAgentTextSource,
   pickAgentTextFolderSource,
   attachAgentTextLinkSource,
@@ -22,6 +25,8 @@ import {
   type AgentEvent,
   type AgentSession,
   type AgentTurn,
+  type ArtifactDetail,
+  type ArtifactSummary,
   type PendingSourceAttachment,
 } from "./platform/agents";
 
@@ -106,6 +111,9 @@ function App() {
   const [pendingProjectId, setPendingProjectId] = useState<string | null>(null);
   const [turns, setTurns] = useState<AgentTurn[]>([]);
   const [events, setEvents] = useState<AgentEvent[]>([]);
+  const [artifacts, setArtifacts] = useState<ArtifactSummary[]>([]);
+  const [selectedArtifactDetail, setSelectedArtifactDetail] = useState<ArtifactDetail | null>(null);
+  const [savingArtifactTurnId, setSavingArtifactTurnId] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
   const [pendingAttachment, setPendingAttachment] = useState<PendingSourceAttachment | null>(null);
   const [sending, setSending] = useState(false);
@@ -335,6 +343,16 @@ function App() {
             if (active && sessionRequestGenerationRef.current === requestGeneration) {
               setTurns(detail.turns);
               setEvents(detail.events);
+              try {
+                const listed = await listArtifacts(detail.session.id, detail.session.projectId);
+                if (active && sessionRequestGenerationRef.current === requestGeneration) {
+                  setArtifacts(listed);
+                }
+              } catch {
+                if (active && sessionRequestGenerationRef.current === requestGeneration) {
+                  setArtifacts([]);
+                }
+              }
             }
           } catch (error: unknown) {
             if (active && sessionRequestGenerationRef.current === requestGeneration) {
@@ -462,6 +480,17 @@ function App() {
     );
   }
 
+  function clearArtifactState() {
+    setArtifacts([]);
+    setSelectedArtifactDetail(null);
+    setSavingArtifactTurnId(null);
+  }
+
+  async function refreshArtifacts(sessionId: string, projectId: string | null) {
+    const listed = await listArtifacts(sessionId, projectId);
+    setArtifacts(listed);
+  }
+
   function handleNewSession() {
     if (!canNavigateAwayFromProjectManager()) {
       return;
@@ -474,6 +503,7 @@ function App() {
     setPendingModelId(selection?.selectedModelId ?? null);
     setTurns([]);
     setEvents([]);
+    clearArtifactState();
     setDraft("");
     setAgentError(null);
     setPendingAttachment(null);
@@ -494,6 +524,7 @@ function App() {
     setPendingProjectId(summary?.projectId ?? null);
     setTurns([]);
     setEvents([]);
+    clearArtifactState();
     setAgentError(null);
     setPendingAttachment(null);
     void setAgentSourceDraftScope(sessionId).catch(() => undefined);
@@ -512,6 +543,12 @@ function App() {
           ? current.map((session) => (session.id === detail.session.id ? detail.session : session))
           : [detail.session, ...current];
       });
+      try {
+        await refreshArtifacts(detail.session.id, detail.session.projectId);
+      } catch {
+        // Artifact list failures should not block session reopen.
+        setArtifacts([]);
+      }
     } catch (error: unknown) {
       if (sessionRequestGenerationRef.current === requestGeneration) {
         setAgentError(getSafeAgentErrorMessage(error));
@@ -535,6 +572,7 @@ function App() {
     setPendingProjectId(projectId);
     setTurns([]);
     setEvents([]);
+    clearArtifactState();
     setDraft("");
     setAgentError(null);
     setPendingAttachment(null);
@@ -891,10 +929,45 @@ function App() {
     setPendingProjectId(project.id);
     setTurns([]);
     setEvents([]);
+    clearArtifactState();
     setDraft("");
     setAgentError(null);
     setPendingAttachment(null);
     void setAgentSourceDraftScope(null).catch(() => undefined);
+  }
+
+  async function handleSaveArtifact(turnId: string) {
+    if (savingArtifactTurnId !== null || activeSessionId === null) {
+      return;
+    }
+    setSavingArtifactTurnId(turnId);
+    setAgentError(null);
+    try {
+      const created = await createArtifactFromTurn({ turnId });
+      setSelectedArtifactDetail({
+        artifact: created.artifact,
+        versions: [created.version],
+      });
+      await refreshArtifacts(activeSessionId, contextProjectId);
+    } catch (error: unknown) {
+      setAgentError(getSafeAgentErrorMessage(error));
+    } finally {
+      setSavingArtifactTurnId(null);
+    }
+  }
+
+  async function handleOpenArtifact(artifactId: string) {
+    setAgentError(null);
+    try {
+      const detail = await getArtifact(artifactId);
+      setSelectedArtifactDetail(detail);
+    } catch (error: unknown) {
+      setAgentError(getSafeAgentErrorMessage(error));
+    }
+  }
+
+  function handleCloseArtifact() {
+    setSelectedArtifactDetail(null);
   }
 
   async function handleChangePersistedProject(projectId: string | null) {
@@ -1062,6 +1135,9 @@ function App() {
               modelLocked={modelLocked}
               turns={turns}
               events={events}
+              artifacts={artifacts}
+              selectedArtifactDetail={selectedArtifactDetail}
+              savingArtifactTurnId={savingArtifactTurnId}
               draft={draft}
               pendingAttachment={pendingAttachment}
               connected={connected}
@@ -1086,6 +1162,15 @@ function App() {
               onRemoveAttachment={() => void handleRemoveAttachment()}
               onProjectChange={(projectId) => void handleChangePersistedProject(projectId)}
               onModelChange={setPendingModelId}
+              onSaveArtifact={
+                activeSessionId === null ? undefined : (turnId) => void handleSaveArtifact(turnId)
+              }
+              onOpenArtifact={
+                activeSessionId === null
+                  ? undefined
+                  : (artifactId) => void handleOpenArtifact(artifactId)
+              }
+              onCloseArtifact={handleCloseArtifact}
             />
           )}
         </main>

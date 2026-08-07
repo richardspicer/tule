@@ -5,6 +5,9 @@ mod agent;
 mod agent_repository;
 mod agent_source;
 mod agent_use_cases;
+mod artifact;
+mod artifact_repository;
+mod artifact_use_cases;
 mod project;
 mod provider_catalog;
 mod repository;
@@ -35,6 +38,17 @@ pub use agent_use_cases::{
     SetSessionProjectError, apply_agent_delta, cancel_agent_turn, checkpoint_agent_turn,
     complete_agent_turn, completed_history_from_turns, fail_agent_turn, interrupt_inflight_turns,
     prepare_agent_send, set_session_project,
+};
+pub use artifact::{
+    Artifact, ArtifactDetail, ArtifactId, ArtifactKind, ArtifactReconstructionError,
+    ArtifactSummary, ArtifactValidationError, ArtifactVersion, ArtifactVersionId,
+    ArtifactVersionProvenance, InvalidArtifactKind, MAX_ARTIFACT_CONTENT_UTF8,
+    derive_artifact_title, resolve_artifact_title, validate_artifact_content,
+};
+pub use artifact_repository::ArtifactRepository;
+pub use artifact_use_cases::{
+    CreateArtifactFromTurnError, GetArtifactError, ListArtifactsError, create_artifact_from_turn,
+    get_artifact, list_artifacts_for_session_context,
 };
 pub use project::{
     InvalidProjectId, InvalidProjectName, Project, ProjectId, ProjectName,

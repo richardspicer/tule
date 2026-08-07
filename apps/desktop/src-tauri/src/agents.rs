@@ -13,8 +13,8 @@ use tauri::{AppHandle, Emitter, State, Webview, ipc::Channel};
 use tauri_plugin_dialog::{DialogExt, FilePath};
 use tokio_util::sync::CancellationToken;
 use tule_core::{
-    AgentEvent, AgentRepository, AgentSession, AgentSessionId, AgentTurn, ProjectId,
-    ProjectRepository, Source, TurnSource,
+    AgentEvent, AgentRepository, AgentSession, AgentSessionId, AgentTurn, Artifact, ArtifactDetail,
+    ArtifactSummary, ArtifactVersion, ProjectId, ProjectRepository, Source, TurnSource,
 };
 
 use crate::{
@@ -333,6 +333,161 @@ pub(crate) struct SessionDetailResponse {
     session: SessionResponse,
     turns: Vec<TurnResponse>,
     events: Vec<EventResponse>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ArtifactVersionProvenanceResponse {
+    source_session_id: String,
+    source_turn_id: String,
+    provider_profile_id: String,
+    model_id: String,
+    prompt_version: String,
+    project_id: Option<String>,
+    provider_request_id: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ArtifactVersionResponse {
+    id: String,
+    artifact_id: String,
+    version_ordinal: u64,
+    content: String,
+    content_sha256: String,
+    provenance: ArtifactVersionProvenanceResponse,
+    created_at_unix_ms: i64,
+}
+
+impl From<&ArtifactVersion> for ArtifactVersionResponse {
+    fn from(version: &ArtifactVersion) -> Self {
+        let provenance = version.provenance();
+        Self {
+            id: version.id().to_string(),
+            artifact_id: version.artifact_id().to_string(),
+            version_ordinal: version.version_ordinal(),
+            content: version.content().to_owned(),
+            content_sha256: version.content_sha256().to_owned(),
+            provenance: ArtifactVersionProvenanceResponse {
+                source_session_id: provenance.source_session_id().to_string(),
+                source_turn_id: provenance.source_turn_id().to_string(),
+                provider_profile_id: provenance.provider_profile_id().to_owned(),
+                model_id: provenance.model_id().to_owned(),
+                prompt_version: provenance.prompt_version().to_owned(),
+                project_id: provenance.project_id().map(|id| id.to_string()),
+                provider_request_id: provenance.provider_request_id().to_string(),
+            },
+            created_at_unix_ms: version.created_at_unix_ms(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ArtifactResponse {
+    id: String,
+    title: String,
+    kind: String,
+    project_id: Option<String>,
+    created_at_unix_ms: i64,
+}
+
+impl From<&Artifact> for ArtifactResponse {
+    fn from(artifact: &Artifact) -> Self {
+        Self {
+            id: artifact.id().to_string(),
+            title: artifact.title().to_owned(),
+            kind: artifact.kind().as_str().to_owned(),
+            project_id: artifact.project_id().map(|id| id.to_string()),
+            created_at_unix_ms: artifact.created_at_unix_ms(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ArtifactSummaryResponse {
+    id: String,
+    title: String,
+    kind: String,
+    project_id: Option<String>,
+    created_at_unix_ms: i64,
+    latest_version_id: String,
+    latest_version_ordinal: u64,
+}
+
+impl From<&ArtifactSummary> for ArtifactSummaryResponse {
+    fn from(summary: &ArtifactSummary) -> Self {
+        let artifact = summary.artifact();
+        Self {
+            id: artifact.id().to_string(),
+            title: artifact.title().to_owned(),
+            kind: artifact.kind().as_str().to_owned(),
+            project_id: artifact.project_id().map(|id| id.to_string()),
+            created_at_unix_ms: artifact.created_at_unix_ms(),
+            latest_version_id: summary.latest_version_id().to_string(),
+            latest_version_ordinal: summary.latest_version_ordinal(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ArtifactDetailResponse {
+    artifact: ArtifactResponse,
+    versions: Vec<ArtifactVersionResponse>,
+}
+
+impl From<&ArtifactDetail> for ArtifactDetailResponse {
+    fn from(detail: &ArtifactDetail) -> Self {
+        Self {
+            artifact: ArtifactResponse::from(detail.artifact()),
+            versions: detail
+                .versions()
+                .iter()
+                .map(ArtifactVersionResponse::from)
+                .collect(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CreateArtifactResponse {
+    artifact: ArtifactResponse,
+    version: ArtifactVersionResponse,
+}
+
+fn map_create_artifact(error: tule_core::CreateArtifactFromTurnError) -> AgentIpcError {
+    match error {
+        tule_core::CreateArtifactFromTurnError::InvalidTurnId(_)
+        | tule_core::CreateArtifactFromTurnError::InvalidKind(_)
+        | tule_core::CreateArtifactFromTurnError::TurnNotFound
+        | tule_core::CreateArtifactFromTurnError::TurnNotCompleted
+        | tule_core::CreateArtifactFromTurnError::EmptyAgentText
+        | tule_core::CreateArtifactFromTurnError::Validation(_) => AgentIpcError::InvalidInput,
+        tule_core::CreateArtifactFromTurnError::Time(_)
+        | tule_core::CreateArtifactFromTurnError::AgentRepository(_)
+        | tule_core::CreateArtifactFromTurnError::ArtifactRepository(_) => {
+            AgentIpcError::AgentStorageUnavailable
+        }
+    }
+}
+
+fn map_list_artifacts(error: tule_core::ListArtifactsError) -> AgentIpcError {
+    match error {
+        tule_core::ListArtifactsError::InvalidSessionId(_)
+        | tule_core::ListArtifactsError::InvalidProjectId(_) => AgentIpcError::InvalidInput,
+        tule_core::ListArtifactsError::Repository(_) => AgentIpcError::AgentStorageUnavailable,
+    }
+}
+
+fn map_get_artifact(error: tule_core::GetArtifactError) -> AgentIpcError {
+    match error {
+        tule_core::GetArtifactError::InvalidArtifactId(_)
+        | tule_core::GetArtifactError::NotFound => AgentIpcError::InvalidInput,
+        tule_core::GetArtifactError::Repository(_) => AgentIpcError::AgentStorageUnavailable,
+    }
 }
 
 fn map_prepare(error: tule_core::PrepareAgentSendError) -> AgentIpcError {
@@ -971,6 +1126,69 @@ async fn recover_after_model_rejection(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+pub(crate) async fn create_artifact_from_turn(
+    turn_id: String,
+    title: Option<String>,
+    kind: Option<String>,
+    state: State<'_, AgentState>,
+) -> Result<CreateArtifactResponse, AgentIpcError> {
+    let store = Arc::clone(&state.store);
+    tauri::async_runtime::spawn_blocking(move || {
+        let title_override = title.as_deref();
+        let kind = kind.as_deref();
+        let (artifact, version) = tule_core::create_artifact_from_turn(
+            store.as_ref(),
+            store.as_ref(),
+            &turn_id,
+            title_override,
+            kind,
+        )
+        .map_err(map_create_artifact)?;
+        Ok(CreateArtifactResponse {
+            artifact: ArtifactResponse::from(&artifact),
+            version: ArtifactVersionResponse::from(&version),
+        })
+    })
+    .await
+    .map_err(|_| AgentIpcError::AgentStorageUnavailable)?
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub(crate) async fn list_artifacts(
+    session_id: String,
+    project_id: Option<String>,
+    state: State<'_, AgentState>,
+) -> Result<Vec<ArtifactSummaryResponse>, AgentIpcError> {
+    let store = Arc::clone(&state.store);
+    tauri::async_runtime::spawn_blocking(move || {
+        tule_core::list_artifacts_for_session_context(
+            store.as_ref(),
+            &session_id,
+            project_id.as_deref(),
+        )
+        .map(|items| items.iter().map(ArtifactSummaryResponse::from).collect())
+        .map_err(map_list_artifacts)
+    })
+    .await
+    .map_err(|_| AgentIpcError::AgentStorageUnavailable)?
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub(crate) async fn get_artifact(
+    artifact_id: String,
+    state: State<'_, AgentState>,
+) -> Result<ArtifactDetailResponse, AgentIpcError> {
+    let store = Arc::clone(&state.store);
+    tauri::async_runtime::spawn_blocking(move || {
+        tule_core::get_artifact(store.as_ref(), &artifact_id)
+            .map(|detail| ArtifactDetailResponse::from(&detail))
+            .map_err(map_get_artifact)
+    })
+    .await
+    .map_err(|_| AgentIpcError::AgentStorageUnavailable)?
+}
+
+#[tauri::command(rename_all = "camelCase")]
 pub(crate) async fn cancel_agent_turn(
     turn_id: String,
     state: State<'_, AgentState>,
@@ -1371,6 +1589,82 @@ mod tests {
         assert!(mapped.iter().any(|event| event.kind == "turn_interrupted"));
         drop(store);
         drop(directory);
+    }
+
+    #[test]
+    fn artifact_dto_mapping_exposes_allowlisted_fields_only() {
+        let (directory, store) = test_store();
+        let prepared =
+            tule_core::prepare_agent_send(store.as_ref(), None, "Hello", None, "", "gpt-5.5", None)
+                .unwrap();
+        tule_core::apply_agent_delta(store.as_ref(), prepared.turn.id(), "Saved body").unwrap();
+        let turn =
+            tule_core::complete_agent_turn(store.as_ref(), prepared.turn.id(), None, None, None)
+                .unwrap();
+        let (artifact, version) = tule_core::create_artifact_from_turn(
+            store.as_ref(),
+            store.as_ref(),
+            &turn.id().to_string(),
+            None,
+            Some("critique"),
+        )
+        .unwrap();
+
+        let create = CreateArtifactResponse {
+            artifact: ArtifactResponse::from(&artifact),
+            version: ArtifactVersionResponse::from(&version),
+        };
+        assert_eq!(create.artifact.kind, "critique");
+        assert_eq!(create.version.content, "Saved body");
+        assert_eq!(
+            create.version.provenance.source_turn_id,
+            turn.id().to_string()
+        );
+        assert_eq!(
+            create.version.provenance.provider_request_id,
+            turn.provider_request_id().to_string()
+        );
+
+        let listed = tule_core::list_artifacts_for_session_context(
+            store.as_ref(),
+            &turn.session_id().to_string(),
+            None,
+        )
+        .unwrap();
+        let summary = ArtifactSummaryResponse::from(&listed[0]);
+        assert_eq!(summary.id, artifact.id().to_string());
+        assert_eq!(summary.latest_version_id, version.id().to_string());
+        assert_eq!(summary.latest_version_ordinal, 1);
+
+        let detail = ArtifactDetailResponse::from(
+            &tule_core::get_artifact(store.as_ref(), &artifact.id().to_string()).unwrap(),
+        );
+        assert_eq!(detail.versions.len(), 1);
+        assert_eq!(detail.versions[0].content_sha256, version.content_sha256());
+        drop(store);
+        drop(directory);
+    }
+
+    #[test]
+    fn create_artifact_reject_paths_map_to_invalid_input() {
+        assert!(matches!(
+            map_create_artifact(tule_core::CreateArtifactFromTurnError::TurnNotCompleted),
+            AgentIpcError::InvalidInput
+        ));
+        assert!(matches!(
+            map_create_artifact(tule_core::CreateArtifactFromTurnError::EmptyAgentText),
+            AgentIpcError::InvalidInput
+        ));
+        assert!(matches!(
+            map_create_artifact(tule_core::CreateArtifactFromTurnError::InvalidKind(
+                tule_core::InvalidArtifactKind
+            )),
+            AgentIpcError::InvalidInput
+        ));
+        assert!(matches!(
+            map_get_artifact(tule_core::GetArtifactError::NotFound),
+            AgentIpcError::InvalidInput
+        ));
     }
 
     #[tokio::test]

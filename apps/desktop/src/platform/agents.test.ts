@@ -3,10 +3,13 @@ import {
   AgentError,
   cancelAgentTurn,
   clearAgentTextSourceDraft,
+  createArtifactFromTurn,
   getAgentErrorCode,
   getAgentSession,
+  getArtifact,
   getSafeAgentErrorMessage,
   listAgentSessions,
+  listArtifacts,
   pickAgentTextSource,
   pickAgentTextFolderSource,
   attachAgentTextLinkSource,
@@ -542,5 +545,103 @@ describe("agents platform", () => {
       "That attachment is too large.",
     );
     expect(getAgentErrorCode({ message: "source_draft_expired" })).toBe("source_draft_expired");
+  });
+
+  it("validates artifact list, detail, and create payloads and fails closed on unknown kinds", async () => {
+    const validSummary = {
+      id: "01900000-0000-7000-8000-000000000030",
+      title: "Saved conclusion",
+      kind: "conclusion",
+      projectId: null,
+      createdAtUnixMs: 1_700_000_000_000,
+      latestVersionId: "01900000-0000-7000-8000-000000000031",
+      latestVersionOrdinal: 1,
+    };
+    const validVersion = {
+      id: "01900000-0000-7000-8000-000000000031",
+      artifactId: validSummary.id,
+      versionOrdinal: 1,
+      content: "exact body",
+      contentSha256: "b".repeat(64),
+      provenance: {
+        sourceSessionId: validSessionDetail.session.id,
+        sourceTurnId: "01900000-0000-7000-8000-000000000011",
+        providerProfileId: "xai-subscription-oauth",
+        modelId: "grok-3",
+        promptVersion: "tule-direct-agent-v2",
+        projectId: null,
+        providerRequestId: "01900000-0000-7000-8000-000000000012",
+      },
+      createdAtUnixMs: 1_700_000_000_000,
+    };
+    const validArtifact = {
+      id: validSummary.id,
+      title: validSummary.title,
+      kind: "conclusion",
+      projectId: null,
+      createdAtUnixMs: validSummary.createdAtUnixMs,
+    };
+
+    invokeMock.mockResolvedValueOnce([validSummary]);
+    await expect(listArtifacts(validSessionDetail.session.id, null)).resolves.toEqual([
+      validSummary,
+    ]);
+    expect(invokeMock).toHaveBeenCalledWith("list_artifacts", {
+      sessionId: validSessionDetail.session.id,
+      projectId: null,
+    });
+
+    invokeMock.mockResolvedValueOnce({
+      artifact: validArtifact,
+      versions: [validVersion],
+    });
+    await expect(getArtifact(validSummary.id)).resolves.toEqual({
+      artifact: validArtifact,
+      versions: [validVersion],
+    });
+
+    invokeMock.mockResolvedValueOnce({
+      artifact: validArtifact,
+      version: validVersion,
+    });
+    await expect(
+      createArtifactFromTurn({ turnId: validVersion.provenance.sourceTurnId }),
+    ).resolves.toEqual({
+      artifact: validArtifact,
+      version: validVersion,
+    });
+    expect(invokeMock).toHaveBeenCalledWith("create_artifact_from_turn", {
+      turnId: validVersion.provenance.sourceTurnId,
+      title: null,
+      kind: null,
+    });
+
+    invokeMock.mockResolvedValueOnce([
+      {
+        ...validSummary,
+        kind: "not_a_kind",
+      },
+    ]);
+    await expect(listArtifacts(validSessionDetail.session.id, null)).rejects.toMatchObject({
+      code: "agent_storage_unavailable",
+    });
+
+    invokeMock.mockResolvedValueOnce({
+      artifact: { ...validArtifact, kind: "Conclusion" },
+      versions: [validVersion],
+    });
+    await expect(getArtifact(validSummary.id)).rejects.toMatchObject({
+      code: "agent_storage_unavailable",
+    });
+
+    invokeMock.mockResolvedValueOnce({
+      artifact: validArtifact,
+      version: { ...validVersion, contentSha256: "not-a-hash" },
+    });
+    await expect(
+      createArtifactFromTurn({ turnId: validVersion.provenance.sourceTurnId }),
+    ).rejects.toMatchObject({
+      code: "agent_storage_unavailable",
+    });
   });
 });

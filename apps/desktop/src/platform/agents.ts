@@ -591,6 +591,270 @@ export async function setAgentSourceDraftScope(sessionId: string | null): Promis
   await invokeAgentCommand("set_agent_source_draft_scope", { sessionId });
 }
 
+export type ArtifactKind =
+  | "conclusion"
+  | "recommendation"
+  | "decision_record"
+  | "requirements"
+  | "implementation_plan"
+  | "research_brief"
+  | "critique";
+
+const artifactKinds: readonly ArtifactKind[] = [
+  "conclusion",
+  "recommendation",
+  "decision_record",
+  "requirements",
+  "implementation_plan",
+  "research_brief",
+  "critique",
+];
+
+export interface ArtifactVersionProvenance {
+  sourceSessionId: string;
+  sourceTurnId: string;
+  providerProfileId: string;
+  modelId: string;
+  promptVersion: string;
+  projectId: string | null;
+  providerRequestId: string;
+}
+
+export interface ArtifactVersion {
+  id: string;
+  artifactId: string;
+  versionOrdinal: number;
+  content: string;
+  contentSha256: string;
+  provenance: ArtifactVersionProvenance;
+  createdAtUnixMs: number;
+}
+
+export interface Artifact {
+  id: string;
+  title: string;
+  kind: ArtifactKind;
+  projectId: string | null;
+  createdAtUnixMs: number;
+}
+
+export interface ArtifactSummary {
+  id: string;
+  title: string;
+  kind: ArtifactKind;
+  projectId: string | null;
+  createdAtUnixMs: number;
+  latestVersionId: string;
+  latestVersionOrdinal: number;
+}
+
+export interface ArtifactDetail {
+  artifact: Artifact;
+  versions: ArtifactVersion[];
+}
+
+export interface CreateArtifactResult {
+  artifact: Artifact;
+  version: ArtifactVersion;
+}
+
+const ARTIFACT_SUMMARY_KEYS = [
+  "createdAtUnixMs",
+  "id",
+  "kind",
+  "latestVersionId",
+  "latestVersionOrdinal",
+  "projectId",
+  "title",
+] as const;
+
+const ARTIFACT_KEYS = ["createdAtUnixMs", "id", "kind", "projectId", "title"] as const;
+
+const ARTIFACT_PROVENANCE_KEYS = [
+  "modelId",
+  "projectId",
+  "promptVersion",
+  "providerProfileId",
+  "providerRequestId",
+  "sourceSessionId",
+  "sourceTurnId",
+] as const;
+
+const ARTIFACT_VERSION_KEYS = [
+  "artifactId",
+  "content",
+  "contentSha256",
+  "createdAtUnixMs",
+  "id",
+  "provenance",
+  "versionOrdinal",
+] as const;
+
+function isArtifactKind(value: unknown): value is ArtifactKind {
+  return typeof value === "string" && artifactKinds.includes(value as ArtifactKind);
+}
+
+function isArtifactTimestamp(value: unknown): value is number {
+  return isEventTimestamp(value);
+}
+
+function isVersionOrdinal(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 1;
+}
+
+function isArtifactProvenance(value: unknown): value is ArtifactVersionProvenance {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return false;
+  }
+  const record = value as Record<string, unknown>;
+  return (
+    hasExactKeys(record, ARTIFACT_PROVENANCE_KEYS) &&
+    typeof record.sourceSessionId === "string" &&
+    isUuidV7(record.sourceSessionId) &&
+    typeof record.sourceTurnId === "string" &&
+    isUuidV7(record.sourceTurnId) &&
+    typeof record.providerProfileId === "string" &&
+    record.providerProfileId.length > 0 &&
+    typeof record.modelId === "string" &&
+    record.modelId.length > 0 &&
+    typeof record.promptVersion === "string" &&
+    record.promptVersion.length > 0 &&
+    (record.projectId === null ||
+      (typeof record.projectId === "string" && isUuidV7(record.projectId))) &&
+    typeof record.providerRequestId === "string" &&
+    isUuidV7(record.providerRequestId)
+  );
+}
+
+function isArtifact(value: unknown): value is Artifact {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return false;
+  }
+  const record = value as Record<string, unknown>;
+  return (
+    hasExactKeys(record, ARTIFACT_KEYS) &&
+    typeof record.id === "string" &&
+    isUuidV7(record.id) &&
+    typeof record.title === "string" &&
+    record.title.trim().length > 0 &&
+    isArtifactKind(record.kind) &&
+    (record.projectId === null ||
+      (typeof record.projectId === "string" && isUuidV7(record.projectId))) &&
+    isArtifactTimestamp(record.createdAtUnixMs)
+  );
+}
+
+function isArtifactVersion(value: unknown): value is ArtifactVersion {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return false;
+  }
+  const record = value as Record<string, unknown>;
+  return (
+    hasExactKeys(record, ARTIFACT_VERSION_KEYS) &&
+    typeof record.id === "string" &&
+    isUuidV7(record.id) &&
+    typeof record.artifactId === "string" &&
+    isUuidV7(record.artifactId) &&
+    isVersionOrdinal(record.versionOrdinal) &&
+    typeof record.content === "string" &&
+    record.content.length > 0 &&
+    typeof record.contentSha256 === "string" &&
+    isCanonicalSha256(record.contentSha256) &&
+    isArtifactProvenance(record.provenance) &&
+    isArtifactTimestamp(record.createdAtUnixMs)
+  );
+}
+
+function isArtifactSummary(value: unknown): value is ArtifactSummary {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return false;
+  }
+  const record = value as Record<string, unknown>;
+  return (
+    hasExactKeys(record, ARTIFACT_SUMMARY_KEYS) &&
+    typeof record.id === "string" &&
+    isUuidV7(record.id) &&
+    typeof record.title === "string" &&
+    record.title.trim().length > 0 &&
+    isArtifactKind(record.kind) &&
+    (record.projectId === null ||
+      (typeof record.projectId === "string" && isUuidV7(record.projectId))) &&
+    isArtifactTimestamp(record.createdAtUnixMs) &&
+    typeof record.latestVersionId === "string" &&
+    isUuidV7(record.latestVersionId) &&
+    isVersionOrdinal(record.latestVersionOrdinal)
+  );
+}
+
+function validateArtifactSummaryList(value: unknown): ArtifactSummary[] {
+  if (!Array.isArray(value) || !value.every(isArtifactSummary)) {
+    throw new AgentError("agent_storage_unavailable");
+  }
+  return value;
+}
+
+function validateArtifactDetail(value: unknown): ArtifactDetail {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new AgentError("agent_storage_unavailable");
+  }
+  if (!("artifact" in value) || !("versions" in value) || !Array.isArray(value.versions)) {
+    throw new AgentError("agent_storage_unavailable");
+  }
+  if (!isArtifact(value.artifact) || !value.versions.every(isArtifactVersion)) {
+    throw new AgentError("agent_storage_unavailable");
+  }
+  if (value.versions.length === 0) {
+    throw new AgentError("agent_storage_unavailable");
+  }
+  return {
+    artifact: value.artifact,
+    versions: value.versions,
+  };
+}
+
+function validateCreateArtifactResult(value: unknown): CreateArtifactResult {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new AgentError("agent_storage_unavailable");
+  }
+  if (!("artifact" in value) || !("version" in value)) {
+    throw new AgentError("agent_storage_unavailable");
+  }
+  if (!isArtifact(value.artifact) || !isArtifactVersion(value.version)) {
+    throw new AgentError("agent_storage_unavailable");
+  }
+  return {
+    artifact: value.artifact,
+    version: value.version,
+  };
+}
+
+export async function createArtifactFromTurn(options: {
+  turnId: string;
+  title?: string | null;
+  kind?: ArtifactKind | null;
+}): Promise<CreateArtifactResult> {
+  return validateCreateArtifactResult(
+    await invokeAgentCommand("create_artifact_from_turn", {
+      turnId: options.turnId,
+      title: options.title ?? null,
+      kind: options.kind ?? null,
+    }),
+  );
+}
+
+export async function listArtifacts(
+  sessionId: string,
+  projectId: string | null,
+): Promise<ArtifactSummary[]> {
+  return validateArtifactSummaryList(
+    await invokeAgentCommand("list_artifacts", { sessionId, projectId }),
+  );
+}
+
+export async function getArtifact(artifactId: string): Promise<ArtifactDetail> {
+  return validateArtifactDetail(await invokeAgentCommand("get_artifact", { artifactId }));
+}
+
 export async function sendAgentMessage(options: {
   sessionId: string | null;
   userText: string;

@@ -39,17 +39,24 @@ behavior or React components.
 ## Agent Sessions and Provider Boundary
 
 The first Agent slice lives in `tule-core` as provider-neutral session, turn,
-event, lifecycle, and model-selection use cases. The desktop host persists
-non-secret session state in the shared SQLite store, streams ordered channel
-events to the interface, and owns one xAI subscription OAuth adapter (RFC 8628
-device-code against `auth.x.ai`, catalog and streamed chat/completions against
-`api.x.ai`). Credentials stay in the OS credential store behind an opaque handle.
-The frontend receives only typed connection status, allowlisted device pairing
-metadata (verification URI and user code during connect), allowlisted model-catalog
-metadata, selected-default state, and transcript data; it never receives
-authorization URLs beyond the allowlisted verification URI, codes, tokens,
-account identifiers, raw catalog payloads, provider instructions, tool
-definitions, or raw provider frames.
+event, lifecycle, conversation-context, and model-selection use cases. Core
+prepares neutral request context (composed instructions, completed history,
+current user text, optional Source framing, and frozen model identifier) and
+persists stable provider-profile and model identifier strings on sessions and
+turns. It does not build chat/completions or Responses request-body JSON, and it
+does not own built-in provider-profile or default-model constants. The desktop
+host persists non-secret session state in the shared SQLite store, streams
+ordered channel events to the interface, and owns one xAI subscription OAuth
+adapter (RFC 8628 device-code against `auth.x.ai`, catalog and streamed
+chat/completions against `api.x.ai`). That adapter owns built-in profile and
+upgrade-default model identifiers, serialises the chat/completions wire body
+from core's neutral context, and performs network send. Credentials stay in the
+OS credential store behind an opaque handle. The frontend receives only typed
+connection status, allowlisted device pairing metadata (verification URI and
+user code during connect), allowlisted model-catalog metadata, selected-default
+state, and transcript data; it never receives authorization URLs beyond the
+allowlisted verification URI, codes, tokens, account identifiers, raw catalog
+payloads, provider instructions, tool definitions, or raw provider frames.
 
 After a successful connection, the native adapter fetches an account-aware model
 catalog from `GET https://api.x.ai/v1/models` using the existing credentials,

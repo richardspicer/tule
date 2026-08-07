@@ -5,8 +5,6 @@
 
 use std::{error::Error, fmt};
 
-use crate::MODEL_ID;
-
 /// Catalog cache time-to-live in Unix milliseconds.
 pub const CATALOG_TTL_MS: i64 = 5 * 60 * 1000;
 
@@ -225,12 +223,15 @@ pub fn model_id_in_catalog(model_id: &str, entries: &[ModelCatalogEntry]) -> boo
 
 /// Resolves the persisted selected default against the current catalog.
 ///
-/// When no selection is stored, preserves [`MODEL_ID`] only if it remains in the
-/// validated catalog; otherwise requires an explicit new choice.
+/// When no selection is stored, preserves `upgrade_default_model_id` only if it
+/// remains in the validated catalog; otherwise requires an explicit new choice.
+/// The upgrade-default string is supplied by the host/adapter that owns the
+/// Phase 1 provider identity—not by a core provider constant.
 #[must_use]
 pub fn resolve_selected_default(
     selected_model_id: Option<&str>,
     entries: &[ModelCatalogEntry],
+    upgrade_default_model_id: &str,
 ) -> SelectedDefaultResolution {
     if let Some(selected) = selected_model_id
         .map(str::trim)
@@ -241,8 +242,8 @@ pub fn resolve_selected_default(
         }
         return SelectedDefaultResolution::RequiresChoice;
     }
-    if model_id_in_catalog(MODEL_ID, entries) {
-        SelectedDefaultResolution::Available(MODEL_ID.to_owned())
+    if model_id_in_catalog(upgrade_default_model_id, entries) {
+        SelectedDefaultResolution::Available(upgrade_default_model_id.to_owned())
     } else {
         SelectedDefaultResolution::RequiresChoice
     }
@@ -410,24 +411,25 @@ mod tests {
     }
 
     #[test]
-    fn selected_default_preserves_gpt_55_only_when_cataloged() {
-        let with_default = select_usable_catalog_entries([candidate(MODEL_ID, "list")]);
+    fn selected_default_preserves_upgrade_default_only_when_cataloged() {
+        const UPGRADE_DEFAULT: &str = "grok-3";
+        let with_default = select_usable_catalog_entries([candidate(UPGRADE_DEFAULT, "list")]);
         assert_eq!(
-            resolve_selected_default(None, &with_default),
-            SelectedDefaultResolution::Available(MODEL_ID.to_owned())
+            resolve_selected_default(None, &with_default, UPGRADE_DEFAULT),
+            SelectedDefaultResolution::Available(UPGRADE_DEFAULT.to_owned())
         );
 
         let without_default = select_usable_catalog_entries([candidate("other-model", "list")]);
         assert_eq!(
-            resolve_selected_default(None, &without_default),
+            resolve_selected_default(None, &without_default, UPGRADE_DEFAULT),
             SelectedDefaultResolution::RequiresChoice
         );
         assert_eq!(
-            resolve_selected_default(Some("missing"), &without_default),
+            resolve_selected_default(Some("missing"), &without_default, UPGRADE_DEFAULT),
             SelectedDefaultResolution::RequiresChoice
         );
         assert_eq!(
-            resolve_selected_default(Some("other-model"), &without_default),
+            resolve_selected_default(Some("other-model"), &without_default, UPGRADE_DEFAULT),
             SelectedDefaultResolution::Available("other-model".to_owned())
         );
     }

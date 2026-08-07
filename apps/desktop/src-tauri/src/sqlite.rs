@@ -15,11 +15,13 @@ use std::{
 use rusqlite::{Connection, OptionalExtension, params};
 use rusqlite_migration::{M, Migrations};
 use tule_core::{
-    MODEL_ID, PROVIDER_PROFILE_ID, Project, ProjectId, ProjectReconstructionError,
-    ProjectRepository, ProviderProfile,
+    Project, ProjectId, ProjectReconstructionError, ProjectRepository, ProviderProfile,
 };
 
-use crate::preferences::AppearancePreference;
+use crate::{
+    preferences::AppearancePreference,
+    provider::{MODEL_ID, PROVIDER_PROFILE_ID},
+};
 
 pub(crate) use provider_models::StoredCatalogState;
 

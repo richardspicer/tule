@@ -4,11 +4,11 @@ use std::{collections::HashMap, error::Error, fmt};
 
 use crate::{
     AgentContextError, AgentEvent, AgentEventKind, AgentInputError, AgentOutputLimitError,
-    AgentRepository, AgentSession, AgentSessionId, AgentTurn, AgentTurnFinishError, AgentTurnId,
-    AgentTurnState, CompletedTurnContext, IllegalAgentTurnTransition, InvalidModelId, ProjectId,
-    ProjectTimeError, ProviderRequestId, Source, SourceContext, TurnSource,
-    assemble_chat_completions_request_json, derive_session_title, validate_model_id,
-    validate_user_text,
+    AgentRepository, AgentRequestContext, AgentSession, AgentSessionId, AgentTurn,
+    AgentTurnFinishError, AgentTurnId, AgentTurnState, CompletedTurnContext,
+    IllegalAgentTurnTransition, InvalidModelId, ProjectId, ProjectTimeError, ProviderRequestId,
+    Source, SourceContext, TurnSource, build_agent_request_context, derive_session_title,
+    validate_model_id, validate_user_text,
 };
 
 /// Result of preparing a first or follow-up send before network transmission.
@@ -18,23 +18,27 @@ pub struct PreparedAgentSend {
     pub session: AgentSession,
     /// Pending turn after persistence.
     pub turn: AgentTurn,
-    /// Deterministic Responses JSON body.
-    pub request_json: String,
+    /// Provider-neutral conversation context for adapter wire serialisation.
+    pub request_context: AgentRequestContext,
     /// Whether this send created the durable session.
     pub created_session: bool,
 }
 
 /// Starts a send against an existing session or creates one on first valid send.
 ///
-/// For a new session, `model_id` is validated and frozen onto the durable session
-/// and first turn. For an existing session, the stored session model is used and
-/// `model_id` is ignored so later turns cannot switch models.
+/// For a new session, `provider_profile_id` and `model_id` are validated/frozen
+/// onto the durable session and first turn. For an existing session, the stored
+/// session provider and model identifiers are used and the caller-supplied
+/// `model_id` is ignored so later turns cannot switch models. Identifier strings
+/// must never include tokens, headers, or other transport secrets.
+#[allow(clippy::too_many_arguments)]
 pub fn prepare_agent_send<R>(
     repository: &R,
     session_id: Option<AgentSessionId>,
     user_text: &str,
     project_id: Option<ProjectId>,
     saved_project_instructions: &str,
+    provider_profile_id: &str,
     model_id: &str,
     source: Option<&Source>,
 ) -> Result<PreparedAgentSend, PrepareAgentSendError>
@@ -64,15 +68,27 @@ where
         return Err(PrepareAgentSendError::ProjectAssociationMismatch);
     }
 
-    let frozen_model_id = if let Some(session) = existing_session.as_ref() {
-        validate_model_id(session.model_id())
-            .map(str::to_owned)
-            .map_err(PrepareAgentSendError::ModelUnavailable)?
-    } else {
-        validate_model_id(model_id)
-            .map(str::to_owned)
-            .map_err(PrepareAgentSendError::ModelUnavailable)?
-    };
+    let (frozen_provider_profile_id, frozen_model_id) =
+        if let Some(session) = existing_session.as_ref() {
+            (
+                session.provider_profile_id().to_owned(),
+                validate_model_id(session.model_id())
+                    .map(str::to_owned)
+                    .map_err(PrepareAgentSendError::ModelUnavailable)?,
+            )
+        } else {
+            (
+                provider_profile_id.trim().to_owned(),
+                validate_model_id(model_id)
+                    .map(str::to_owned)
+                    .map_err(PrepareAgentSendError::ModelUnavailable)?,
+            )
+        };
+    if frozen_provider_profile_id.is_empty() {
+        return Err(PrepareAgentSendError::ModelUnavailable(
+            InvalidModelId::Empty,
+        ));
+    }
 
     let completed_history = if let Some(session) = existing_session.as_ref() {
         let turns = repository
@@ -87,7 +103,7 @@ where
     };
 
     let current_source = source.map(SourceContext::from);
-    let request_json = assemble_chat_completions_request_json(
+    let request_context = build_agent_request_context(
         &completed_history,
         user_text,
         if saved_project_instructions.is_empty() {
@@ -114,6 +130,7 @@ where
             project_id,
             saved_project_instructions,
             provider_request_id,
+            frozen_provider_profile_id,
             frozen_model_id,
         )
         .map_err(PrepareAgentSendError::Time)?;
@@ -136,14 +153,19 @@ where
         return Ok(PreparedAgentSend {
             session,
             turn,
-            request_json,
+            request_context,
             created_session: false,
         });
     }
 
     let title = derive_session_title(user_text);
-    let session = AgentSession::new(title, project_id, frozen_model_id.clone())
-        .map_err(PrepareAgentSendError::Time)?;
+    let session = AgentSession::new(
+        title,
+        project_id,
+        frozen_provider_profile_id.clone(),
+        frozen_model_id.clone(),
+    )
+    .map_err(PrepareAgentSendError::Time)?;
     let turn = AgentTurn::new_pending(
         session.id(),
         0,
@@ -151,6 +173,7 @@ where
         project_id,
         saved_project_instructions,
         provider_request_id,
+        frozen_provider_profile_id,
         frozen_model_id,
     )
     .map_err(PrepareAgentSendError::Time)?;
@@ -170,7 +193,7 @@ where
     Ok(PreparedAgentSend {
         session,
         turn,
-        request_json,
+        request_context,
         created_session: true,
     })
 }
@@ -659,7 +682,10 @@ mod tests {
     use std::sync::Mutex;
 
     use super::*;
-    use crate::{AgentEventId, MODEL_ID, PROVIDER_PROFILE_ID, ProviderProfile};
+    use crate::{AgentEventId, ProviderProfile};
+
+    const TEST_PROVIDER_PROFILE_ID: &str = "xai-subscription-oauth";
+    const TEST_MODEL_ID: &str = "grok-3";
 
     #[derive(Debug)]
     struct FakeError(&'static str);
@@ -1034,13 +1060,26 @@ mod tests {
     #[test]
     fn first_send_creates_session_pending_turn_and_events() {
         let repository = FakeAgentRepository::default();
-        let prepared =
-            prepare_agent_send(&repository, None, "Hello Agent", None, "", "grok-3", None)
-                .expect("prepare");
+        let prepared = prepare_agent_send(
+            &repository,
+            None,
+            "Hello Agent",
+            None,
+            "",
+            TEST_PROVIDER_PROFILE_ID,
+            TEST_MODEL_ID,
+            None,
+        )
+        .expect("prepare");
         assert!(prepared.created_session);
         assert_eq!(prepared.session.title(), "Hello Agent");
         assert_eq!(prepared.turn.state(), AgentTurnState::Pending);
-        assert!(prepared.request_json.contains("\"stream\":true"));
+        assert_eq!(
+            prepared.session.provider_profile_id(),
+            TEST_PROVIDER_PROFILE_ID
+        );
+        assert_eq!(prepared.request_context.model_id, TEST_MODEL_ID);
+        assert_eq!(prepared.request_context.current_user_text, "Hello Agent");
         let events = repository.list_events(&prepared.session.id()).unwrap();
         assert_eq!(events[0].kind(), AgentEventKind::SessionCreated);
         assert_eq!(events[1].kind(), AgentEventKind::TurnPending);
@@ -1050,17 +1089,45 @@ mod tests {
     #[test]
     fn one_inflight_turn_blocks_second_send() {
         let repository = FakeAgentRepository::default();
-        prepare_agent_send(&repository, None, "First", None, "", "grok-3", None).unwrap();
-        let error =
-            prepare_agent_send(&repository, None, "Second", None, "", "grok-3", None).unwrap_err();
+        prepare_agent_send(
+            &repository,
+            None,
+            "First",
+            None,
+            "",
+            TEST_PROVIDER_PROFILE_ID,
+            TEST_MODEL_ID,
+            None,
+        )
+        .unwrap();
+        let error = prepare_agent_send(
+            &repository,
+            None,
+            "Second",
+            None,
+            "",
+            TEST_PROVIDER_PROFILE_ID,
+            TEST_MODEL_ID,
+            None,
+        )
+        .unwrap_err();
         assert!(matches!(error, PrepareAgentSendError::SessionBusy));
     }
 
     #[test]
     fn streaming_completion_and_history_selection() {
         let repository = FakeAgentRepository::default();
-        let prepared =
-            prepare_agent_send(&repository, None, "First", None, "", "grok-3", None).unwrap();
+        let prepared = prepare_agent_send(
+            &repository,
+            None,
+            "First",
+            None,
+            "",
+            TEST_PROVIDER_PROFILE_ID,
+            TEST_MODEL_ID,
+            None,
+        )
+        .unwrap();
         let turn = apply_agent_delta(&repository, prepared.turn.id(), "Hi").unwrap();
         assert_eq!(turn.state(), AgentTurnState::Streaming);
         let completed =
@@ -1080,7 +1147,8 @@ mod tests {
             "Second",
             None,
             "",
-            "grok-3",
+            TEST_PROVIDER_PROFILE_ID,
+            TEST_MODEL_ID,
             None,
         )
         .unwrap();
@@ -1098,8 +1166,17 @@ mod tests {
     #[test]
     fn startup_interruption_marks_inflight_once() {
         let repository = FakeAgentRepository::default();
-        let prepared =
-            prepare_agent_send(&repository, None, "Hang", None, "", "grok-3", None).unwrap();
+        let prepared = prepare_agent_send(
+            &repository,
+            None,
+            "Hang",
+            None,
+            "",
+            TEST_PROVIDER_PROFILE_ID,
+            TEST_MODEL_ID,
+            None,
+        )
+        .unwrap();
         apply_agent_delta(&repository, prepared.turn.id(), "partial").unwrap();
         let interrupted = interrupt_inflight_turns(&repository).unwrap();
         assert_eq!(interrupted.len(), 1);
@@ -1111,8 +1188,17 @@ mod tests {
     #[test]
     fn prospective_project_change_records_event() {
         let repository = FakeAgentRepository::default();
-        let prepared =
-            prepare_agent_send(&repository, None, "Hello", None, "", "grok-3", None).unwrap();
+        let prepared = prepare_agent_send(
+            &repository,
+            None,
+            "Hello",
+            None,
+            "",
+            TEST_PROVIDER_PROFILE_ID,
+            TEST_MODEL_ID,
+            None,
+        )
+        .unwrap();
         complete_agent_turn(&repository, prepared.turn.id(), None, None, None).unwrap();
         let project_id = ProjectId::generate();
         let session =
@@ -1125,14 +1211,23 @@ mod tests {
                 .iter()
                 .any(|event| event.kind() == AgentEventKind::ProjectAssociationChanged)
         );
-        let _ = (PROVIDER_PROFILE_ID, MODEL_ID, AgentEventId::generate());
+        let _ = AgentEventId::generate();
     }
 
     #[test]
     fn existing_session_rejects_unconfirmed_project_context() {
         let repository = FakeAgentRepository::default();
-        let prepared =
-            prepare_agent_send(&repository, None, "Hello", None, "", "grok-3", None).unwrap();
+        let prepared = prepare_agent_send(
+            &repository,
+            None,
+            "Hello",
+            None,
+            "",
+            TEST_PROVIDER_PROFILE_ID,
+            TEST_MODEL_ID,
+            None,
+        )
+        .unwrap();
         complete_agent_turn(&repository, prepared.turn.id(), None, None, None).unwrap();
         let event_count = repository
             .list_events(&prepared.session.id())
@@ -1145,7 +1240,8 @@ mod tests {
             "Use different context",
             Some(ProjectId::generate()),
             "unconfirmed instructions",
-            "grok-3",
+            TEST_PROVIDER_PROFILE_ID,
+            TEST_MODEL_ID,
             None,
         )
         .unwrap_err();
@@ -1170,11 +1266,20 @@ mod tests {
     #[test]
     fn new_session_freezes_model_and_follow_ups_reuse_it() {
         let repository = FakeAgentRepository::default();
-        let prepared =
-            prepare_agent_send(&repository, None, "First", None, "", "other-model", None).unwrap();
+        let prepared = prepare_agent_send(
+            &repository,
+            None,
+            "First",
+            None,
+            "",
+            TEST_PROVIDER_PROFILE_ID,
+            "other-model",
+            None,
+        )
+        .unwrap();
         assert_eq!(prepared.session.model_id(), "other-model");
         assert_eq!(prepared.turn.model_id(), "other-model");
-        assert!(prepared.request_json.contains("\"model\":\"other-model\""));
+        assert_eq!(prepared.request_context.model_id, "other-model");
         complete_agent_turn(&repository, prepared.turn.id(), None, None, None).unwrap();
 
         let follow_up = prepare_agent_send(
@@ -1183,13 +1288,14 @@ mod tests {
             "Second",
             None,
             "",
+            TEST_PROVIDER_PROFILE_ID,
             "ignored-client-model",
             None,
         )
         .unwrap();
         assert_eq!(follow_up.turn.model_id(), "other-model");
-        assert!(follow_up.request_json.contains("\"model\":\"other-model\""));
-        assert!(!follow_up.request_json.contains("ignored-client-model"));
+        assert_eq!(follow_up.request_context.model_id, "other-model");
+        assert_ne!(follow_up.request_context.model_id, "ignored-client-model");
     }
 
     #[test]
@@ -1202,16 +1308,23 @@ mod tests {
             "Use this",
             None,
             "",
-            "grok-3",
+            TEST_PROVIDER_PROFILE_ID,
+            TEST_MODEL_ID,
             Some(&source),
         )
         .unwrap();
-        assert!(prepared.request_json.contains("secret marker 42"));
         assert!(
             prepared
-                .request_json
-                .contains(crate::ATTACHED_SOURCE_FRAME_VERSION)
+                .request_context
+                .current_source
+                .as_ref()
+                .is_some_and(|item| item.content.contains("secret marker 42"))
         );
+        let framed = crate::format_turn_user_content(
+            &prepared.request_context.current_user_text,
+            prepared.request_context.current_source.as_ref(),
+        );
+        assert!(framed.contains(crate::ATTACHED_SOURCE_FRAME_VERSION));
         assert_eq!(
             repository
                 .list_turn_sources(&prepared.session.id())
@@ -1228,7 +1341,8 @@ mod tests {
             "Fail next",
             None,
             "",
-            "grok-3",
+            TEST_PROVIDER_PROFILE_ID,
+            TEST_MODEL_ID,
             Some(&failed_source),
         )
         .unwrap();
@@ -1240,11 +1354,32 @@ mod tests {
             "Follow",
             None,
             "",
-            "grok-3",
+            TEST_PROVIDER_PROFILE_ID,
+            TEST_MODEL_ID,
             None,
         )
         .unwrap();
-        assert!(follow_up.request_json.contains("secret marker 42"));
-        assert!(!follow_up.request_json.contains("should not return"));
+        assert!(
+            follow_up
+                .request_context
+                .completed_history
+                .iter()
+                .any(|turn| {
+                    turn.source
+                        .as_ref()
+                        .is_some_and(|item| item.content.contains("secret marker 42"))
+                })
+        );
+        assert!(
+            follow_up
+                .request_context
+                .completed_history
+                .iter()
+                .all(|turn| {
+                    turn.source
+                        .as_ref()
+                        .is_none_or(|item| !item.content.contains("should not return"))
+                })
+        );
     }
 }

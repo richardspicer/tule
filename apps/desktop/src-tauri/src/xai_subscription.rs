@@ -23,17 +23,18 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::time::sleep;
 use tule_core::{
-    AgentRepository, CATALOG_TTL_MS, CatalogCandidate, PROVIDER_PROFILE_ID, ProviderProfile,
-    catalog_freshness, select_usable_catalog_entries,
+    AgentContextError, AgentRepository, AgentRequestContext, CATALOG_TTL_MS, CatalogCandidate,
+    MAX_CONTEXT_UTF8, ProviderProfile, catalog_freshness, format_turn_user_content,
+    select_usable_catalog_entries,
 };
 use zeroize::Zeroize;
 
 use crate::{
     credentials::{CredentialKind, CredentialStore, CredentialStoreError},
     provider::{
-        ConnectionState, ConnectionStatus, ProviderAdapter, ProviderEvent, ProviderEventSink,
-        ProviderFuture, ProviderModelCatalogResponse, ProviderRequest, PublicError,
-        build_catalog_response,
+        ConnectionState, ConnectionStatus, MODEL_ID, PROVIDER_PROFILE_ID, ProviderAdapter,
+        ProviderEvent, ProviderEventSink, ProviderFuture, ProviderModelCatalogResponse,
+        ProviderRequest, PublicError, build_catalog_response,
     },
     sqlite::{SqliteStore, StoredCatalogState},
 };
@@ -41,8 +42,8 @@ use tokio_util::sync::CancellationToken;
 
 pub(crate) type DevicePairingNotifier = Arc<dyn Fn(Option<DevicePairingResponse>) + Send + Sync>;
 
-pub(crate) const PROVIDER_ID: &str = "xai-subscription-oauth";
-pub(crate) const MODEL: &str = "grok-3";
+pub(crate) const PROVIDER_ID: &str = PROVIDER_PROFILE_ID;
+pub(crate) const MODEL: &str = MODEL_ID;
 pub(crate) const CLIENT_ID: &str = "b1a00492-073a-47ea-816f-4c329264a828";
 pub(crate) const DEVICE_CODE_URL: &str = "https://auth.x.ai/oauth2/device/code";
 pub(crate) const TOKEN_URL: &str = "https://auth.x.ai/oauth2/token";
@@ -1383,6 +1384,62 @@ async fn emit_mock_inference(
     }
 }
 
+/// Assembles the deterministic xAI chat/completions JSON body.
+///
+/// Preserves the Phase 1 streaming wire contract: `model`, system/user/assistant
+/// `messages` (system instruction included), and `stream: true`.
+pub(crate) fn assemble_chat_completions_request_json(
+    context: &AgentRequestContext,
+) -> Result<String, AgentContextError> {
+    let mut body = String::from("{\"model\":");
+    append_json_string(&mut body, &context.model_id);
+    body.push_str(",\"messages\":[{\"role\":\"system\",\"content\":");
+    append_json_string(&mut body, &context.instructions);
+    body.push('}');
+
+    for turn in &context.completed_history {
+        let framed = format_turn_user_content(&turn.user_text, turn.source.as_ref());
+        body.push_str(",{\"role\":\"user\",\"content\":");
+        append_json_string(&mut body, &framed);
+        body.push_str("},{\"role\":\"assistant\",\"content\":");
+        append_json_string(&mut body, &turn.agent_text);
+        body.push('}');
+    }
+    let current =
+        format_turn_user_content(&context.current_user_text, context.current_source.as_ref());
+    body.push_str(",{\"role\":\"user\",\"content\":");
+    append_json_string(&mut body, &current);
+    body.push_str("}],\"stream\":true}");
+
+    if body.len() > MAX_CONTEXT_UTF8 {
+        return Err(AgentContextError::ContextLimit {
+            byte_count: body.len(),
+        });
+    }
+
+    Ok(body)
+}
+
+fn append_json_string(output: &mut String, value: &str) {
+    output.push('"');
+    for ch in value.chars() {
+        match ch {
+            '"' => output.push_str("\\\""),
+            '\\' => output.push_str("\\\\"),
+            '\u{08}' => output.push_str("\\b"),
+            '\u{0c}' => output.push_str("\\f"),
+            '\n' => output.push_str("\\n"),
+            '\r' => output.push_str("\\r"),
+            '\t' => output.push_str("\\t"),
+            ch if (ch as u32) < 0x20 => {
+                output.push_str(&format!("\\u{:04x}", ch as u32));
+            }
+            ch => output.push(ch),
+        }
+    }
+    output.push('"');
+}
+
 fn build_inference_headers(access: &str) -> Result<HeaderMap, PublicError> {
     let mut headers = HeaderMap::with_capacity(4);
     let authorization = HeaderValue::from_str(&format!("Bearer {access}"))
@@ -2015,6 +2072,8 @@ mod tests {
     fn production_contract_is_pinned() {
         assert_eq!(PROVIDER_ID, "xai-subscription-oauth");
         assert_eq!(MODEL, "grok-3");
+        assert_eq!(PROVIDER_PROFILE_ID, PROVIDER_ID);
+        assert_eq!(MODEL_ID, MODEL);
         assert_eq!(CLIENT_ID, "b1a00492-073a-47ea-816f-4c329264a828");
         assert_eq!(DEVICE_CODE_URL, "https://auth.x.ai/oauth2/device/code");
         assert_eq!(TOKEN_URL, "https://auth.x.ai/oauth2/token");
@@ -2025,6 +2084,47 @@ mod tests {
             SCOPES,
             "openid profile email offline_access grok-cli:access api:access"
         );
+    }
+
+    #[test]
+    fn chat_completions_request_is_byte_for_byte_deterministic() {
+        let context = tule_core::build_agent_request_context(
+            &[tule_core::CompletedTurnContext {
+                user_text: "Hello \"world\"\n".to_owned(),
+                agent_text: "Reply\\path".to_owned(),
+                source: None,
+            }],
+            "Next message",
+            Some("Exact\ninstructions"),
+            MODEL,
+            None,
+        )
+        .unwrap();
+        let json = assemble_chat_completions_request_json(&context).unwrap();
+        let expected = format!(
+            r#"{{"model":"grok-3","messages":[{{"role":"system","content":"{}\n\nSaved Project instructions:\n---\nExact\ninstructions\n---"}},{{"role":"user","content":"Hello \"world\"\n"}},{{"role":"assistant","content":"Reply\\path"}},{{"role":"user","content":"Next message"}}],"stream":true}}"#,
+            tule_core::FIXED_INSTRUCTION
+                .replace('\\', "\\\\")
+                .replace('"', "\\\"")
+                .replace('\n', "\\n")
+        );
+        assert_eq!(json, expected);
+        assert!(!json.contains("\"store\""));
+        assert!(!json.contains("\"input\""));
+        assert!(json.contains("\"stream\":true"));
+    }
+
+    #[test]
+    fn chat_completions_includes_system_instruction_without_project_block() {
+        let context =
+            tule_core::build_agent_request_context(&[], "Hello", None, "other-model", None)
+                .unwrap();
+        let json = assemble_chat_completions_request_json(&context).unwrap();
+        assert!(!json.contains("Saved Project instructions"));
+        assert!(json.contains(tule_core::FIXED_INSTRUCTION));
+        assert!(json.contains("\"model\":\"other-model\""));
+        assert!(json.contains("\"messages\""));
+        assert!(json.contains("\"role\":\"system\""));
     }
 
     #[test]

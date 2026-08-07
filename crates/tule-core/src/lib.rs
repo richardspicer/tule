@@ -33,10 +33,10 @@ pub use agent_source::{
     validate_source_display_name,
 };
 pub use agent_use_cases::{
-    ApplyAgentDeltaError, FinishAgentTurnError, PrepareAgentSendError, PreparedAgentSend,
-    SetSessionProjectError, apply_agent_delta, cancel_agent_turn, checkpoint_agent_turn,
-    complete_agent_turn, completed_history_from_turns, fail_agent_turn, interrupt_inflight_turns,
-    prepare_agent_send, set_session_project,
+    ApplyAgentDeltaError, FinishAgentTurnError, InvalidProviderProfileId, PrepareAgentSendError,
+    PreparedAgentSend, SetSessionProjectError, apply_agent_delta, cancel_agent_turn,
+    checkpoint_agent_turn, complete_agent_turn, completed_history_from_turns, fail_agent_turn,
+    interrupt_inflight_turns, prepare_agent_send, set_session_project,
 };
 pub use artifact::{
     Artifact, ArtifactDetail, ArtifactId, ArtifactKind, ArtifactReconstructionError,

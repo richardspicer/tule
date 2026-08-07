@@ -499,6 +499,9 @@ fn map_prepare(error: tule_core::PrepareAgentSendError) -> AgentIpcError {
         tule_core::PrepareAgentSendError::SessionBusy => AgentIpcError::SessionBusy,
         tule_core::PrepareAgentSendError::SessionNotFound => AgentIpcError::InvalidInput,
         tule_core::PrepareAgentSendError::ProjectAssociationMismatch => AgentIpcError::InvalidInput,
+        tule_core::PrepareAgentSendError::ProviderProfileUnavailable(_) => {
+            AgentIpcError::InvalidInput
+        }
         tule_core::PrepareAgentSendError::ModelUnavailable(_) => AgentIpcError::ModelUnavailable,
         tule_core::PrepareAgentSendError::Time(_)
         | tule_core::PrepareAgentSendError::Repository(_) => AgentIpcError::AgentStorageUnavailable,

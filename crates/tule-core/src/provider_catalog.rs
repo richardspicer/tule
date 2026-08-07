@@ -242,8 +242,9 @@ pub fn resolve_selected_default(
         }
         return SelectedDefaultResolution::RequiresChoice;
     }
-    if model_id_in_catalog(upgrade_default_model_id, entries) {
-        SelectedDefaultResolution::Available(upgrade_default_model_id.to_owned())
+    let upgrade_default = upgrade_default_model_id.trim();
+    if !upgrade_default.is_empty() && model_id_in_catalog(upgrade_default, entries) {
+        SelectedDefaultResolution::Available(upgrade_default.to_owned())
     } else {
         SelectedDefaultResolution::RequiresChoice
     }
@@ -431,6 +432,14 @@ mod tests {
         assert_eq!(
             resolve_selected_default(Some("other-model"), &without_default, UPGRADE_DEFAULT),
             SelectedDefaultResolution::Available("other-model".to_owned())
+        );
+        assert_eq!(
+            resolve_selected_default(None, &with_default, "  grok-3  "),
+            SelectedDefaultResolution::Available(UPGRADE_DEFAULT.to_owned())
+        );
+        assert_eq!(
+            resolve_selected_default(None, &with_default, "   "),
+            SelectedDefaultResolution::RequiresChoice
         );
     }
 }

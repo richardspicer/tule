@@ -85,8 +85,8 @@ where
             )
         };
     if frozen_provider_profile_id.is_empty() {
-        return Err(PrepareAgentSendError::ModelUnavailable(
-            InvalidModelId::Empty,
+        return Err(PrepareAgentSendError::ProviderProfileUnavailable(
+            InvalidProviderProfileId::Empty,
         ));
     }
 
@@ -463,6 +463,23 @@ where
     Ok(turn)
 }
 
+/// Invalid provider-profile identifier supplied to send preparation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InvalidProviderProfileId {
+    /// Empty or whitespace-only after trim.
+    Empty,
+}
+
+impl fmt::Display for InvalidProviderProfileId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Empty => formatter.write_str("provider profile identifier is empty"),
+        }
+    }
+}
+
+impl Error for InvalidProviderProfileId {}
+
 /// Failure preparing an Agent send.
 #[derive(Debug)]
 pub enum PrepareAgentSendError {
@@ -479,6 +496,8 @@ pub enum PrepareAgentSendError {
     SessionNotFound,
     /// The requested Project differs from the session's prospective association.
     ProjectAssociationMismatch,
+    /// The provider-profile identifier is missing or invalid.
+    ProviderProfileUnavailable(InvalidProviderProfileId),
     /// The model identifier is missing, malformed, or unavailable for selection.
     ModelUnavailable(InvalidModelId),
     /// Clock failure.
@@ -520,6 +539,7 @@ impl fmt::Display for PrepareAgentSendError {
             Self::ProjectAssociationMismatch => {
                 formatter.write_str("agent session Project association does not match")
             }
+            Self::ProviderProfileUnavailable(error) => error.fmt(formatter),
             Self::ModelUnavailable(error) => error.fmt(formatter),
             Self::Time(error) => error.fmt(formatter),
             Self::Repository(error) => error.fmt(formatter),
@@ -531,6 +551,7 @@ impl Error for PrepareAgentSendError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::InvalidInput(error) => Some(error),
+            Self::ProviderProfileUnavailable(error) => Some(error),
             Self::ModelUnavailable(error) => Some(error),
             Self::Time(error) => Some(error),
             Self::Repository(error) => Some(error.as_ref()),
@@ -1112,6 +1133,27 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(error, PrepareAgentSendError::SessionBusy));
+    }
+
+    #[test]
+    fn empty_provider_profile_id_is_not_reported_as_model_unavailable() {
+        let repository = FakeAgentRepository::default();
+        let error = prepare_agent_send(
+            &repository,
+            None,
+            "Hello",
+            None,
+            "",
+            "   ",
+            TEST_MODEL_ID,
+            None,
+        )
+        .expect_err("empty provider profile");
+        assert!(matches!(
+            error,
+            PrepareAgentSendError::ProviderProfileUnavailable(InvalidProviderProfileId::Empty)
+        ));
+        assert_eq!(error.to_string(), "provider profile identifier is empty");
     }
 
     #[test]

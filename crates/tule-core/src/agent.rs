@@ -912,17 +912,14 @@ pub fn build_agent_request_context(
     validate_user_text(current_user_text).map_err(AgentContextError::InvalidInput)?;
 
     let instructions = assemble_instructions(saved_project_instructions);
-    let mut content_utf8 = instructions.len() + model_id.len() + current_user_text.len();
+    let mut content_utf8 = instructions.len();
     for turn in completed_history {
         let framed = crate::format_turn_user_content(&turn.user_text, turn.source.as_ref());
         content_utf8 = content_utf8.saturating_add(framed.len());
         content_utf8 = content_utf8.saturating_add(turn.agent_text.len());
     }
     let current = crate::format_turn_user_content(current_user_text, current_source);
-    // Replace the raw current user text already counted with the framed form.
-    content_utf8 = content_utf8
-        .saturating_sub(current_user_text.len())
-        .saturating_add(current.len());
+    content_utf8 = content_utf8.saturating_add(current.len());
 
     if content_utf8 > MAX_CONTEXT_UTF8 {
         return Err(AgentContextError::ContextLimit {

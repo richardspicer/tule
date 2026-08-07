@@ -837,6 +837,7 @@ describe("agents platform", () => {
       { ...validTurnMetricsExport, usage_input_tokens: -5 },
       { ...validTurnMetricsExport, model_id: "" },
       { ...validTurnMetricsExport, ordinal: -1 },
+      { ...validTurnMetricsExport, unexpected: "leak" },
       {
         turn_id: validTurnMetricsExport.turn_id,
         session_id: validTurnMetricsExport.session_id,

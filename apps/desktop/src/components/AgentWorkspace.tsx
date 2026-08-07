@@ -133,13 +133,14 @@ function formatTurnDurationMs(durationMs: number): string {
 function turnMetricsSummary(turn: AgentTurn): string | null {
   const parts: string[] = [];
   if (turn.finishedAtUnixMs !== null) {
-    parts.push(`Duration ${formatTurnDurationMs(turn.finishedAtUnixMs - turn.startedAtUnixMs)}`);
+    const durationMs = Math.max(0, turn.finishedAtUnixMs - turn.startedAtUnixMs);
+    parts.push(`Duration ${formatTurnDurationMs(durationMs)}`);
   }
   if (turn.usageInputTokens !== null || turn.usageOutputTokens !== null) {
     const input =
-      turn.usageInputTokens === null ? "—" : turn.usageInputTokens.toLocaleString("en-US");
+      turn.usageInputTokens === null ? "—" : turn.usageInputTokens.toLocaleString();
     const output =
-      turn.usageOutputTokens === null ? "—" : turn.usageOutputTokens.toLocaleString("en-US");
+      turn.usageOutputTokens === null ? "—" : turn.usageOutputTokens.toLocaleString();
     parts.push(`Tokens ${input} in / ${output} out`);
   }
   return parts.length === 0 ? null : parts.join(" · ");

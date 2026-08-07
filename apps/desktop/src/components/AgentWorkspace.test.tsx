@@ -336,6 +336,54 @@ describe("AgentWorkspace", () => {
     expect(onCopyMetrics).toHaveBeenCalledWith("t1");
   });
 
+  it("clamps inverted completed-turn timestamps to a non-negative duration", () => {
+    render(
+      <AgentWorkspace
+        title="Hello"
+        projectId={null}
+        projects={[]}
+        modelLabel="GPT-5.5"
+        modelOptions={[{ id: "gpt-5.5", displayName: "GPT-5.5" }]}
+        selectedModelId="gpt-5.5"
+        modelLocked={false}
+        effortAvailable={false}
+        effortValues={[]}
+        selectedEffort={null}
+        onEffortChange={() => undefined}
+        onModelChange={() => undefined}
+        turns={[
+          {
+            ...baseTurn,
+            startedAtUnixMs: 1_700_000_001_250,
+            finishedAtUnixMs: 1_700_000_000_000,
+            usageInputTokens: null,
+            usageOutputTokens: null,
+          },
+        ]}
+        events={[]}
+        draft=""
+        pendingAttachment={null}
+        connected
+        sending={false}
+        sendBlocked={false}
+        cancelRequested={false}
+        activeTurnId={null}
+        errorMessage={null}
+        onDraftChange={vi.fn()}
+        onSend={vi.fn()}
+        onCancel={vi.fn()}
+        onAttach={vi.fn()}
+        onAttachFolder={vi.fn()}
+        onAttachLink={vi.fn()}
+        onRemoveAttachment={vi.fn()}
+        onProjectChange={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("Duration 0 ms")).toBeInTheDocument();
+    expect(screen.queryByText(/Duration -/)).not.toBeInTheDocument();
+  });
+
   it("exposes attachment controls and transcript metadata accessibly", () => {
     const onAttach = vi.fn();
     const onRemoveAttachment = vi.fn();

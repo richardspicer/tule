@@ -692,7 +692,7 @@ function App() {
     nextOptimisticTurnId += 1;
     const optimisticTurn: AgentTurn = {
       id: `local-${nextOptimisticTurnId}`,
-      ordinal: turns.length + 1,
+      ordinal: turns.length,
       userText,
       agentText: "",
       state: "pending",

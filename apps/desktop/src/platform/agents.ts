@@ -244,6 +244,20 @@ const EVENT_METADATA_KEYS = [
   "sessionId",
   "turnId",
 ] as const;
+const TURN_METRICS_EXPORT_KEYS = [
+  "duration_ms",
+  "effort",
+  "finished_at_unix_ms",
+  "model_id",
+  "ordinal",
+  "provider_profile_id",
+  "session_id",
+  "started_at_unix_ms",
+  "state",
+  "turn_id",
+  "usage_input_tokens",
+  "usage_output_tokens",
+] as const;
 /** ECMAScript Date time-value maximum (ms since Unix epoch). */
 const MAX_DATE_UNIX_MS = 8_640_000_000_000_000;
 
@@ -467,6 +481,7 @@ function isAgentTurnMetricsExport(value: unknown): value is AgentTurnMetricsExpo
   }
   const record = value as Record<string, unknown>;
   return (
+    hasExactKeys(record, TURN_METRICS_EXPORT_KEYS) &&
     typeof record.turn_id === "string" &&
     isUuidV7(record.turn_id) &&
     typeof record.session_id === "string" &&

@@ -21,9 +21,10 @@ Branch names follow the `<type>/<short-kebab-case-summary>` convention in `CONTR
 
 1. Restate acceptance criteria and the Brief's Allowed changes / Done when evidence.
 2. Difficulty:
+   - Bounded correction qualifying for vault **Direct Execution** → implement and verify on Lead; no Brief, no `reviewer`. Available only for docs, comments, tests, vault notes, and config, and only when scope is settled, the change is mechanically clear, and no material surface is touched. Any Rust or TypeScript behavior change is excluded regardless of size. With no Brief there is no **Git publication** line, so commit, push, and pull request each require separate owner authorization.
    - `easy` / `medium` → delegate implementation to `implementer`
    - `hard` / ambiguous architecture → implement in this Lead chat, then still run `reviewer`
-3. Run `reviewer` on the result against the Brief and repository `AGENTS.md`.
+3. Unless step 2 routed to vault **Direct Execution**, run `reviewer` on the result against the Brief and repository `AGENTS.md`.
 4. If `REJECT` and attempt count < 3: send blockers to `implementer` (or fix on Lead if hard) and review again.
 5. If `REJECT` after 3 attempts: stop. Report remaining blockers. Do not commit, push, or open a PR.
 6. If `APPROVE`:
@@ -34,7 +35,8 @@ Branch names follow the `<type>/<short-kebab-case-summary>` convention in `CONTR
 
 ## Do not
 
-- Skip `reviewer` before treating work as ready for handoff
+- Skip `reviewer` before treating work as ready for handoff, except under vault **Direct Execution**
+- Treat vault **Direct Execution** as a reason to skip verification, or continue alone after verification fails or scope grows
 - Treat Work/Brief approval as PR authorization
 - Expand scope beyond the Brief Allowed changes
 - Put secrets, machine-local paths, or vault-private material into the public repo or PR body

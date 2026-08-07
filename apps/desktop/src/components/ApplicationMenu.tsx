@@ -84,6 +84,7 @@ export function ApplicationMenu({ open, onOpenChange, onCommand }: ApplicationMe
   const menuOpenRef = useRef(open);
   const [availability, setAvailability] = useState(closedAvailability);
   const [activeIndex, setActiveIndex] = useState(0);
+  const activeIndexRef = useRef(activeIndex);
   const flatItems = flattenItems(availability);
 
   useEffect(() => {
@@ -152,25 +153,26 @@ export function ApplicationMenu({ open, onOpenChange, onCommand }: ApplicationMe
 
       if (event.key === "ArrowDown") {
         event.preventDefault();
-        setActiveIndex((current) => (current + 1) % items.length);
+        const next = (activeIndexRef.current + 1) % items.length;
+        activeIndexRef.current = next;
+        setActiveIndex(next);
         return;
       }
 
       if (event.key === "ArrowUp") {
         event.preventDefault();
-        setActiveIndex((current) => (current - 1 + items.length) % items.length);
+        const next = (activeIndexRef.current - 1 + items.length) % items.length;
+        activeIndexRef.current = next;
+        setActiveIndex(next);
         return;
       }
 
       if (event.key === "Enter") {
         event.preventDefault();
-        setActiveIndex((current) => {
-          const item = items[current];
-          if (item !== undefined && !item.disabled) {
-            dispatchMenuCommand(item.id);
-          }
-          return current;
-        });
+        const item = items[activeIndexRef.current];
+        if (item !== undefined && !item.disabled) {
+          dispatchMenuCommand(item.id);
+        }
       }
     }
 
@@ -218,6 +220,7 @@ export function ApplicationMenu({ open, onOpenChange, onCommand }: ApplicationMe
             const target = preserved !== null && document.contains(preserved) ? preserved : null;
             editTargetRef.current = target;
             setAvailability(queryEditCommandAvailability(target));
+            activeIndexRef.current = 0;
             setActiveIndex(0);
             onOpenChange(true);
           }}
@@ -252,7 +255,10 @@ export function ApplicationMenu({ open, onOpenChange, onCommand }: ApplicationMe
                     role="menuitem"
                     disabled={item.disabled}
                     tabIndex={flatIndex === activeIndex ? 0 : -1}
-                    onMouseEnter={() => setActiveIndex(flatIndex)}
+                    onMouseEnter={() => {
+                      activeIndexRef.current = flatIndex;
+                      setActiveIndex(flatIndex);
+                    }}
                     onMouseDown={(event) => {
                       // Keep the preserved editable field focused for truthful Edit actions.
                       event.preventDefault();

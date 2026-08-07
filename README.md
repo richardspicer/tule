@@ -6,10 +6,9 @@ desktop foundation: a Tauri host, a React and TypeScript interface, and a
 Tauri-independent Rust core.
 
 The first operational slice centers on an Agent workbench: local sessions,
-optional Project context, and one experimental ChatGPT subscription
-compatibility adapter with OS-backed credentials. Tools, filesystem or process
-access, plugins, publication automation, and broader agent runtimes remain out
-of scope.
+optional Project context, and one xAI subscription OAuth adapter with
+OS-backed credentials. Tools, filesystem or process access, plugins,
+publication automation, and broader agent runtimes remain out of scope.
 
 ## Development
 

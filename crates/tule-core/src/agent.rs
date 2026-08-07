@@ -134,6 +134,63 @@ impl fmt::Display for InvalidAgentId {
 
 impl Error for InvalidAgentId {}
 
+/// Provider-neutral product Effort selection for an Agent turn.
+///
+/// Values are TULE product labels persisted for provenance. Adapters map them
+/// to provider wire parameters; this type must not name wire keys.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AgentEffort {
+    /// Lower Effort selection.
+    Low,
+    /// Medium Effort selection.
+    Medium,
+    /// Higher Effort selection.
+    High,
+}
+
+impl AgentEffort {
+    /// Returns the stable snake_case product label.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+        }
+    }
+
+    /// Parses a persisted product Effort label.
+    pub fn parse(value: &str) -> Result<Self, InvalidAgentEffort> {
+        match value {
+            "low" => Ok(Self::Low),
+            "medium" => Ok(Self::Medium),
+            "high" => Ok(Self::High),
+            _ => Err(InvalidAgentEffort::Unknown),
+        }
+    }
+}
+
+impl fmt::Display for AgentEffort {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+/// An unknown persisted Effort label.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InvalidAgentEffort {
+    /// The label is not one of the allowlisted product values.
+    Unknown,
+}
+
+impl fmt::Display for InvalidAgentEffort {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("unknown agent effort")
+    }
+}
+
+impl Error for InvalidAgentEffort {}
+
 /// Lifecycle state for one Agent turn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AgentTurnState {
@@ -478,6 +535,8 @@ pub struct AgentTurn {
     error_code: Option<String>,
     provider_profile_id: String,
     model_id: String,
+    /// Product Effort used for this turn when the control was available.
+    effort: Option<AgentEffort>,
     provider_request_id: ProviderRequestId,
     provider_response_id: Option<String>,
     usage_input_tokens: Option<u64>,
@@ -494,7 +553,8 @@ impl AgentTurn {
     ///
     /// `provider_profile_id` and `model_id` must match the frozen session identity
     /// for every turn. They are stable identifier strings only—never tokens or
-    /// transport headers.
+    /// transport headers. `effort` is the product Effort used for this send when
+    /// the host marked that control available for the frozen model.
     #[allow(clippy::too_many_arguments)]
     pub fn new_pending(
         session_id: AgentSessionId,
@@ -505,6 +565,7 @@ impl AgentTurn {
         provider_request_id: ProviderRequestId,
         provider_profile_id: impl Into<String>,
         model_id: impl Into<String>,
+        effort: Option<AgentEffort>,
     ) -> Result<Self, ProjectTimeError> {
         Ok(Self {
             id: AgentTurnId::generate(),
@@ -516,6 +577,7 @@ impl AgentTurn {
             error_code: None,
             provider_profile_id: provider_profile_id.into(),
             model_id: model_id.into(),
+            effort,
             provider_request_id,
             provider_response_id: None,
             usage_input_tokens: None,
@@ -540,6 +602,7 @@ impl AgentTurn {
         error_code: Option<impl Into<String>>,
         provider_profile_id: impl Into<String>,
         model_id: impl Into<String>,
+        effort: Option<&str>,
         provider_request_id: &str,
         provider_response_id: Option<impl Into<String>>,
         usage_input_tokens: Option<u64>,
@@ -554,6 +617,10 @@ impl AgentTurn {
             .map(ProjectId::parse)
             .transpose()
             .map_err(AgentReconstructionError::InvalidProjectId)?;
+        let effort = effort
+            .map(AgentEffort::parse)
+            .transpose()
+            .map_err(AgentReconstructionError::InvalidEffort)?;
         Ok(Self {
             id: AgentTurnId::parse(id)?,
             session_id: AgentSessionId::parse(session_id)?,
@@ -564,6 +631,7 @@ impl AgentTurn {
             error_code: error_code.map(Into::into),
             provider_profile_id: provider_profile_id.into(),
             model_id: model_id.into(),
+            effort,
             provider_request_id: ProviderRequestId::parse(provider_request_id)?,
             provider_response_id: provider_response_id.map(Into::into),
             usage_input_tokens,
@@ -628,6 +696,12 @@ impl AgentTurn {
     #[must_use]
     pub fn model_id(&self) -> &str {
         &self.model_id
+    }
+
+    /// Returns the product Effort used for this turn when available.
+    #[must_use]
+    pub const fn effort(&self) -> Option<AgentEffort> {
+        self.effort
     }
 
     /// Returns the provider-request identity.
@@ -896,6 +970,8 @@ pub struct AgentRequestContext {
     pub current_user_text: String,
     /// Optional Source attached to the current turn.
     pub current_source: Option<crate::SourceContext>,
+    /// Optional product Effort for adapter wire mapping when available.
+    pub effort: Option<AgentEffort>,
 }
 
 /// Builds provider-neutral request context and enforces the context size ceiling.
@@ -908,6 +984,7 @@ pub fn build_agent_request_context(
     saved_project_instructions: Option<&str>,
     model_id: &str,
     current_source: Option<&crate::SourceContext>,
+    effort: Option<AgentEffort>,
 ) -> Result<AgentRequestContext, AgentContextError> {
     validate_user_text(current_user_text).map_err(AgentContextError::InvalidInput)?;
 
@@ -933,6 +1010,7 @@ pub fn build_agent_request_context(
         completed_history: completed_history.to_vec(),
         current_user_text: current_user_text.to_owned(),
         current_source: current_source.cloned(),
+        effort,
     })
 }
 
@@ -1083,6 +1161,8 @@ pub enum AgentReconstructionError {
     InvalidTurnState(InvalidAgentTurnState),
     /// An event kind label is invalid.
     InvalidEventKind(InvalidAgentEventKind),
+    /// An Effort provenance label is invalid.
+    InvalidEffort(InvalidAgentEffort),
 }
 
 impl From<InvalidAgentId> for AgentReconstructionError {
@@ -1103,6 +1183,12 @@ impl From<InvalidAgentEventKind> for AgentReconstructionError {
     }
 }
 
+impl From<InvalidAgentEffort> for AgentReconstructionError {
+    fn from(error: InvalidAgentEffort) -> Self {
+        Self::InvalidEffort(error)
+    }
+}
+
 impl fmt::Display for AgentReconstructionError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -1110,6 +1196,7 @@ impl fmt::Display for AgentReconstructionError {
             Self::InvalidProjectId(error) => error.fmt(formatter),
             Self::InvalidTurnState(error) => error.fmt(formatter),
             Self::InvalidEventKind(error) => error.fmt(formatter),
+            Self::InvalidEffort(error) => error.fmt(formatter),
         }
     }
 }
@@ -1121,6 +1208,7 @@ impl Error for AgentReconstructionError {
             Self::InvalidProjectId(error) => Some(error),
             Self::InvalidTurnState(error) => Some(error),
             Self::InvalidEventKind(error) => Some(error),
+            Self::InvalidEffort(error) => Some(error),
         }
     }
 }
@@ -1187,6 +1275,7 @@ mod tests {
             Some("Exact\ninstructions"),
             "grok-3",
             None,
+            None,
         )
         .unwrap();
         assert_eq!(context.model_id, "grok-3");
@@ -1199,16 +1288,19 @@ mod tests {
         assert_eq!(context.completed_history, history);
         assert_eq!(context.current_user_text, "Next message");
         assert!(context.current_source.is_none());
+        assert!(context.effort.is_none());
         assert_eq!(PROMPT_VERSION, "tule-direct-agent-v2");
         assert!(FIXED_INSTRUCTION.contains("untrusted source snapshots"));
         // Neutral context must not embed provider wire envelopes.
         assert!(!context.instructions.contains("\"messages\""));
         assert!(!context.instructions.contains("\"stream\""));
+        assert!(!context.instructions.contains("reasoning_effort"));
     }
 
     #[test]
     fn empty_project_instructions_do_not_append_block() {
-        let context = build_agent_request_context(&[], "Hello", None, "other-model", None).unwrap();
+        let context =
+            build_agent_request_context(&[], "Hello", None, "other-model", None, None).unwrap();
         assert!(!context.instructions.contains("Saved Project instructions"));
         assert_eq!(context.instructions, FIXED_INSTRUCTION);
         assert_eq!(context.model_id, "other-model");
@@ -1231,6 +1323,7 @@ mod tests {
             Some("Project rule: prefer citations."),
             "grok-3",
             Some(&source),
+            None,
         )
         .unwrap();
         assert!(context.instructions.contains(FIXED_INSTRUCTION));
@@ -1265,8 +1358,8 @@ mod tests {
             member_count: 1,
             content: huge,
         };
-        let error =
-            build_agent_request_context(&[], "Ask", None, "grok-3", Some(&source)).unwrap_err();
+        let error = build_agent_request_context(&[], "Ask", None, "grok-3", Some(&source), None)
+            .unwrap_err();
         assert!(matches!(error, AgentContextError::ContextLimit { .. }));
     }
 

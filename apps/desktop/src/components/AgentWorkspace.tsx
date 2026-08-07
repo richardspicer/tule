@@ -14,6 +14,7 @@ import {
   formatSourceAttachmentSummary,
   getSafeAgentErrorMessageForCode,
   sourceAttachmentKindLabel,
+  type AgentEffort,
   type AgentEvent,
   type AgentEventKind,
   type AgentSourceMetadata,
@@ -22,6 +23,12 @@ import {
   type ArtifactSummary,
   type PendingSourceAttachment,
 } from "../platform/agents";
+
+const effortLabels: Record<AgentEffort, string> = {
+  low: "Low",
+  medium: "Medium",
+  high: "High",
+};
 import {
   AttachFileIcon,
   AttachFolderIcon,
@@ -56,6 +63,9 @@ interface AgentWorkspaceProps {
   modelOptions: readonly AgentModelOption[];
   selectedModelId: string | null;
   modelLocked: boolean;
+  effortAvailable: boolean;
+  effortValues: readonly AgentEffort[];
+  selectedEffort: AgentEffort | null;
   turns: readonly AgentTurn[];
   events: readonly AgentEvent[];
   artifacts?: readonly ArtifactSummary[];
@@ -78,6 +88,7 @@ interface AgentWorkspaceProps {
   onRemoveAttachment: () => void;
   onProjectChange: (projectId: string | null) => void;
   onModelChange: (modelId: string) => void;
+  onEffortChange: (effort: AgentEffort) => void;
   onSaveArtifact?: (turnId: string) => void;
   onOpenArtifact?: (artifactId: string) => void;
   onCloseArtifact?: () => void;
@@ -185,6 +196,9 @@ export function AgentWorkspace({
   modelOptions,
   selectedModelId,
   modelLocked,
+  effortAvailable,
+  effortValues,
+  selectedEffort,
   turns,
   events,
   artifacts = [],
@@ -207,12 +221,14 @@ export function AgentWorkspace({
   onRemoveAttachment,
   onProjectChange,
   onModelChange,
+  onEffortChange,
   onSaveArtifact,
   onOpenArtifact,
   onCloseArtifact,
 }: AgentWorkspaceProps) {
   const titleId = useId();
   const modelSelectId = useId();
+  const effortSelectId = useId();
   const transcriptRef = useRef<HTMLDivElement>(null);
   const composerRef = useRef<HTMLTextAreaElement>(null);
   const followRef = useRef(true);
@@ -649,6 +665,24 @@ export function AgentWorkspace({
                 </div>
               ) : null}
               <div className="composer-actions">
+                {effortAvailable && selectedEffort !== null ? (
+                  <div className="composer-effort">
+                    <label htmlFor={effortSelectId}>Effort</label>
+                    <select
+                      id={effortSelectId}
+                      aria-label="Effort"
+                      value={selectedEffort}
+                      disabled={sending || sendBlocked}
+                      onChange={(event) => onEffortChange(event.currentTarget.value as AgentEffort)}
+                    >
+                      {effortValues.map((value) => (
+                        <option key={value} value={value}>
+                          {effortLabels[value]}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                ) : null}
                 <Tooltip label={attachmentActionLabel(pendingAttachment, "file")}>
                   <button
                     className="icon-button composer-icon"

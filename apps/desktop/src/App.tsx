@@ -13,6 +13,7 @@ import {
   getAgentErrorCode,
   getAgentSession,
   getArtifact,
+  getModelRequestControls,
   getSafeAgentErrorMessage,
   listAgentSessions,
   listArtifacts,
@@ -22,11 +23,13 @@ import {
   sendAgentMessage,
   setAgentSessionProject,
   setAgentSourceDraftScope,
+  type AgentEffort,
   type AgentEvent,
   type AgentSession,
   type AgentTurn,
   type ArtifactDetail,
   type ArtifactSummary,
+  type ModelRequestControls,
   type PendingSourceAttachment,
 } from "./platform/agents";
 
@@ -145,6 +148,8 @@ function App() {
   const [catalog, setCatalog] = useState<ProviderModelCatalog | null>(null);
   const [selection, setSelection] = useState<ProviderModelSelection | null>(null);
   const [pendingModelId, setPendingModelId] = useState<string | null>(null);
+  const [requestControls, setRequestControls] = useState<ModelRequestControls | null>(null);
+  const [selectedEffort, setSelectedEffort] = useState<AgentEffort | null>(null);
 
   const activeSession = sessions.find((session) => session.id === activeSessionId) ?? null;
   const contextProjectId = activeSession?.projectId ?? pendingProjectId;
@@ -165,6 +170,55 @@ function App() {
   const connected = connectionState === "connected";
   const hasValidNewSessionModel = catalogHasModel(sessionModelId);
   const newSessionNeedsModel = !modelLocked && !hasValidNewSessionModel;
+  const controlsForModel =
+    sessionModelId !== null && requestControls?.modelId === sessionModelId ? requestControls : null;
+  const effortAvailable = controlsForModel?.effortAvailable ?? false;
+  const effortValues = controlsForModel?.effortValues ?? [];
+  const composerEffort =
+    effortAvailable && selectedEffort !== null && effortValues.includes(selectedEffort)
+      ? selectedEffort
+      : (controlsForModel?.effortDefault ?? null);
+
+  useEffect(() => {
+    if (sessionModelId === null) {
+      return;
+    }
+    let active = true;
+
+    void getModelRequestControls(sessionModelId)
+      .then((controls) => {
+        if (!active) {
+          return;
+        }
+        setRequestControls(controls);
+        setSelectedEffort((current) => {
+          if (!controls.effortAvailable) {
+            return null;
+          }
+          if (current !== null && controls.effortValues.includes(current)) {
+            return current;
+          }
+          return controls.effortDefault;
+        });
+      })
+      .catch(() => {
+        if (!active) {
+          return;
+        }
+        setRequestControls({
+          modelId: sessionModelId,
+          effortAvailable: false,
+          effortValues: [],
+          effortDefault: null,
+          speedAvailable: false,
+        });
+        setSelectedEffort(null);
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [sessionModelId]);
 
   useEffect(() => {
     let active = true;
@@ -641,6 +695,7 @@ function App() {
       agentText: "",
       state: "pending",
       errorCode: null,
+      effort: effortAvailable ? composerEffort : null,
       sources:
         attachment === null
           ? []
@@ -665,6 +720,7 @@ function App() {
         userText,
         projectId: contextProjectId,
         modelId: activeSessionId === null ? sessionModelId : null,
+        effort: effortAvailable ? composerEffort : null,
         sourceDraftHandle: attachment?.draftHandle ?? null,
         onEvent: (event) => {
           if (event.kind === "started") {
@@ -1133,6 +1189,9 @@ function App() {
               }))}
               selectedModelId={sessionModelId}
               modelLocked={modelLocked}
+              effortAvailable={effortAvailable}
+              effortValues={effortValues}
+              selectedEffort={composerEffort}
               turns={turns}
               events={events}
               artifacts={artifacts}
@@ -1162,6 +1221,7 @@ function App() {
               onRemoveAttachment={() => void handleRemoveAttachment()}
               onProjectChange={(projectId) => void handleChangePersistedProject(projectId)}
               onModelChange={setPendingModelId}
+              onEffortChange={setSelectedEffort}
               onSaveArtifact={
                 activeSessionId === null ? undefined : (turnId) => void handleSaveArtifact(turnId)
               }

@@ -3,9 +3,9 @@
 use std::{collections::HashMap, error::Error, fmt};
 
 use crate::{
-    AgentContextError, AgentEvent, AgentEventKind, AgentInputError, AgentOutputLimitError,
-    AgentRepository, AgentRequestContext, AgentSession, AgentSessionId, AgentTurn,
-    AgentTurnFinishError, AgentTurnId, AgentTurnState, CompletedTurnContext,
+    AgentContextError, AgentEffort, AgentEvent, AgentEventKind, AgentInputError,
+    AgentOutputLimitError, AgentRepository, AgentRequestContext, AgentSession, AgentSessionId,
+    AgentTurn, AgentTurnFinishError, AgentTurnId, AgentTurnState, CompletedTurnContext,
     IllegalAgentTurnTransition, InvalidModelId, ProjectId, ProjectTimeError, ProviderRequestId,
     Source, SourceContext, TurnSource, build_agent_request_context, derive_session_title,
     validate_model_id, validate_user_text,
@@ -31,6 +31,11 @@ pub struct PreparedAgentSend {
 /// session provider and model identifiers are used and the caller-supplied
 /// `model_id` is ignored so later turns cannot switch models. Identifier strings
 /// must never include tokens, headers, or other transport secrets.
+///
+/// `effort_available` is host-declared adapter capability for the frozen model.
+/// When it is false, a client-supplied `effort` is rejected. When true, `effort`
+/// is the resolved product selection (user choice or adapter default) persisted
+/// on the turn and carried in neutral request context for adapter mapping.
 #[allow(clippy::too_many_arguments)]
 pub fn prepare_agent_send<R>(
     repository: &R,
@@ -41,11 +46,14 @@ pub fn prepare_agent_send<R>(
     provider_profile_id: &str,
     model_id: &str,
     source: Option<&Source>,
+    effort: Option<AgentEffort>,
+    effort_available: bool,
 ) -> Result<PreparedAgentSend, PrepareAgentSendError>
 where
     R: AgentRepository + ?Sized,
 {
     validate_user_text(user_text).map_err(PrepareAgentSendError::InvalidInput)?;
+    let resolved_effort = resolve_effort_selection(effort, effort_available)?;
     if repository
         .has_inflight_turn()
         .map_err(PrepareAgentSendError::repository)?
@@ -113,6 +121,7 @@ where
         },
         &frozen_model_id,
         current_source.as_ref(),
+        resolved_effort,
     )
     .map_err(PrepareAgentSendError::from)?;
 
@@ -132,6 +141,7 @@ where
             provider_request_id,
             frozen_provider_profile_id,
             frozen_model_id,
+            resolved_effort,
         )
         .map_err(PrepareAgentSendError::Time)?;
         session
@@ -175,6 +185,7 @@ where
         provider_request_id,
         frozen_provider_profile_id,
         frozen_model_id,
+        resolved_effort,
     )
     .map_err(PrepareAgentSendError::Time)?;
     let session_created = AgentEvent::new(session.id(), None, 0, AgentEventKind::SessionCreated)
@@ -196,6 +207,17 @@ where
         request_context,
         created_session: true,
     })
+}
+
+fn resolve_effort_selection(
+    effort: Option<AgentEffort>,
+    effort_available: bool,
+) -> Result<Option<AgentEffort>, PrepareAgentSendError> {
+    match (effort_available, effort) {
+        (false, Some(_)) => Err(PrepareAgentSendError::UnsupportedRequestControl),
+        (false, None) => Ok(None),
+        (true, value) => Ok(value),
+    }
 }
 
 /// Applies a text delta, transitioning pending→streaming on the first delta.
@@ -500,6 +522,8 @@ pub enum PrepareAgentSendError {
     ProviderProfileUnavailable(InvalidProviderProfileId),
     /// The model identifier is missing, malformed, or unavailable for selection.
     ModelUnavailable(InvalidModelId),
+    /// A request control was supplied when the host marked it unavailable.
+    UnsupportedRequestControl,
     /// Clock failure.
     Time(ProjectTimeError),
     /// Repository failure.
@@ -541,6 +565,9 @@ impl fmt::Display for PrepareAgentSendError {
             }
             Self::ProviderProfileUnavailable(error) => error.fmt(formatter),
             Self::ModelUnavailable(error) => error.fmt(formatter),
+            Self::UnsupportedRequestControl => {
+                formatter.write_str("request control is unavailable for the selected model")
+            }
             Self::Time(error) => error.fmt(formatter),
             Self::Repository(error) => error.fmt(formatter),
         }
@@ -558,7 +585,8 @@ impl Error for PrepareAgentSendError {
             Self::ContextLimit { .. }
             | Self::SessionBusy
             | Self::SessionNotFound
-            | Self::ProjectAssociationMismatch => None,
+            | Self::ProjectAssociationMismatch
+            | Self::UnsupportedRequestControl => None,
         }
     }
 }
@@ -1090,6 +1118,8 @@ mod tests {
             TEST_PROVIDER_PROFILE_ID,
             TEST_MODEL_ID,
             None,
+            None,
+            false,
         )
         .expect("prepare");
         assert!(prepared.created_session);
@@ -1119,6 +1149,8 @@ mod tests {
             TEST_PROVIDER_PROFILE_ID,
             TEST_MODEL_ID,
             None,
+            None,
+            false,
         )
         .unwrap();
         let error = prepare_agent_send(
@@ -1130,6 +1162,8 @@ mod tests {
             TEST_PROVIDER_PROFILE_ID,
             TEST_MODEL_ID,
             None,
+            None,
+            false,
         )
         .unwrap_err();
         assert!(matches!(error, PrepareAgentSendError::SessionBusy));
@@ -1147,6 +1181,8 @@ mod tests {
             "   ",
             TEST_MODEL_ID,
             None,
+            None,
+            false,
         )
         .expect_err("empty provider profile");
         assert!(matches!(
@@ -1168,6 +1204,8 @@ mod tests {
             TEST_PROVIDER_PROFILE_ID,
             TEST_MODEL_ID,
             None,
+            None,
+            false,
         )
         .unwrap();
         let turn = apply_agent_delta(&repository, prepared.turn.id(), "Hi").unwrap();
@@ -1192,6 +1230,8 @@ mod tests {
             TEST_PROVIDER_PROFILE_ID,
             TEST_MODEL_ID,
             None,
+            None,
+            false,
         )
         .unwrap();
         cancel_agent_turn(&repository, cancelled_prep.turn.id()).unwrap();
@@ -1217,6 +1257,8 @@ mod tests {
             TEST_PROVIDER_PROFILE_ID,
             TEST_MODEL_ID,
             None,
+            None,
+            false,
         )
         .unwrap();
         apply_agent_delta(&repository, prepared.turn.id(), "partial").unwrap();
@@ -1239,6 +1281,8 @@ mod tests {
             TEST_PROVIDER_PROFILE_ID,
             TEST_MODEL_ID,
             None,
+            None,
+            false,
         )
         .unwrap();
         complete_agent_turn(&repository, prepared.turn.id(), None, None, None).unwrap();
@@ -1268,6 +1312,8 @@ mod tests {
             TEST_PROVIDER_PROFILE_ID,
             TEST_MODEL_ID,
             None,
+            None,
+            false,
         )
         .unwrap();
         complete_agent_turn(&repository, prepared.turn.id(), None, None, None).unwrap();
@@ -1285,6 +1331,8 @@ mod tests {
             TEST_PROVIDER_PROFILE_ID,
             TEST_MODEL_ID,
             None,
+            None,
+            false,
         )
         .unwrap_err();
 
@@ -1317,6 +1365,8 @@ mod tests {
             TEST_PROVIDER_PROFILE_ID,
             "other-model",
             None,
+            None,
+            false,
         )
         .unwrap();
         assert_eq!(prepared.session.model_id(), "other-model");
@@ -1333,6 +1383,8 @@ mod tests {
             TEST_PROVIDER_PROFILE_ID,
             "ignored-client-model",
             None,
+            None,
+            false,
         )
         .unwrap();
         assert_eq!(follow_up.turn.model_id(), "other-model");
@@ -1353,6 +1405,8 @@ mod tests {
             TEST_PROVIDER_PROFILE_ID,
             TEST_MODEL_ID,
             Some(&source),
+            None,
+            false,
         )
         .unwrap();
         assert!(
@@ -1386,6 +1440,8 @@ mod tests {
             TEST_PROVIDER_PROFILE_ID,
             TEST_MODEL_ID,
             Some(&failed_source),
+            None,
+            false,
         )
         .unwrap();
         fail_agent_turn(&repository, failed.turn.id(), "provider_unavailable").unwrap();
@@ -1399,6 +1455,8 @@ mod tests {
             TEST_PROVIDER_PROFILE_ID,
             TEST_MODEL_ID,
             None,
+            None,
+            false,
         )
         .unwrap();
         assert!(
@@ -1423,5 +1481,86 @@ mod tests {
                         .is_none_or(|item| !item.content.contains("should not return"))
                 })
         );
+    }
+
+    #[test]
+    fn effort_unavailable_rejects_client_supplied_value() {
+        let repository = FakeAgentRepository::default();
+        let error = prepare_agent_send(
+            &repository,
+            None,
+            "Hello",
+            None,
+            "",
+            TEST_PROVIDER_PROFILE_ID,
+            TEST_MODEL_ID,
+            None,
+            Some(AgentEffort::High),
+            false,
+        )
+        .expect_err("unsupported effort");
+        assert!(matches!(
+            error,
+            PrepareAgentSendError::UnsupportedRequestControl
+        ));
+        assert!(repository.list_sessions().unwrap().is_empty());
+    }
+
+    #[test]
+    fn effort_available_persists_selection_and_context() {
+        let repository = FakeAgentRepository::default();
+        let prepared = prepare_agent_send(
+            &repository,
+            None,
+            "Hello",
+            None,
+            "",
+            TEST_PROVIDER_PROFILE_ID,
+            "grok-4.5",
+            None,
+            Some(AgentEffort::Medium),
+            true,
+        )
+        .expect("prepare");
+        assert_eq!(prepared.turn.effort(), Some(AgentEffort::Medium));
+        assert_eq!(prepared.request_context.effort, Some(AgentEffort::Medium));
+        assert_eq!(prepared.session.model_id(), "grok-4.5");
+        assert!(!format!("{:?}", prepared.request_context).contains("reasoning_effort"));
+    }
+
+    #[test]
+    fn effort_may_change_between_turns_while_model_stays_frozen() {
+        let repository = FakeAgentRepository::default();
+        let prepared = prepare_agent_send(
+            &repository,
+            None,
+            "First",
+            None,
+            "",
+            TEST_PROVIDER_PROFILE_ID,
+            "grok-4.5",
+            None,
+            Some(AgentEffort::Low),
+            true,
+        )
+        .unwrap();
+        complete_agent_turn(&repository, prepared.turn.id(), None, None, None).unwrap();
+        let follow_up = prepare_agent_send(
+            &repository,
+            Some(prepared.session.id()),
+            "Second",
+            None,
+            "",
+            TEST_PROVIDER_PROFILE_ID,
+            "ignored-client-model",
+            None,
+            Some(AgentEffort::High),
+            true,
+        )
+        .unwrap();
+        assert_eq!(follow_up.session.model_id(), "grok-4.5");
+        assert_eq!(follow_up.turn.model_id(), "grok-4.5");
+        assert_eq!(follow_up.turn.effort(), Some(AgentEffort::High));
+        assert_eq!(follow_up.request_context.effort, Some(AgentEffort::High));
     }
 }

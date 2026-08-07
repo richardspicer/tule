@@ -14,14 +14,14 @@ mod repository;
 mod use_cases;
 
 pub use agent::{
-    AgentContextError, AgentEvent, AgentEventId, AgentEventKind, AgentInputError,
+    AgentContextError, AgentEffort, AgentEvent, AgentEventId, AgentEventKind, AgentInputError,
     AgentOutputLimitError, AgentReconstructionError, AgentRequestContext, AgentSession,
     AgentSessionId, AgentTurn, AgentTurnFinishError, AgentTurnId, AgentTurnState,
     CHECKPOINT_BYTE_THRESHOLD, CHECKPOINT_INTERVAL_MS, CompletedTurnContext, FIXED_INSTRUCTION,
-    IllegalAgentTurnTransition, InvalidAgentEventKind, InvalidAgentId, InvalidAgentTurnState,
-    MAX_AGENT_OUTPUT_UTF8, MAX_CONTEXT_UTF8, MAX_USER_TEXT_UTF8, PROMPT_VERSION, ProviderRequestId,
-    TITLE_MAX_SCALARS, assemble_instructions, build_agent_request_context, derive_session_title,
-    should_checkpoint, validate_user_text,
+    IllegalAgentTurnTransition, InvalidAgentEffort, InvalidAgentEventKind, InvalidAgentId,
+    InvalidAgentTurnState, MAX_AGENT_OUTPUT_UTF8, MAX_CONTEXT_UTF8, MAX_USER_TEXT_UTF8,
+    PROMPT_VERSION, ProviderRequestId, TITLE_MAX_SCALARS, assemble_instructions,
+    build_agent_request_context, derive_session_title, should_checkpoint, validate_user_text,
 };
 pub use agent_repository::{AgentRepository, ProviderProfile};
 pub use agent_source::{

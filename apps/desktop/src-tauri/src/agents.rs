@@ -231,7 +231,19 @@ pub(crate) struct TurnResponse {
     agent_text: String,
     state: String,
     error_code: Option<String>,
+    /// Product Effort used for the turn when available; null when omitted.
+    effort: Option<String>,
     sources: Vec<SourceMetadataResponse>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ModelRequestControlsResponse {
+    model_id: String,
+    effort_available: bool,
+    effort_values: Vec<&'static str>,
+    effort_default: Option<&'static str>,
+    speed_available: bool,
 }
 
 fn turn_response(value: &AgentTurn, sources: &[TurnSource]) -> TurnResponse {
@@ -247,10 +259,30 @@ fn turn_response(value: &AgentTurn, sources: &[TurnSource]) -> TurnResponse {
         agent_text: value.agent_text().into(),
         state: value.state().as_str().into(),
         error_code: value.error_code().map(str::to_owned),
+        effort: value.effort().map(|effort| effort.as_str().to_owned()),
         sources: turn_sources
             .into_iter()
             .map(|item| SourceMetadataResponse::from(item.source()))
             .collect(),
+    }
+}
+
+fn model_request_controls_response(model_id: &str) -> ModelRequestControlsResponse {
+    match crate::xai_subscription::effort_capability_for_model(model_id) {
+        Some(capability) => ModelRequestControlsResponse {
+            model_id: model_id.to_owned(),
+            effort_available: true,
+            effort_values: vec!["low", "medium", "high"],
+            effort_default: Some(capability.default.as_str()),
+            speed_available: false,
+        },
+        None => ModelRequestControlsResponse {
+            model_id: model_id.to_owned(),
+            effort_available: false,
+            effort_values: Vec::new(),
+            effort_default: None,
+            speed_available: false,
+        },
     }
 }
 
@@ -503,6 +535,7 @@ fn map_prepare(error: tule_core::PrepareAgentSendError) -> AgentIpcError {
             AgentIpcError::InvalidInput
         }
         tule_core::PrepareAgentSendError::ModelUnavailable(_) => AgentIpcError::ModelUnavailable,
+        tule_core::PrepareAgentSendError::UnsupportedRequestControl => AgentIpcError::InvalidInput,
         tule_core::PrepareAgentSendError::Time(_)
         | tule_core::PrepareAgentSendError::Repository(_) => AgentIpcError::AgentStorageUnavailable,
     }
@@ -854,6 +887,17 @@ fn set_agent_source_draft_scope_inner(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+pub(crate) async fn get_model_request_controls(
+    webview: Webview,
+    model_id: String,
+) -> Result<ModelRequestControlsResponse, AgentIpcError> {
+    require_main_window(&webview)?;
+    let model_id =
+        tule_core::validate_model_id(&model_id).map_err(|_| AgentIpcError::InvalidInput)?;
+    Ok(model_request_controls_response(model_id))
+}
+
+#[tauri::command(rename_all = "camelCase")]
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn send_agent_message(
     app: AppHandle,
@@ -862,6 +906,7 @@ pub(crate) async fn send_agent_message(
     user_text: String,
     project_id: Option<String>,
     model_id: Option<String>,
+    effort: Option<String>,
     source_draft_handle: Option<String>,
     channel: Channel<AgentStreamEvent>,
     state: State<'_, AgentState>,
@@ -898,14 +943,21 @@ pub(crate) async fn send_agent_message(
         }
         _ => return Err(AgentIpcError::NotConnected),
     }
-    let frozen_model_id = if session_id.is_none() {
+    let frozen_model_id = if let Some(id) = session_id {
+        // Existing sessions ignore client-supplied model identifiers.
+        let session = store
+            .find_session(&id)
+            .map_err(|_| AgentIpcError::AgentStorageUnavailable)?
+            .ok_or(AgentIpcError::InvalidInput)?;
+        session.model_id().to_owned()
+    } else {
         let requested = model_id.ok_or(AgentIpcError::ModelUnavailable)?;
         crate::provider::validate_new_session_model(store.as_ref(), &requested)
             .map_err(AgentIpcError::from)?
-    } else {
-        // Existing sessions ignore client-supplied model identifiers.
-        String::new()
     };
+    let (effort_available, resolved_effort) =
+        crate::xai_subscription::resolve_effort_for_send(&frozen_model_id, effort.as_deref())
+            .map_err(AgentIpcError::from)?;
     let pending_source = if let Some(handle) = source_draft_handle.as_ref() {
         let send_target = state
             .source_drafts
@@ -932,6 +984,8 @@ pub(crate) async fn send_agent_message(
         crate::provider::PROVIDER_PROFILE_ID,
         &frozen_model_id,
         pending_source.as_ref(),
+        resolved_effort,
+        effort_available,
     )
     .map_err(map_prepare)?;
     let request_json = match crate::xai_subscription::assemble_chat_completions_request_json(
@@ -1315,6 +1369,8 @@ mod tests {
             crate::provider::PROVIDER_PROFILE_ID,
             "gpt-5.5",
             None,
+            None,
+            false,
         )
         .unwrap();
         tule_core::apply_agent_delta(
@@ -1365,6 +1421,8 @@ mod tests {
                 crate::provider::PROVIDER_PROFILE_ID,
                 "gpt-5.5",
                 None,
+                None,
+                false,
             )
             .is_ok()
         );
@@ -1384,6 +1442,8 @@ mod tests {
             crate::provider::PROVIDER_PROFILE_ID,
             "gpt-5.5",
             None,
+            None,
+            false,
         )
         .unwrap();
 
@@ -1421,6 +1481,8 @@ mod tests {
             crate::provider::PROVIDER_PROFILE_ID,
             "gpt-5.5",
             None,
+            None,
+            false,
         )
         .unwrap();
         tule_core::complete_agent_turn(state.store.as_ref(), prepared.turn.id(), None, None, None)
@@ -1493,6 +1555,8 @@ mod tests {
             crate::provider::PROVIDER_PROFILE_ID,
             "gpt-5.5",
             Some(&source),
+            None,
+            false,
         )
         .unwrap();
         state.source_drafts.clear_handle(&first_handle);
@@ -1601,6 +1665,8 @@ mod tests {
             crate::provider::PROVIDER_PROFILE_ID,
             "gpt-5.5",
             None,
+            None,
+            false,
         )
         .unwrap();
         tule_core::cancel_agent_turn(store.as_ref(), prepared.turn.id()).unwrap();
@@ -1635,6 +1701,8 @@ mod tests {
             crate::provider::PROVIDER_PROFILE_ID,
             "gpt-5.5",
             None,
+            None,
+            false,
         )
         .unwrap();
         let interrupted = tule_core::interrupt_inflight_turns(store.as_ref()).unwrap();
@@ -1663,6 +1731,8 @@ mod tests {
             crate::provider::PROVIDER_PROFILE_ID,
             "gpt-5.5",
             None,
+            None,
+            false,
         )
         .unwrap();
         tule_core::apply_agent_delta(store.as_ref(), prepared.turn.id(), "Saved body").unwrap();
@@ -1747,6 +1817,8 @@ mod tests {
             crate::provider::PROVIDER_PROFILE_ID,
             "gpt-5.5",
             None,
+            None,
+            false,
         )
         .unwrap();
         let token = CancellationToken::new();

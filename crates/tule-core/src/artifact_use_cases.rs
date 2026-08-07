@@ -654,6 +654,8 @@ mod tests {
             "xai-subscription-oauth",
             "grok-3",
             None,
+            None,
+            false,
         )
         .unwrap();
         apply_agent_delta(store, prepared.turn.id(), agent_text).unwrap();
@@ -698,6 +700,8 @@ mod tests {
             "xai-subscription-oauth",
             "grok-3",
             None,
+            None,
+            false,
         )
         .unwrap();
         assert!(matches!(

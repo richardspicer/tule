@@ -85,6 +85,7 @@ export function ApplicationMenu({ open, onOpenChange, onCommand }: ApplicationMe
   const [availability, setAvailability] = useState(closedAvailability);
   const [activeIndex, setActiveIndex] = useState(0);
   const activeIndexRef = useRef(activeIndex);
+  activeIndexRef.current = activeIndex;
   const flatItems = flattenItems(availability);
 
   useEffect(() => {
@@ -95,10 +96,6 @@ export function ApplicationMenu({ open, onOpenChange, onCommand }: ApplicationMe
   useEffect(() => {
     menuOpenRef.current = open;
   }, [open]);
-
-  useEffect(() => {
-    activeIndexRef.current = activeIndex;
-  }, [activeIndex]);
 
   useEffect(() => {
     function trackEditableFocus(event: FocusEvent) {

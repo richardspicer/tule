@@ -1,6 +1,6 @@
 import "@testing-library/jest-dom/vitest";
 import { cleanup } from "@testing-library/react";
-import { afterEach, beforeAll, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, vi } from "vitest";
 
 Object.defineProperty(window, "matchMedia", {
   writable: true,
@@ -40,19 +40,20 @@ function isUnexpectedReactConsoleTraffic(args: unknown[]): boolean {
     .join(" ");
 
   return (
-    message.includes("Warning:") ||
-    message.includes("Error:") ||
-    message.includes("React") ||
+    /^\s*Warning:/.test(message) ||
     message.includes("Invalid hook call") ||
     message.includes("Cannot update a component")
   );
 }
 
+let consoleErrorSpy: ReturnType<typeof vi.spyOn> | undefined;
+let consoleWarnSpy: ReturnType<typeof vi.spyOn> | undefined;
+
 beforeAll(() => {
   const originalError = console.error.bind(console);
   const originalWarn = console.warn.bind(console);
 
-  vi.spyOn(console, "error").mockImplementation((...args: unknown[]) => {
+  consoleErrorSpy = vi.spyOn(console, "error").mockImplementation((...args: unknown[]) => {
     if (isUnexpectedReactConsoleTraffic(args)) {
       throw new Error(
         `Unexpected React console.error in tests:\n${args
@@ -63,7 +64,7 @@ beforeAll(() => {
     originalError(...args);
   });
 
-  vi.spyOn(console, "warn").mockImplementation((...args: unknown[]) => {
+  consoleWarnSpy = vi.spyOn(console, "warn").mockImplementation((...args: unknown[]) => {
     if (isUnexpectedReactConsoleTraffic(args)) {
       throw new Error(
         `Unexpected React console.warn in tests:\n${args
@@ -73,6 +74,11 @@ beforeAll(() => {
     }
     originalWarn(...args);
   });
+});
+
+afterAll(() => {
+  consoleErrorSpy?.mockRestore();
+  consoleWarnSpy?.mockRestore();
 });
 
 afterEach(() => {

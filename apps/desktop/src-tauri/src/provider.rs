@@ -169,7 +169,16 @@ pub(crate) fn dispatch_harness_provider(
         }),
     );
     let runtime_result = match tokio::runtime::Handle::try_current() {
-        Ok(handle) => tokio::task::block_in_place(|| handle.block_on(future)),
+        Ok(handle) => match handle.runtime_flavor() {
+            tokio::runtime::RuntimeFlavor::MultiThread => {
+                tokio::task::block_in_place(|| handle.block_on(future))
+            }
+            // Prefer fail-closed over panicking on a current-thread runtime.
+            tokio::runtime::RuntimeFlavor::CurrentThread => {
+                return Err(PublicError::ProviderUnavailable);
+            }
+            _ => return Err(PublicError::ProviderUnavailable),
+        },
         Err(_) => {
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()

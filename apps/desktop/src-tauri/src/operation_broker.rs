@@ -6,12 +6,11 @@ use std::sync::atomic::{AtomicU8, Ordering};
 
 use tule_core::{
     CapabilityGrant, CapabilityGrantId, CapabilityType, EffectCertainty, EffectOperationResult,
-    EffectRecord, EffectRecordId, GrantActionScope, GrantEvaluation, GrantEvaluationRequest,
-    GrantResourceSelector, HarnessRunId, OP_CREATE_OR_REPLACE_V1, OP_LOCAL_READ_V1,
-    OP_NATIVE_INSPECT_V1, OP_PROVIDER_DISCLOSE_V1, PlanGraphPairBinding,
-    REGISTERED_OPERATION_SCHEMA_V1, RootLease, RunRepository, claim_effect, dispatch_effect,
-    evaluate_grant, hash_source_bytes, prepare_effect, record_denial, require_grant, settle_effect,
-    takeover_root_lease,
+    EffectRecord, EffectRecordId, GrantActionScope, GrantEvaluationRequest, GrantResourceSelector,
+    GrantUseCaseError, HarnessRunId, OP_CREATE_OR_REPLACE_V1, OP_LOCAL_READ_V1, OP_NATIVE_INSPECT_V1,
+    OP_PROVIDER_DISCLOSE_V1, PlanGraphPairBinding, REGISTERED_OPERATION_SCHEMA_V1, RootLease,
+    RunRepository, claim_effect, dispatch_effect, hash_source_bytes, prepare_effect, record_denial,
+    require_grant, settle_effect, takeover_root_lease,
 };
 
 use crate::provider::{
@@ -566,12 +565,12 @@ impl OperationBroker {
             pair,
             now_unix_ms,
         };
-        match evaluate_grant(grant, &request) {
-            GrantEvaluation::Allow => Ok(()),
-            GrantEvaluation::Deny(reason) => {
-                let _ = require_grant(self.store.as_ref(), grant, &request);
+        match require_grant(self.store.as_ref(), grant, &request) {
+            Ok(()) => Ok(()),
+            Err(GrantUseCaseError::Denied(reason)) => {
                 Err(BrokerError::GrantDenied(format!("{reason:?}")))
             }
+            Err(error) => Err(BrokerError::Storage(error.to_string())),
         }
     }
 

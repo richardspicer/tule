@@ -375,9 +375,7 @@ pub(crate) fn exact_create_or_replace(
         None
     };
 
-    let temp = unique_temp_path(&parent)?;
-    fs::write(&temp, postimage_utf8.as_bytes())
-        .map_err(|error| WindowsFsError::Io(error.to_string()))?;
+    let temp = create_exclusive_temp_file(&parent, postimage_utf8.as_bytes())?;
 
     #[cfg(test)]
     if INJECT_CHECK_TO_USE_RACE.with(|flag| flag.replace(false)) {
@@ -422,13 +420,42 @@ pub(crate) fn exact_create_or_replace(
     read_identity(&target)
 }
 
-fn unique_temp_path(parent: &Path) -> Result<PathBuf, WindowsFsError> {
-    let millis = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|error| WindowsFsError::Io(error.to_string()))?
-        .as_millis();
-    let name = format!("{TEMP_PREFIX}{millis}-{}", std::process::id());
-    Ok(parent.join(name))
+fn create_exclusive_temp_file(parent: &Path, bytes: &[u8]) -> Result<PathBuf, WindowsFsError> {
+    use std::io::Write;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static TEMP_SEQ: AtomicU64 = AtomicU64::new(1);
+
+    for attempt in 0..8 {
+        let millis = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|error| WindowsFsError::Io(error.to_string()))?
+            .as_millis();
+        let seq = TEMP_SEQ.fetch_add(1, Ordering::Relaxed);
+        let name = format!(
+            "{TEMP_PREFIX}{millis}-{}-{attempt}-{seq}",
+            std::process::id()
+        );
+        let path = parent.join(name);
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(mut file) => {
+                file.write_all(bytes)
+                    .map_err(|error| WindowsFsError::Io(error.to_string()))?;
+                file.sync_all()
+                    .map_err(|error| WindowsFsError::Io(error.to_string()))?;
+                return Ok(path);
+            }
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(WindowsFsError::Io(error.to_string())),
+        }
+    }
+    Err(WindowsFsError::Io(
+        "exhausted exclusive temporary-file create attempts".to_owned(),
+    ))
 }
 
 pub(crate) fn native_diff(preimage: &str, postimage: &str) -> NativeDiff {

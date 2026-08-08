@@ -37,6 +37,7 @@ import {
   RemoveIcon,
   SendIcon,
 } from "./icons";
+import { RunWorkspace } from "./RunWorkspace";
 import { Tooltip } from "./Tooltip";
 import { TuleWordmark } from "./TuleWordmark";
 
@@ -438,6 +439,8 @@ export function AgentWorkspace({
           ) : null}
         </div>
       </header>
+
+      <RunWorkspace modelId={selectedModelId} />
 
       {events.length === 0 ? null : (
         <details className="activity-panel">

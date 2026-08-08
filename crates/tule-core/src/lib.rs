@@ -8,9 +8,13 @@ mod agent_use_cases;
 mod artifact;
 mod artifact_repository;
 mod artifact_use_cases;
+mod capability;
 mod project;
 mod provider_catalog;
 mod repository;
+mod run;
+mod run_repository;
+mod run_use_cases;
 mod use_cases;
 
 pub use agent::{
@@ -49,6 +53,14 @@ pub use artifact_use_cases::{
     CreateArtifactFromTurnError, GetArtifactError, ListArtifactsError, create_artifact_from_turn,
     get_artifact, list_artifacts_for_session_context,
 };
+pub use capability::{
+    BOOTSTRAP_GRANT_TTL_MS, CapabilityGrant, CapabilityGrantError, CapabilityGrantId,
+    CapabilityType, DEFAULT_DISPATCH_BUDGET, GrantActionScope, GrantDenialReason, GrantEvaluation,
+    GrantEvaluationRequest, GrantResourceSelector, InvalidCapabilityType, OP_CREATE_OR_REPLACE_V1,
+    OP_LOCAL_READ_V1, OP_NATIVE_INSPECT_V1, OP_PROVIDER_DISCLOSE_V1, POST_APPROVAL_GRANT_TTL_MS,
+    PlanGraphPairBinding, REGISTERED_OPERATION_SCHEMA_V1, RegisteredOperationIdentity,
+    evaluate_grant,
+};
 pub use project::{
     InvalidProjectId, InvalidProjectName, Project, ProjectId, ProjectName,
     ProjectReconstructionError, ProjectTimeError,
@@ -60,6 +72,41 @@ pub use provider_catalog::{
     select_usable_catalog_entries, validate_model_id,
 };
 pub use repository::ProjectRepository;
+pub use run::{
+    ApprovalError, ApprovalRecord, ApprovalRecordId, BOOTSTRAP_HEADING_AFTER,
+    BOOTSTRAP_HEADING_BEFORE, BootstrapProposalError, CANONICAL_ENCODING_VERSION,
+    CONTROLLED_RELATIVE_TARGET, CapabilityEnvelope, Checkpoint, CheckpointId, Clock,
+    ComparisonInstrumentation, ContextManifest, ContextManifestId, DenialEvidence,
+    DenialEvidenceId, DisclosurePolicy, EXECUTION_POLICY_REVISION_V1, EffectCertainty, EffectError,
+    EffectJournalPhase, EffectOperationResult, EffectRecord, EffectRecordId, ExecutionPlanVersion,
+    ExecutionPlanVersionId, FakeClock, FinalWorkResult, GRAPH_SHAPE_FINGERPRINT_VERSION, GraphEdge,
+    GraphNode, GraphShapeFingerprint, HarnessRun, HarnessRunId, HarnessRunLifecycle, InvalidRunId,
+    LeaseError, MAX_RUN_CONTENT_UTF8, NATIVE_STRUCTURAL_VALIDATION_LABEL,
+    NODE_REPLACE_EXISTING_FILE_V1, NODE_VERIFY_APPROVED_POSTIMAGE_V1, NodeAttempt, NodeAttemptId,
+    RETRY_RULE_NO_AUTOMATIC, ROOT_LEASE_RENEW_INTERVAL_MS, ROOT_LEASE_TTL_MS, ReconciliationProbe,
+    ReplacementContentId, ReplacementContentInput, ResumeDecision, ResumeRevalidation, RootLease,
+    RootLeaseId, RunContentError, RunEvent, RunEventId, RunEventKind, RunGraphVersion,
+    RunGraphVersionId, SystemClock, TaskCohortAssignment, VALIDATION_RULE_NATIVE_POSTIMAGE_V1,
+    ValidationResult, ValidationResultId, append_canonical_field, derive_lifecycle,
+    evaluate_resume, hash_canonical_fields, hash_event_chain, hash_expected_diff,
+    is_quiescent_for_checkpoint, reconcile_replacement_certainty, reject_unknown_proposal_fields,
+    sha256_hex, validate_bootstrap_proposal, validate_run_content_bytes,
+};
+pub use run_repository::{
+    AcquireLeaseIntent, ClaimEffectIntent, ConsumeDispatchBudgetIntent, PersistCheckpointIntent,
+    ReconstructedRun, ReleaseLeaseIntent, RunRepository, TakeoverLeaseIntent,
+};
+pub use run_use_cases::{
+    ApproveError, CheckpointError, CompileFreezeError, CompleteError, CreateRunError,
+    EffectUseCaseError, GrantUseCaseError, LeaseUseCaseError, LifecycleUseCaseError,
+    MemoryRunRepository, MemoryRunRepositoryError, ValidationUseCaseError, acquire_root_lease,
+    approve_pair, bootstrap_local_read_ttl_ms, cancel_run, checkpoint_run, claim_effect,
+    compile_and_freeze_pair, complete_run, create_run, disclose_operation_id, dispatch_effect,
+    inspection_operation_id, issue_grant, pause_run, post_approval_grant_ttl_ms, prepare_effect,
+    reconcile_effect, record_denial, release_root_lease, replace_node_kind,
+    replacement_operation_id, require_grant, resume_run, revoke_grant, settle_effect,
+    takeover_root_lease, validate_native_structural,
+};
 pub use use_cases::{
     CreateProjectError, OpenProjectError, UpdateProjectInstructionsError, create_project,
     list_projects, open_project, update_project_instructions,

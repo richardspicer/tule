@@ -3,6 +3,7 @@
 mod agents;
 mod artifacts;
 mod provider_models;
+mod runs;
 
 use std::{
     error::Error,
@@ -51,6 +52,7 @@ const MIGRATION_SET: &[M<'static>] = &[
     )),
     M::up(include_str!("../migrations/0012_artifacts.sql")),
     M::up(include_str!("../migrations/0013_agent_turn_effort.sql")),
+    M::up(include_str!("../migrations/0014_harness_runs.sql")),
 ];
 const MIGRATIONS: Migrations<'static> = Migrations::from_slice(MIGRATION_SET);
 
@@ -365,6 +367,15 @@ pub(crate) enum SqliteStoreError {
     MalformedAgent(tule_core::AgentReconstructionError),
     MalformedSource(tule_core::SourceReconstructionError),
     MalformedArtifact(tule_core::ArtifactReconstructionError),
+    MalformedHarness(tule_core::InvalidRunId),
+    MalformedHarnessGrant(String),
+    MalformedHarnessPayload,
+    HarnessNotFound,
+    HarnessClaimLost,
+    HarnessGrantDenied,
+    HarnessNotQuiescent,
+    HarnessLeaseConflict,
+    HarnessSequenceGap { expected: i64, actual: i64 },
     LockPoisoned,
     Clock,
     Numeric,
@@ -399,6 +410,35 @@ impl fmt::Display for SqliteStoreError {
                     "stored artifact record could not be reconstructed: {error}"
                 )
             }
+            Self::MalformedHarness(error) => {
+                write!(
+                    formatter,
+                    "stored harness record could not be reconstructed: {error}"
+                )
+            }
+            Self::MalformedHarnessGrant(error) => {
+                write!(formatter, "stored harness grant is invalid: {error}")
+            }
+            Self::MalformedHarnessPayload => {
+                formatter.write_str("stored harness payload is malformed")
+            }
+            Self::HarnessNotFound => formatter.write_str("harness run record was not found"),
+            Self::HarnessClaimLost => {
+                formatter.write_str("harness effect claim lost to another claimant")
+            }
+            Self::HarnessGrantDenied => {
+                formatter.write_str("harness grant budget or validity denied")
+            }
+            Self::HarnessNotQuiescent => {
+                formatter.write_str("harness checkpoint requires quiescent effects")
+            }
+            Self::HarnessLeaseConflict => {
+                formatter.write_str("harness root lease is held by another owner")
+            }
+            Self::HarnessSequenceGap { expected, actual } => write!(
+                formatter,
+                "harness event sequence gap: expected {expected}, got {actual}"
+            ),
             Self::LockPoisoned => formatter.write_str("SQLite storage lock is poisoned"),
             Self::Clock => formatter.write_str("system clock cannot initialize provider profile"),
             Self::Numeric => formatter.write_str("stored numeric value is out of range"),
@@ -415,7 +455,18 @@ impl Error for SqliteStoreError {
             Self::MalformedAgent(error) => Some(error),
             Self::MalformedSource(error) => Some(error),
             Self::MalformedArtifact(error) => Some(error),
-            Self::LockPoisoned | Self::Clock | Self::Numeric => None,
+            Self::MalformedHarness(error) => Some(error),
+            Self::MalformedHarnessGrant(_)
+            | Self::MalformedHarnessPayload
+            | Self::HarnessNotFound
+            | Self::HarnessClaimLost
+            | Self::HarnessGrantDenied
+            | Self::HarnessNotQuiescent
+            | Self::HarnessLeaseConflict
+            | Self::HarnessSequenceGap { .. }
+            | Self::LockPoisoned
+            | Self::Clock
+            | Self::Numeric => None,
         }
     }
 }
@@ -464,7 +515,7 @@ mod tests {
             .unwrap()
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 13);
+        assert_eq!(version, 14);
         drop(repository);
 
         let reopened = open_repository(&path);
@@ -474,7 +525,7 @@ mod tests {
             .unwrap()
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 13);
+        assert_eq!(version, 14);
     }
 
     #[test]
@@ -506,7 +557,7 @@ mod tests {
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
 
-        assert_eq!(version, 13);
+        assert_eq!(version, 14);
         assert_eq!(projects.len(), 1);
         assert_eq!(projects[0].id().to_string(), id);
         assert_eq!(projects[0].name().as_str(), "Existing project");
@@ -543,7 +594,7 @@ mod tests {
             .unwrap()
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 13);
+        assert_eq!(version, 14);
     }
 
     #[test]

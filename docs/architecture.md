@@ -227,6 +227,38 @@ version after reopen. Frontend validation fails closed on unknown kinds and
 malformed artifact shapes. No new Tauri capabilities, webview CSP changes,
 credentials, provider wire changes, or filesystem export are introduced.
 
+## Harness Runs (Phase 2 native slice)
+
+Work 0022 adds a native-only consequential Harness journey that is separate from
+ordinary Agent turns. Provider-neutral Run records, capability grants, effect
+policy, and use cases live in `tule-core`. The desktop host owns a dedicated
+Harness command surface, SQLite Run repository adapter, operation broker, and
+Windows filesystem enforcement. Replacement bytes are immutable Run input, not
+an Artifact kind.
+
+Every Harness local read, provider disclosure, exact-target replacement, and
+native inspection crosses the broker with a registered operation, grant, effect
+handshake, and pair identity where required. The React webview receives only
+typed allowlisted DTOs (context preview, exact diff, linear graph summary,
+approval identity, grants, timeline, denials, checkpoint, validation, provider
+disclosure, and Final Work Result). It never receives raw filesystem paths,
+handles, SQL, credentials, or shell access. Folder selection uses the host
+dialog; canonical roots stay native.
+
+Approval Records and Capability Grants remain distinct in storage, policy, and
+interface controls (Approve / Grant / Execute). Protected validation is labelled
+exactly `native structural validation` and does not claim process-backed or
+application validation. Final Work Result always records an explicit stop before
+publication. Unknown or partial effect certainty blocks the whole Run as
+`Blocked — reconciliation required`.
+
+### Pre-containment limitation
+
+This slice proves the native brokered replacement and structural evidence path.
+It does **not** close Phase 2: Windows process containment, process-backed
+application validation, ordinary Agent provider-send migration through the
+broker, and the matched representative-task comparison remain deferred.
+
 ## Project Persistence
 
 The project model and its application operations live in `tule-core`. The core

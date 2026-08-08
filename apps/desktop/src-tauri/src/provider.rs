@@ -97,6 +97,18 @@ pub(crate) struct ProviderRequest {
     pub(crate) request_json: String,
 }
 
+/// Required identity for Harness provider disclosure. Absence is not permitted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct HarnessDisclosureAuthority {
+    pub(crate) run_id: String,
+    pub(crate) grant_id: String,
+    pub(crate) effect_id: String,
+    pub(crate) manifest_content_hash: String,
+    pub(crate) request_semantic_hash: String,
+    pub(crate) registered_operation_id: String,
+    pub(crate) registered_operation_schema: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ProviderEvent {
     Delta(String),
@@ -132,6 +144,110 @@ fn unix_now_ms() -> Result<i64, PublicError> {
         .as_millis()
         .try_into()
         .map_err(|_| PublicError::AgentStorageUnavailable)
+}
+
+/// Revalidates Harness grant/effect/manifest identity and only then crosses the provider adapter.
+pub(crate) fn dispatch_harness_provider(
+    adapter: &dyn ProviderAdapter,
+    store: &SqliteStore,
+    authority: &HarnessDisclosureAuthority,
+    request: ProviderRequest,
+) -> Result<Vec<ProviderEvent>, PublicError> {
+    revalidate_harness_disclosure(store, authority)?;
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let collected = std::sync::Arc::new(std::sync::Mutex::new(Vec::<ProviderEvent>::new()));
+    let sink_collected = std::sync::Arc::clone(&collected);
+    let future = adapter.stream(
+        request,
+        cancel,
+        Box::new(move |event| {
+            sink_collected
+                .lock()
+                .map_err(|_| PublicError::ProviderUnavailable)?
+                .push(event);
+            Ok(())
+        }),
+    );
+    let runtime_result = match tokio::runtime::Handle::try_current() {
+        Ok(handle) => match handle.runtime_flavor() {
+            tokio::runtime::RuntimeFlavor::MultiThread => {
+                tokio::task::block_in_place(|| handle.block_on(future))
+            }
+            // Prefer fail-closed over panicking on a current-thread runtime.
+            tokio::runtime::RuntimeFlavor::CurrentThread => {
+                return Err(PublicError::ProviderUnavailable);
+            }
+            _ => return Err(PublicError::ProviderUnavailable),
+        },
+        Err(_) => {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|_| PublicError::ProviderUnavailable)?;
+            runtime.block_on(future)
+        }
+    };
+    runtime_result?;
+    collected
+        .lock()
+        .map(|guard| guard.clone())
+        .map_err(|_| PublicError::ProviderUnavailable)
+}
+
+fn revalidate_harness_disclosure(
+    store: &SqliteStore,
+    authority: &HarnessDisclosureAuthority,
+) -> Result<(), PublicError> {
+    use tule_core::{
+        CapabilityType, EffectJournalPhase, OP_PROVIDER_DISCLOSE_V1,
+        REGISTERED_OPERATION_SCHEMA_V1, RunRepository,
+    };
+    if authority.registered_operation_id != OP_PROVIDER_DISCLOSE_V1
+        || authority.registered_operation_schema != REGISTERED_OPERATION_SCHEMA_V1
+    {
+        return Err(PublicError::InvalidInput);
+    }
+    let run_id =
+        tule_core::HarnessRunId::parse(&authority.run_id).map_err(|_| PublicError::InvalidInput)?;
+    let grant_id = tule_core::CapabilityGrantId::parse(&authority.grant_id)
+        .map_err(|_| PublicError::InvalidInput)?;
+    let effect_id = tule_core::EffectRecordId::parse(&authority.effect_id)
+        .map_err(|_| PublicError::InvalidInput)?;
+    let reconstructed = store
+        .reconstruct_run(&run_id)
+        .map_err(|_| PublicError::AgentStorageUnavailable)?
+        .ok_or(PublicError::InvalidInput)?;
+    let effect = reconstructed
+        .effects
+        .iter()
+        .find(|effect| effect.id() == effect_id)
+        .ok_or(PublicError::InvalidInput)?;
+    if effect.phase() != EffectJournalPhase::Dispatched {
+        return Err(PublicError::InvalidInput);
+    }
+    if effect.grant_id() != grant_id {
+        return Err(PublicError::InvalidInput);
+    }
+    if effect.operation_id() != OP_PROVIDER_DISCLOSE_V1 {
+        return Err(PublicError::InvalidInput);
+    }
+    if effect.target_hash() != authority.request_semantic_hash {
+        return Err(PublicError::InvalidInput);
+    }
+    let grant = reconstructed
+        .grants
+        .iter()
+        .find(|grant| grant.id() == grant_id)
+        .ok_or(PublicError::InvalidInput)?;
+    if grant.capability() != CapabilityType::ProviderDisclose {
+        return Err(PublicError::InvalidInput);
+    }
+    match grant.resource() {
+        tule_core::GrantResourceSelector::ContextManifestHash(hash)
+            if *hash == authority.manifest_content_hash => {}
+        _ => return Err(PublicError::InvalidInput),
+    }
+    Ok(())
 }
 
 /// Marks a persisted catalog as visibly stale for failure/recovery surfaces.
@@ -329,14 +445,12 @@ pub(crate) fn validate_new_session_model(
 }
 
 #[cfg(test)]
-#[allow(dead_code)]
 pub(crate) struct FakeProvider {
     status: ConnectionStatus,
     result: Result<Vec<ProviderEvent>, PublicError>,
 }
 
 #[cfg(test)]
-#[allow(dead_code)]
 impl FakeProvider {
     pub(crate) fn new(
         status: ConnectionStatus,
@@ -544,5 +658,109 @@ mod tests {
             validate_new_session_model(&store, "good-model").as_deref(),
             Ok("good-model")
         );
+    }
+
+    #[test]
+    fn harness_provider_dispatch_requires_dispatched_effect_and_manifest_binding() {
+        use std::sync::Arc;
+        use tule_core::{
+            CapabilityType, Clock, ContextManifest, FakeClock, GrantActionScope,
+            GrantResourceSelector, OP_PROVIDER_DISCLOSE_V1, REGISTERED_OPERATION_SCHEMA_V1,
+            claim_effect, create_run, dispatch_effect, issue_grant, prepare_effect,
+        };
+
+        let dir = tempfile_dir();
+        let store = SqliteStore::open(dir.join("harness-provider.sqlite3")).unwrap();
+        let clock = FakeClock::new(30_000);
+        let run = create_run(&store, "fixture", None, clock.unix_ms()).unwrap();
+        let manifest = ContextManifest::new("<h1>Ready</h1>", "heading", "preview").unwrap();
+        let grant = issue_grant(
+            &store,
+            run.id(),
+            CapabilityType::ProviderDisclose,
+            GrantResourceSelector::ContextManifestHash(manifest.content_hash().to_owned()),
+            GrantActionScope::Run,
+            None,
+            None,
+            "owner",
+            clock.unix_ms(),
+        )
+        .unwrap();
+        let effect = prepare_effect(
+            &store,
+            run.id(),
+            None,
+            None,
+            None,
+            OP_PROVIDER_DISCLOSE_V1,
+            manifest.request_semantic_hash(),
+            grant.id(),
+            clock.unix_ms(),
+            None,
+            None,
+        )
+        .unwrap();
+        claim_effect(&store, run.id(), effect.id(), "broker", clock.unix_ms()).unwrap();
+        let authority = HarnessDisclosureAuthority {
+            run_id: run.id().to_string(),
+            grant_id: grant.id().to_string(),
+            effect_id: effect.id().to_string(),
+            manifest_content_hash: manifest.content_hash().to_owned(),
+            request_semantic_hash: manifest.request_semantic_hash().to_owned(),
+            registered_operation_id: OP_PROVIDER_DISCLOSE_V1.to_owned(),
+            registered_operation_schema: REGISTERED_OPERATION_SCHEMA_V1.to_owned(),
+        };
+        let provider = FakeProvider::new(
+            ConnectionStatus {
+                state: ConnectionState::Connected,
+                provider_id: PROVIDER_PROFILE_ID,
+                model: MODEL_ID,
+            },
+            Ok(vec![ProviderEvent::Completed {
+                response_id: Some("r1".into()),
+                input_tokens: Some(1),
+                output_tokens: Some(1),
+            }]),
+        );
+        // Not yet dispatched — must deny before crossing the adapter.
+        assert_eq!(
+            dispatch_harness_provider(
+                &provider,
+                &store,
+                &authority,
+                ProviderRequest {
+                    session_id: run.id().to_string(),
+                    request_json: "{}".into(),
+                },
+            ),
+            Err(PublicError::InvalidInput)
+        );
+        dispatch_effect(
+            &store,
+            run.id(),
+            effect.id(),
+            grant.id(),
+            "broker",
+            clock.unix_ms(),
+        )
+        .unwrap();
+        let events = dispatch_harness_provider(
+            &provider,
+            &store,
+            &authority,
+            ProviderRequest {
+                session_id: run.id().to_string(),
+                request_json: "{}".into(),
+            },
+        )
+        .unwrap();
+        assert!(matches!(
+            events.as_slice(),
+            [ProviderEvent::Completed {
+                response_id: Some(_),
+                ..
+            }]
+        ));
+        let _ = Arc::new(store);
     }
 }

@@ -1,11 +1,14 @@
 mod agents;
 mod credentials;
+mod harness;
+mod operation_broker;
 mod preferences;
 mod projects;
 mod provider;
 mod settings_window;
 mod source_draft;
 mod sqlite;
+mod windows_fs;
 mod xai_subscription;
 
 use std::{fs, sync::Arc};
@@ -18,6 +21,13 @@ use agents::{
     set_agent_source_draft_scope,
 };
 use credentials::native_store;
+use harness::{
+    HarnessState, approve_harness_pair, bootstrap_harness_plan, cancel_harness_run,
+    create_harness_run, deny_unsupported_harness_operation, execute_harness_run, get_harness_run,
+    get_harness_run_detail, issue_harness_execution_grants, pause_harness_run,
+    pick_harness_run_root, rebind_harness_run_root, revoke_harness_grant,
+    takeover_harness_root_lease,
+};
 use preferences::{DesktopPreferenceState, get_appearance_preference, set_appearance_preference};
 use projects::{
     ProjectStorageState, create_project, list_projects, open_project, update_project_instructions,
@@ -370,6 +380,7 @@ pub fn run() {
             let provider: Arc<dyn provider::ProviderAdapter> = Arc::clone(&xai) as _;
             app.manage(ProjectStorageState::ready_shared(Arc::clone(&store)));
             app.manage(DesktopPreferenceState::ready_shared(Arc::clone(&store)));
+            app.manage(HarnessState::new(Arc::clone(&store), Arc::clone(&provider)));
             app.manage(AgentState::new(store, provider, Some(xai)));
             Ok(())
         })
@@ -379,6 +390,20 @@ pub fn run() {
             list_projects,
             open_project,
             update_project_instructions,
+            create_harness_run,
+            pick_harness_run_root,
+            rebind_harness_run_root,
+            get_harness_run,
+            get_harness_run_detail,
+            bootstrap_harness_plan,
+            approve_harness_pair,
+            issue_harness_execution_grants,
+            execute_harness_run,
+            pause_harness_run,
+            cancel_harness_run,
+            revoke_harness_grant,
+            deny_unsupported_harness_operation,
+            takeover_harness_root_lease,
             list_agent_sessions,
             get_agent_session,
             create_artifact_from_turn,

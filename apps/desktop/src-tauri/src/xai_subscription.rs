@@ -1271,6 +1271,11 @@ impl ProviderAdapter for XaiSubscriptionAdapter {
         self.connection_status_for_commit_marker(Ok(None))
     }
 
+    /// Ordinary Agent streaming path (residual Phase 2 gap). Harness provider
+    /// disclosure must call `provider::dispatch_harness_provider`, which
+    /// revalidates grant/effect/manifest identity and records durable
+    /// `dispatched` before this adapter is invoked. There is no silent
+    /// optional-authority fallback into this method for Harness Runs.
     fn stream<'a>(
         &'a self,
         request: ProviderRequest,

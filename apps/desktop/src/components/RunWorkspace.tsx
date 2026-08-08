@@ -46,14 +46,14 @@ export function RunWorkspace({ modelId }: RunWorkspaceProps) {
       const eventDelta = next.events.length - previousEventCount;
       const extras: string[] = [];
       if (denialDelta > 0) {
-        extras.push(
-          `${denialDelta} new denial${denialDelta === 1 ? "" : "s"} (see Denials below)`,
-        );
+        extras.push(`${denialDelta} new denial${denialDelta === 1 ? "" : "s"} (see Denials below)`);
       }
       if (eventDelta > 0) {
         extras.push(`${eventDelta} new timeline event${eventDelta === 1 ? "" : "s"}`);
       }
-      setStatusMessage(extras.length > 0 ? `${successMessage} — ${extras.join("; ")}` : successMessage);
+      setStatusMessage(
+        extras.length > 0 ? `${successMessage} — ${extras.join("; ")}` : successMessage,
+      );
     } catch (error) {
       setErrorMessage(getSafeHarnessErrorMessage(error));
     } finally {
@@ -73,8 +73,7 @@ export function RunWorkspace({ modelId }: RunWorkspaceProps) {
     detail?.summary.lifecycle === "blocked_reconciliation_required" ||
     detail?.summary.lifecycleLabel === BLOCKED_RECONCILIATION_LABEL;
   // Fixture acceptance must not require a connected provider/model.
-  const effectiveModelId =
-    modelId ?? (providerMode === "fixture" ? "fixture-controlled" : null);
+  const effectiveModelId = modelId ?? (providerMode === "fixture" ? "fixture-controlled" : null);
   const canPreview = detail !== null && effectiveModelId !== null;
 
   return (
